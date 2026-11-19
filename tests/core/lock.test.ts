@@ -64,4 +64,15 @@ describe('lock', () => {
     await release();
     expect(await exists(p)).toBe(true);
   });
+
+  it('a stale .takeover file (dead pid) does not block acquisition', async () => {
+    const repo = await tmp();
+    await mkdir(join(repo, '.anton'));
+    await writeFile(join(repo, '.anton', 'run.lock'), JSON.stringify({ pid: 999999, startedAt: 'x' }));
+    await writeFile(join(repo, '.anton', 'run.lock.takeover'), JSON.stringify({ pid: 999998, startedAt: 'x' }));
+    const release = await acquireLock(repo);
+    expect(await isRunning(repo)).toEqual({ running: true, pid: process.pid });
+    expect(await exists(join(repo, '.anton', 'run.lock.takeover'))).toBe(false);
+    await release();
+  });
 });

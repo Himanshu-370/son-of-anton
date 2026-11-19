@@ -1,4 +1,4 @@
-import { mkdir, link, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, link, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export class AlreadyRunning extends Error {
@@ -33,44 +33,69 @@ export async function isRunning(repo: string): Promise<{ running: boolean; pid?:
   return pid !== undefined && pidAlive(pid) ? { running: true, pid } : { running: false };
 }
 
+const MUTEX_MAX_AGE_MS = 10_000;
+
+/** Take the takeover mutex (exclusive link). Returns false if someone else holds it. */
+async function takeMutex(mutex: string, src: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await link(src, mutex);
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      const pid = await readHolder(mutex);
+      let age = 0;
+      try {
+        age = Date.now() - (await stat(mutex)).mtimeMs;
+      } catch {
+        continue; // vanished; retry
+      }
+      const stale = (pid !== undefined && !pidAlive(pid)) || age > MUTEX_MAX_AGE_MS;
+      if (!stale) return false;
+      await rm(mutex, { force: true });
+    }
+  }
+  return false;
+}
+
 export async function acquireLock(repo: string): Promise<() => Promise<void>> {
   const path = lockPath(repo);
+  const mutex = `${path}.takeover`;
   await mkdir(join(repo, '.anton'), { recursive: true });
   const uniq = `${process.pid}.${Math.random().toString(36).slice(2)}`;
   const tmp = `${path}.${uniq}`;
-  const stale = `${path}.stale.${uniq}`;
+  const mtmp = `${path}.mtx.${uniq}`;
+  let haveMutex = false;
   try {
-    await writeFile(tmp, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
-    for (let attempt = 0; ; attempt++) {
+    const body = () => JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() });
+    await writeFile(tmp, body());
+    try {
+      // link() fails with EEXIST if the lock exists, and the lock appears with full content.
+      await link(tmp, path);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      const pid = await readHolder(path);
+      if (pid !== undefined && pidAlive(pid)) throw new AlreadyRunning(pid);
+      // Dead/unparseable holder: serialize takeover so a live lock is never moved or removed.
+      await writeFile(mtmp, body());
+      haveMutex = await takeMutex(mutex, mtmp);
+      if (!haveMutex) throw new AlreadyRunning(pid ?? 0);
+      const again = await readHolder(path);
+      if (again !== undefined && pidAlive(again)) throw new AlreadyRunning(again);
+      await rm(path, { force: true });
       try {
-        // link() fails with EEXIST if the lock exists, and the lock appears with full content.
         await link(tmp, path);
-        break;
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-        const pid = await readHolder(path);
-        if (pid !== undefined && pidAlive(pid)) throw new AlreadyRunning(pid);
-        if (attempt >= 5) throw new AlreadyRunning(pid ?? 0);
-        // Atomic takeover: only one renamer can move a given file.
-        try {
-          await rename(path, stale);
-        } catch (re) {
-          if ((re as NodeJS.ErrnoException).code === 'ENOENT') continue;
-          throw re;
+      } catch (e2) {
+        if ((e2 as NodeJS.ErrnoException).code === 'EEXIST') {
+          throw new AlreadyRunning((await readHolder(path)) ?? 0);
         }
-        const moved = await readHolder(stale);
-        if (moved !== undefined && pidAlive(moved)) {
-          // We grabbed a live lock someone else just created; put it back.
-          await link(stale, path).catch(() => {});
-          throw new AlreadyRunning(moved);
-        }
-        // genuinely stale: discarded in finally, then retry link
-        await rm(stale, { force: true });
+        throw e2;
       }
     }
   } finally {
+    if (haveMutex) await rm(mutex, { force: true });
+    await rm(mtmp, { force: true });
     await rm(tmp, { force: true });
-    await rm(stale, { force: true });
   }
   return async () => {
     if ((await readHolder(path)) === process.pid) await rm(path, { force: true });
