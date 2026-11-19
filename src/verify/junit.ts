@@ -76,3 +76,8 @@ export function mapJUnit(xml: string, checks: AcceptanceCheck[]): CheckResult[] 
     return { id: c.id, status: 'pass', tests };
   });
 }
+
+/** True when the XML parses into a testsuite/testsuites root. */
+export function isValidJUnit(xml: string): boolean {
+  return parseCases(xml) !== null;
+}
