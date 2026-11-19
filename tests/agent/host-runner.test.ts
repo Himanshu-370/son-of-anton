@@ -119,6 +119,15 @@ describe('runAgent', () => {
     expect((await loadState(ctx.jobDir)).spentUsd).toBeGreaterThan(1);
   });
 
+  it('interim costs under the cap then a result over the cap returns output without killing (R4, real sequence)', async () => {
+    await setState({ budgetUsd: 1 });
+    const f = fake([L({ type: 'cost', totalUsd: 0.3 }), L({ type: 'cost', totalUsd: 0.6 }), result(1.4, { done: true })]);
+    const r = await runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() });
+    expect(r.output).toEqual({ done: true });
+    expect(f.kill).not.toHaveBeenCalled();
+    expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(1.4);
+  });
+
   it('refuses to start with no budget remaining', async () => {
     await setState({ budgetUsd: 1, spentUsd: 1 });
     const spawn = vi.fn(() => fake([result(0)]).child);

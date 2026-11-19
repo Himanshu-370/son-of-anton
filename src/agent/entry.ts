@@ -28,8 +28,10 @@
  *   USD figure. USD is reported only on result messages. Per ruling R6 we emit interim cumulative
  *   `cost` events estimated from that usage with ./pricing.ts. Usage is deduplicated by message id,
  *   because parallel tool uses share one id. When the result arrives, its `total_cost_usd` is
- *   authoritative for the result/error event. A cost event is emitted only when the total rises, so
- *   cost events never decrease: if the estimate overshot, the host has already counted the higher figure.
+ *   authoritative and is carried ONLY on the terminal result/error event (no `cost` event for the
+ *   result message, so a finished call over the cap is returned, not killed: R4). A cost event is
+ *   emitted only when the estimate rises, so cost events never decrease: if the estimate overshot,
+ *   the host has already counted the higher figure.
  * - Structured output is native, and we also validate the returned value against req.outputSchema
  *   with zod's `z.fromJSONSchema`, falling back to an "is a JSON object" check if zod can't convert
  *   the schema. If `structured_output` is absent, the final text is parsed as JSON.
@@ -147,7 +149,8 @@ export async function main(requestPath: string, deps: EntryDeps = {}): Promise<v
           emitCost(sum);
         }
       } else if (msg.type === 'result') {
-        emitCost(msg.total_cost_usd ?? 0);
+        // No `cost` event here: the result/error event carries the authoritative total, and a cost
+        // event over the cap would make the host kill a finished, paid-for call (R4).
         terminal = terminalFromResult(req, msg);
       }
     }

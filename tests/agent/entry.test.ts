@@ -61,13 +61,28 @@ describe('entry main', () => {
     });
     expect(events).toContainEqual({ type: 'log', text: 'working on it' });
     const c = costs(events);
-    expect(c).toHaveLength(3);
+    // Only interim estimates: the result's authoritative total rides on the result event (R4).
+    expect(c).toHaveLength(2);
     expect(c[0]).toBeCloseTo(0.014, 10);
     expect(c[1]).toBeCloseTo(0.023, 10);
-    expect(c[2]).toBe(0.42); // authoritative total from the result message
     const firstCost = events.findIndex((e) => e.type === 'cost');
     expect(firstCost).toBeLessThan(events.findIndex((e) => e.type === 'log' && e.text === 'step 2'));
     expect(events.at(-1)).toEqual({ type: 'result', ok: true, output: 'done', sessionId: 'sess-1', totalUsd: 0.42 });
+  });
+
+  it('emits no cost event for the result message, even when its total exceeds the estimates (R4)', async () => {
+    const { events } = await run(baseReq, async function* () {
+      yield assistant('a', 'm1', { input_tokens: 1000, output_tokens: 500 }); // 0.014
+      yield success(5);
+    });
+    expect(costs(events)).toEqual([expect.closeTo(0.014, 10)]);
+    expect(events.at(-1)).toMatchObject({ type: 'result', totalUsd: 5 });
+    // and an error result too
+    const err = await run(baseReq, async function* () {
+      yield { type: 'result', subtype: 'error_during_execution', is_error: true, session_id: 's', total_cost_usd: 3, errors: ['x'] };
+    });
+    expect(costs(err.events)).toEqual([]);
+    expect(err.events.at(-1)).toMatchObject({ type: 'error', totalUsd: 3 });
   });
 
   it('prices interim cost by the model on the assistant message (haiku)', async () => {
