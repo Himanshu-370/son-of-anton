@@ -142,6 +142,14 @@ describe('runUnattended', () => {
     expect(f.notify).toHaveBeenCalledTimes(1);
   });
 
+  it('a failing notify on success is not treated as a run error', async () => {
+    const f = fakes({ notify: async () => { throw new Error('osascript broke'); } });
+    await runUnattended('p', f.deps);
+    expect(await loadState(dir)).toMatchObject({ stage: 'awaiting_final_review' });
+    await expect(readFile(join(dir, 'logs', 'error.log'), 'utf8')).rejects.toThrow();
+    expect(await isRunning(repo)).toEqual({ running: false });
+  });
+
   it('does nothing at a waiting stage', async () => {
     await setup({ stage: 'awaiting_spec_approval' });
     const f = fakes();

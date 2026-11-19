@@ -28,6 +28,11 @@ export async function newCommand(description: string, opts: { budget?: string },
       const r = await d.runSpec(ctx, description, d.ask);
       await writeSpec(p.jobDir, r.spec);
       await saveState(p.jobDir, transition(r.state, 'awaiting_spec_approval'));
+    } catch (e) {
+      // `spec` has no paused edge, so the job can't be resumed: point at abandon + a fresh new.
+      const msg = e instanceof Error ? e.message : String(e);
+      d.err(`Spec stage failed: ${msg}. Clean up with: anton abandon ${p.name}, then run anton new again.`);
+      return 1;
     } finally {
       await d.stopContainer(container);
     }

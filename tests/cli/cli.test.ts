@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
@@ -108,11 +109,11 @@ describe('anton resume', () => {
   });
 
   it('on budget_cap with --budget raises the cap and unpauses', async () => {
-    const { dir } = await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'budget_cap', round: 1, spentUsd: 10 });
+    const { dir } = await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'budget_cap', round: 1, spentUsd: 10, warned80: true });
     const h = harness();
     expect(await resumeCommand('p', { budget: '15' }, h.deps)).toBe(0);
     const s = await loadState(dir);
-    expect(s).toMatchObject({ stage: 'build', budgetUsd: 15 });
+    expect(s).toMatchObject({ stage: 'build', budgetUsd: 15, warned80: false });
     expect(s.pauseReason).toBeUndefined();
     expect(h.spawned).toEqual(['p']);
   });
@@ -208,6 +209,38 @@ describe('anton stop', () => {
   });
 });
 
+describe('anton stop (lock cleanup)', () => {
+  const lockFile = (repo: string) => join(repo, '.anton', 'run.lock');
+  function killer(onKill?: () => void) {
+    const signals: (string | number)[] = [];
+    const kill = (_pid: number, sig: NodeJS.Signals | 0) => {
+      signals.push(sig);
+      if (sig === 'SIGKILL') onKill?.();
+      if (sig === 0 && signals.includes('SIGKILL')) throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+    };
+    return kill;
+  }
+
+  it('removes the dead run lock after stopping', async () => {
+    const { repo } = await project('p', { stage: 'build', round: 1 });
+    await writeFile(lockFile(repo), JSON.stringify({ pid: 4242 }));
+    const h = harness({ kill: killer(), sleep: async () => undefined });
+    expect(await stopCommand('p', h.deps)).toBe(0);
+    await expect(access(lockFile(repo))).rejects.toThrow();
+  });
+
+  it('leaves the lock alone if it now holds a different pid', async () => {
+    const { repo } = await project('p', { stage: 'build', round: 1 });
+    await writeFile(lockFile(repo), JSON.stringify({ pid: 4242 }));
+    const h = harness({
+      kill: killer(() => writeFileSync(lockFile(repo), JSON.stringify({ pid: 5555 }))),
+      sleep: async () => undefined,
+    });
+    expect(await stopCommand('p', h.deps)).toBe(0);
+    expect(JSON.parse(await readFile(lockFile(repo), 'utf8')).pid).toBe(5555);
+  });
+});
+
 describe('anton stop (graceful)', () => {
   it('no SIGKILL when the run exits after SIGTERM', async () => {
     const { repo } = await project('p', { stage: 'verify', round: 1 });
@@ -294,6 +327,21 @@ describe('anton new', () => {
     expect(h.text()).toContain(join(dir, 'spec.md'));
     expect(h.text()).toContain('anton approve a-habit-tracker');
     expect(h.text()).toMatch(/acceptance checks/i);
+    expect(stopped).toEqual(['anton-a-habit-tracker']);
+  });
+
+  it('spec failure → exit 1 with an abandon hint, container stopped', async () => {
+    const stopped: string[] = [];
+    const h = harness({
+      ensureImage: async () => 'img',
+      startContainer: async (slug) => `anton-${slug}`,
+      stopContainer: async (n) => { stopped.push(n); },
+      runSpec: async () => { throw new Error('agent exploded'); },
+    });
+    expect(await newCommand('a habit tracker', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain(
+      'Spec stage failed: agent exploded. Clean up with: anton abandon a-habit-tracker, then run anton new again.',
+    );
     expect(stopped).toEqual(['anton-a-habit-tracker']);
   });
 

@@ -76,7 +76,15 @@ function pauseMessage(project: string, reason: PauseReason | undefined): string 
  */
 export async function runUnattended(project: string, deps: RunnerDeps = {}): Promise<void> {
   const log = deps.log ?? ((l: string) => console.log(`[${new Date().toISOString()}] ${l}`));
-  const notify = deps.notify ?? ((t: string, m: string) => defaultNotify(t, m));
+  const rawNotify = deps.notify ?? ((t: string, m: string) => defaultNotify(t, m));
+  /** Notifications are best-effort: a failure must never turn into a run error. */
+  const notify = async (t: string, m: string): Promise<void> => {
+    try {
+      await rawNotify(t, m);
+    } catch (e) {
+      log(`notify failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
   const stopContainer = deps.stopContainer ?? ((n: string) => dockerStopContainer(n));
   const startContainer = deps.startContainer ?? ((s: string, r: string) => startOrReuseContainer(s, r));
   const kit = deps.kit ?? fallbackKit;

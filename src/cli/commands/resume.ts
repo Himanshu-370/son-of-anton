@@ -38,7 +38,8 @@ export async function resumeCommand(
         d.err(`--budget must be more than the ${usd(state.spentUsd)} already spent`);
         return 1;
       }
-      state = { ...state, budgetUsd: budget };
+      // A raised cap restarts the 80% warning.
+      state = { ...state, budgetUsd: budget, warned80: false };
     }
     if (paused) state = opts.acceptAsIs ? transition(state, 'deliver') : unpause(state);
 

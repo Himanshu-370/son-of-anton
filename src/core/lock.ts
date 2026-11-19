@@ -33,6 +33,11 @@ export async function lockHolder(repo: string): Promise<number | undefined> {
   return readHolder(lockPath(repo));
 }
 
+/** Remove the run lock only if it still records `pid` (e.g. after that process was killed). */
+export async function removeLockIfHeldBy(repo: string, pid: number): Promise<void> {
+  if ((await readHolder(lockPath(repo))) === pid) await rm(lockPath(repo), { force: true });
+}
+
 export async function isRunning(repo: string): Promise<{ running: boolean; pid?: number }> {
   const pid = await readHolder(lockPath(repo));
   return pid !== undefined && pidAlive(pid) ? { running: true, pid } : { running: false };
