@@ -126,7 +126,7 @@ export async function runVerify(
     const signature = failureSignature(failures);
     if (s.round >= s.maxRounds) state = pause(state, 'round_cap');
     else if (signature === s.lastFailureSignature) state = pause(state, 'no_progress');
-    else state = transition(state, 'build', { round: s.round + 1, lastFailureSignature: signature });
+    else state = transition(state, 'build', { round: s.round + 1, lastFailureSignature: signature, completedFixAreas: [] });
   }
   await saveState(ctx.jobDir, state);
   return { state, passed, results, runOk, failureReport: report, failures };

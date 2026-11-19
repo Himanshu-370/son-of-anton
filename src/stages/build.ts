@@ -2,7 +2,8 @@ import * as fsp from 'node:fs/promises';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
 import { remainingUsd } from '../core/budget.js';
-import { ROLE_MODELS, type Area } from '../core/config.js';
+import { z } from 'zod';
+import { AREA_ORDER, ROLE_MODELS, type Area } from '../core/config.js';
 import { commitAll as defaultCommitAll } from '../core/git.js';
 import { saveState, transition, type JobState } from '../core/state.js';
 import { trimOutput } from '../core/trim.js';
@@ -10,6 +11,7 @@ import { orderTasks, readHandoffs } from './handoffs.js';
 import { loadPrompt } from './prompts.js';
 import type { Plan } from './plan.js';
 import type { SpecDoc } from './spec.js';
+import { failuresPath, renderFailureReport, type FailureItem } from './qa.js';
 import { failureReportPath } from './verify.js';
 
 export type BuildDeps = {
@@ -80,20 +82,54 @@ function taskPrompt(
   ].join('\n');
 }
 
-function fixPrompt(ctx: StageCtx, spec: SpecDoc, plan: Plan, failureReport: string): string {
+function fixPrompt(
+  ctx: StageCtx,
+  plan: Plan,
+  area: Area,
+  failureText: string,
+  handoffs: { area: Area; text: string }[],
+  spec: SpecDoc,
+): string {
+  const extra: string[] = [];
+  if (plan.contract?.trim()) extra.push('## Contract', '', plan.contract.trim(), '');
+  if (handoffs.length) {
+    extra.push('## Handoff notes from developers', '');
+    for (const h of handoffs) extra.push(`### ${h.area}`, '', trimOutput(h.text), '');
+  }
   return [
     context(ctx, spec, plan),
     '',
-    `## Fix round ${ctx.state.round}`,
+    ...extra,
+    `## Fix round ${ctx.state.round} (${area})`,
     '',
-    'All plan tasks have been built, but verification failed. Fix the failures below so every acceptance check passes.',
+    `All plan tasks have been built, but verification failed. Fix the ${area} failures below so every acceptance check passes.`,
     '',
-    '### Failure report',
+    '### Failures',
     '',
-    trimOutput(failureReport),
+    trimOutput(failureText),
     '',
-    'Run the failing checks\' tests and the full test command before finishing.',
+    `Full failure report: /workspace/.anton/jobs/${ctx.state.jobId}/evidence/failure-report.md (read it with your tools if you need check details)`,
+    '',
+    "Run the failing checks' tests and the full test command before finishing.",
   ].join('\n');
+}
+
+const FailureItemsSchema = z.array(
+  z.object({
+    area: z.enum(['frontend', 'backend', 'infra']),
+    kind: z.enum(['check', 'run', 'review', 'security']),
+    id: z.string(),
+    text: z.string(),
+  }),
+);
+
+async function readFailureItems(jobDir: string): Promise<FailureItem[] | undefined> {
+  try {
+    return FailureItemsSchema.parse(JSON.parse(await fsp.readFile(failuresPath(jobDir), 'utf8')));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw e;
+  }
 }
 
 async function readPersistedReport(jobDir: string): Promise<string | undefined> {
@@ -139,13 +175,40 @@ export async function runBuild(
     state = (await run({ ...ctx, state }, req)).state;
   };
 
-  if (failureReport === undefined && plan.tasks.every((t) => state.completedTasks.includes(t.id))) {
-    failureReport = await readPersistedReport(ctx.jobDir);
+  const allDone = plan.tasks.every((t) => state.completedTasks.includes(t.id));
+  // Area -> text of the failures that area must fix; undefined means normal (task) mode.
+  let fixes: Map<Area, string> | undefined;
+  const planAreas = AREA_ORDER.filter((a) => plan.tasks.some((t) => t.area === a));
+  const everyArea = (text: string) => new Map<Area, string>(planAreas.map((a) => [a, text]));
+  if (failureReport !== undefined) {
+    fixes = everyArea(failureReport);
+  } else if (allDone) {
+    const items = await readFailureItems(ctx.jobDir);
+    if (items?.length) {
+      // P2-R4: route each item to its stated area, even when the plan has no tasks there.
+      fixes = new Map();
+      for (const area of AREA_ORDER) {
+        const mine = items.filter((i) => i.area === area);
+        if (mine.length) fixes.set(area, renderFailureReport(mine, ''));
+      }
+    } else {
+      // P2-R1: no failures.json, but a persisted markdown report: every plan area gets it.
+      const report = await readPersistedReport(ctx.jobDir);
+      if (report !== undefined) fixes = everyArea(report);
+    }
   }
 
-  if (failureReport !== undefined) {
-    await session(fixPrompt({ ...ctx, state }, spec, plan, failureReport), 'backend');
-    await commit(ctx.repo, `fix: round ${state.round}`);
+  if (fixes) {
+    // completedFixAreas is reset by verify (new build round) and by reject, so it only ever
+    // holds areas finished in the current fix round.
+    for (const [area, text] of fixes) {
+      if (state.completedFixAreas?.includes(area)) continue;
+      const handoffs = await readHandoffs(ctx.jobDir);
+      await session(fixPrompt({ ...ctx, state }, plan, area, text, handoffs, spec), area);
+      await commit(ctx.repo, `fix: round ${state.round} (${area})`);
+      state = { ...state, completedFixAreas: [...(state.completedFixAreas ?? []), area] };
+      await saveState(ctx.jobDir, state);
+    }
   } else {
     const ordered = orderTasks(plan);
     for (const task of ordered) {

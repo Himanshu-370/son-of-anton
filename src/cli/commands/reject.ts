@@ -1,7 +1,10 @@
-import { readdir } from 'node:fs/promises';
+import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../../core/atomic.js';
 import { saveState, transition } from '../../core/state.js';
+import { AREA_ORDER } from '../../core/config.js';
+import { PlanSchema } from '../../stages/plan.js';
+import { failuresPath, type FailureItem } from '../../stages/qa.js';
 import { failureReportPath } from '../../stages/verify.js';
 import { guard, resolveDeps, resolveJob, UsageError, type CliDeps } from '../deps.js';
 import { preflightOr2, refuseIfRunning } from './shared.js';
@@ -35,7 +38,25 @@ export async function rejectCommand(project: string, opts: { notes: string }, de
       failureReportPath(job.jobDir),
       `### Rejected at final review\n\nThe reviewer rejected the delivery. Address these notes:\n\n${notes}\n`,
     );
-    const next = transition(job.state, 'build', { round: 1 });
+    // Fan the notes out to every area in the plan (one review item each); without a readable plan the
+    // markdown report above is all there is, and build routes it to every area (P2-R1).
+    let plan: ReturnType<typeof PlanSchema.parse> | undefined;
+    try {
+      plan = PlanSchema.parse(JSON.parse(await readFile(join(job.jobDir, 'plan.json'), 'utf8')));
+    } catch {
+      plan = undefined;
+    }
+    if (plan) {
+      const p = plan;
+      const items: FailureItem[] = AREA_ORDER.filter((a) => p.tasks.some((t) => t.area === a)).map((area) => ({
+        area,
+        kind: 'review',
+        id: `NOTES-${n}`,
+        text: notes,
+      }));
+      await writeFileAtomic(failuresPath(job.jobDir), JSON.stringify(items, null, 2) + '\n');
+    }
+    const next = transition(job.state, 'build', { round: 1, completedFixAreas: [] });
     // A fresh review cycle: an old signature must not trigger a false no_progress.
     delete next.lastFailureSignature;
     await saveState(job.jobDir, next);

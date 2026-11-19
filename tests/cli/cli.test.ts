@@ -19,6 +19,7 @@ import { abandonCommand } from '../../src/cli/commands/abandon.js';
 import { logsCommand } from '../../src/cli/commands/logs.js';
 import type { SpecDoc } from '../../src/stages/spec.js';
 import { failureReportPath } from '../../src/stages/verify.js';
+import { failuresPath } from '../../src/stages/qa.js';
 
 const DEAD_PID = 999_999;
 
@@ -153,6 +154,23 @@ describe('anton reject', () => {
     expect(await readFile(join(dir, 'notes-round-1.md'), 'utf8')).toContain('make it blue');
     expect(await readFile(failureReportPath(dir), 'utf8')).toContain('make it blue');
     expect(h.spawned).toEqual(['p']);
+  });
+
+  it('reject notes fan out to every plan area', async () => {
+    const { dir } = await project('p', { stage: 'awaiting_final_review', round: 2, completedFixAreas: ['backend'] });
+    const t = (id: string, area: string) => ({ id, title: id, acceptanceChecks: [], instructions: 'x', area });
+    await writeFile(join(dir, 'plan.json'), JSON.stringify({
+      commands: { install: 'i', test: 't' },
+      tasks: [t('T1', 'frontend'), t('T2', 'backend'), t('T3', 'backend')],
+    }));
+    const h = harness();
+    expect(await rejectCommand('p', { notes: 'make it blue' }, h.deps)).toBe(0);
+    expect(JSON.parse(await readFile(failuresPath(dir), 'utf8'))).toEqual([
+      { area: 'backend', kind: 'review', id: 'NOTES-1', text: 'make it blue' },
+      { area: 'frontend', kind: 'review', id: 'NOTES-1', text: 'make it blue' },
+    ]);
+    expect(await readFile(join(dir, 'notes-round-1.md'), 'utf8')).toContain('make it blue');
+    expect((await loadState(dir)).completedFixAreas).toEqual([]);
   });
 
   it('while the previous runner is still finishing (live lock) → exit 1 "still finishing", nothing changed', async () => {

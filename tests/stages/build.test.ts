@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BudgetExceeded, type StageCtx } from '../../src/agent/host-runner.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
-import { loadState, type JobState } from '../../src/core/state.js';
+import { loadState, saveState, type JobState } from '../../src/core/state.js';
+import { failuresPath, type FailureItem } from '../../src/stages/qa.js';
 import { runBuild } from '../../src/stages/build.js';
 import { loadPrompt } from '../../src/stages/prompts.js';
 import type { Plan } from '../../src/stages/plan.js';
@@ -94,7 +95,7 @@ describe('runBuild', () => {
     expect(p).toContain('line 299');
     expect(f.reqs[0]!.resumeSessionId).toBeUndefined();
     expect(f.commitAll).toHaveBeenCalledTimes(1);
-    expect(f.commitAll).toHaveBeenCalledWith('/r', 'fix: round 2');
+    expect(f.commitAll).toHaveBeenCalledWith('/r', 'fix: round 2 (backend)');
     expect(f.reqs.every((r) => r.systemPromptMode === 'append')).toBe(true);
     expect(state.stage).toBe('verify');
   });
@@ -107,7 +108,7 @@ describe('runBuild', () => {
     const state = await runBuild(ctx, spec, plan, undefined, f.deps);
     expect(f.reqs).toHaveLength(1);
     expect(f.reqs[0]!.prompt).toContain('### AC-1 — persisted failure');
-    expect(f.commitAll).toHaveBeenCalledWith('/r', 'fix: round 2');
+    expect(f.commitAll).toHaveBeenCalledWith('/r', 'fix: round 2 (backend)');
     expect(state.stage).toBe('verify');
   });
 
@@ -182,6 +183,96 @@ describe('runBuild', () => {
 
     it('role-infra prompt forbids deploying', async () => {
       expect(await loadPrompt('role-infra.md')).toMatch(/never deploy/i);
+    });
+  });
+
+  describe('area-routed fix rounds', () => {
+    const multi: Plan = {
+      commands: { install: 'i', test: 't' },
+      contract: 'POST /api/sum returns {total}',
+      tasks: [
+        { id: 'T1', title: 'ui', acceptanceChecks: ['AC-1'], instructions: 'build ui', area: 'frontend' },
+        { id: 'T2', title: 'api', acceptanceChecks: ['AC-1'], instructions: 'build api', area: 'backend' },
+      ],
+    };
+    const items: FailureItem[] = [
+      { area: 'frontend', kind: 'check', id: 'AC-1:failing', text: 'FRONT-ONLY button broken' },
+      { area: 'backend', kind: 'check', id: 'AC-1:failing', text: 'BACK-ONLY endpoint 500' },
+      { area: 'backend', kind: 'security', id: 'S-1', text: 'BACK-SEC injection' },
+    ];
+    async function setup(over: Partial<JobState> = {}) {
+      ctx.state = baseState({ round: 2, completedTasks: ['T1', 'T2'], ...over });
+      await saveState(ctx.jobDir, ctx.state);
+      await mkdir(join(ctx.jobDir, 'evidence'), { recursive: true });
+      await writeFile(failuresPath(ctx.jobDir), JSON.stringify(items));
+      await writeFile(join(ctx.jobDir, 'evidence', 'failure-report.md'), 'WHOLE REPORT MARKER');
+    }
+
+    it('fix round runs backend then frontend sessions only, each with only its items', async () => {
+      await setup();
+      const f = fakes();
+      const state = await runBuild(ctx, spec, multi, undefined, f.deps);
+      expect(f.reqs.map((r) => r.role)).toEqual(['backend', 'frontend']);
+      const [be, fe] = f.reqs.map((r) => r.prompt);
+      expect(be).toContain('BACK-ONLY endpoint 500');
+      expect(be).toContain('BACK-SEC injection');
+      expect(be).not.toContain('FRONT-ONLY');
+      expect(fe).toContain('FRONT-ONLY button broken');
+      expect(fe).not.toContain('BACK-ONLY');
+      for (const p of [be, fe]) {
+        expect(p).toContain('POST /api/sum returns {total}');
+        expect(p).toContain('/workspace/.anton/jobs/j1/evidence/failure-report.md');
+        expect(p).not.toContain('WHOLE REPORT MARKER');
+      }
+      expect(state.stage).toBe('verify');
+    });
+
+    it('commit message per area', async () => {
+      await setup();
+      const f = fakes();
+      await runBuild(ctx, spec, multi, undefined, f.deps);
+      expect(f.commitAll.mock.calls).toEqual([['/r', 'fix: round 2 (backend)'], ['/r', 'fix: round 2 (frontend)']]);
+    });
+
+    it('routes an item to its area even when the plan has no tasks there', async () => {
+      await setup();
+      await writeFile(failuresPath(ctx.jobDir), JSON.stringify([{ area: 'infra', kind: 'run', id: 'run:failed', text: 'INFRA-ONLY' }]));
+      const f = fakes();
+      await runBuild(ctx, spec, multi, undefined, f.deps);
+      expect(f.reqs.map((r) => r.role)).toEqual(['infra']);
+    });
+
+    it('crash after backend fix: resume runs only frontend', async () => {
+      await setup();
+      const f = fakes();
+      let n = 0;
+      const crashing = vi.fn(async (c: StageCtx, req: AgentRequest) => {
+        if (++n === 2) throw new Error('crash');
+        return f.runAgent(c, req);
+      });
+      await expect(runBuild(ctx, spec, multi, undefined, { runAgent: crashing as never, commitAll: f.commitAll })).rejects.toThrow('crash');
+      const saved = await loadState(ctx.jobDir);
+      expect(saved.completedFixAreas).toEqual(['backend']);
+      const f2 = fakes();
+      const state = await runBuild({ ...ctx, state: saved }, spec, multi, undefined, f2.deps);
+      expect(f2.reqs.map((r) => r.role)).toEqual(['frontend']);
+      expect(state.stage).toBe('verify');
+    });
+
+    it('failures.json absent but report present: report goes to every plan area in AREA_ORDER', async () => {
+      await setup();
+      await rm(failuresPath(ctx.jobDir));
+      const f = fakes();
+      await runBuild(ctx, spec, multi, undefined, f.deps);
+      expect(f.reqs.map((r) => r.role)).toEqual(['backend', 'frontend']);
+      for (const r of f.reqs) expect(r.prompt).toContain('WHOLE REPORT MARKER');
+    });
+
+    it('no failures.json and no persisted report → normal mode', async () => {
+      ctx.state = baseState();
+      const f = fakes();
+      await runBuild(ctx, spec, multi, undefined, f.deps);
+      expect(f.commitAll.mock.calls.map((c) => c[1])).toEqual(['T2: api', 'T1: ui']);
     });
   });
 });
