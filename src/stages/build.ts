@@ -2,10 +2,11 @@ import * as fsp from 'node:fs/promises';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
 import { remainingUsd } from '../core/budget.js';
-import { ROLE_MODELS } from '../core/config.js';
+import { ROLE_MODELS, type Area } from '../core/config.js';
 import { commitAll as defaultCommitAll } from '../core/git.js';
 import { saveState, transition, type JobState } from '../core/state.js';
 import { trimOutput } from '../core/trim.js';
+import { orderTasks, readHandoffs } from './handoffs.js';
 import { loadPrompt } from './prompts.js';
 import type { Plan } from './plan.js';
 import type { SpecDoc } from './spec.js';
@@ -40,10 +41,34 @@ function context(ctx: StageCtx, spec: SpecDoc, plan: Plan): string {
   ].join('\n');
 }
 
-function taskPrompt(ctx: StageCtx, spec: SpecDoc, plan: Plan, task: Task): string {
+function containerHandoffPath(jobId: string, area: Area): string {
+  return `/workspace/.anton/jobs/${jobId}/handoffs/${area}.md`;
+}
+
+function taskPrompt(
+  ctx: StageCtx,
+  spec: SpecDoc,
+  plan: Plan,
+  task: Task,
+  handoffs: { area: Area; text: string }[],
+  isLastOfArea: boolean,
+): string {
+  const extra: string[] = [];
+  if (plan.contract?.trim()) extra.push('## Contract', '', plan.contract.trim(), '');
+  if (handoffs.length) {
+    extra.push('## Handoff notes from earlier developers', '');
+    for (const h of handoffs) extra.push(`### ${h.area}`, '', trimOutput(h.text), '');
+  }
+  const handoff = isLastOfArea
+    ? [
+        '',
+        `Before finishing, write a short handoff note for the next developer to \`${containerHandoffPath(ctx.state.jobId, task.area)}\`: what you built, where, and how to use it.`,
+      ]
+    : [];
   return [
     context(ctx, spec, plan),
     '',
+    ...extra,
     `## Current task — ${task.id}: ${task.title}`,
     '',
     `Acceptance checks: ${task.acceptanceChecks.join(', ') || '(none)'}`,
@@ -51,6 +76,7 @@ function taskPrompt(ctx: StageCtx, spec: SpecDoc, plan: Plan, task: Task): strin
     task.instructions,
     '',
     "Implement only this task. Run this task's tests before finishing.",
+    ...handoff,
   ].join('\n');
 }
 
@@ -93,11 +119,12 @@ export async function runBuild(
 ): Promise<JobState> {
   const run = deps.runAgent ?? defaultRunAgent;
   const commit = deps.commitAll ?? defaultCommitAll;
-  const systemPrompt = await loadPrompt('build.md');
-  const { model, effort } = ROLE_MODELS.backend;
+  const baseSystemPrompt = await loadPrompt('build.md');
   let state = ctx.state;
 
-  const session = async (prompt: string, role: string): Promise<void> => {
+  const session = async (prompt: string, role: Area): Promise<void> => {
+    const { model, effort } = ROLE_MODELS[role];
+    const systemPrompt = `${baseSystemPrompt}\n\n${await loadPrompt(`role-${role}.md`)}`;
     const req: AgentRequest = {
       role,
       model,
@@ -120,9 +147,12 @@ export async function runBuild(
     await session(fixPrompt({ ...ctx, state }, spec, plan, failureReport), 'backend');
     await commit(ctx.repo, `fix: round ${state.round}`);
   } else {
-    for (const task of plan.tasks) {
+    const ordered = orderTasks(plan);
+    for (const task of ordered) {
       if (state.completedTasks.includes(task.id)) continue;
-      await session(taskPrompt({ ...ctx, state }, spec, plan, task), 'backend');
+      const isLastOfArea = ordered.filter((t) => t.area === task.area).at(-1)!.id === task.id;
+      const handoffs = await readHandoffs(ctx.jobDir);
+      await session(taskPrompt({ ...ctx, state }, spec, plan, task, handoffs, isLastOfArea), task.area);
       await commit(ctx.repo, `${task.id}: ${task.title}`);
       state = { ...state, completedTasks: [...state.completedTasks, task.id] };
       await saveState(ctx.jobDir, state);

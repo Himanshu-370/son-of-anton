@@ -6,6 +6,7 @@ import { BudgetExceeded, type StageCtx } from '../../src/agent/host-runner.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
 import { loadState, type JobState } from '../../src/core/state.js';
 import { runBuild } from '../../src/stages/build.js';
+import { loadPrompt } from '../../src/stages/prompts.js';
 import type { Plan } from '../../src/stages/plan.js';
 import type { SpecDoc } from '../../src/stages/spec.js';
 
@@ -128,5 +129,59 @@ describe('runBuild', () => {
     await expect(runBuild(ctx, spec, plan, undefined, { runAgent: runAgent as never, commitAll: f.commitAll })).rejects.toBeInstanceOf(BudgetExceeded);
     expect(f.commitAll.mock.calls).toEqual([['/r', 'T1: scaffold']]);
     expect(await loadState(ctx.jobDir)).toMatchObject({ stage: 'build', completedTasks: ['T1'] });
+  });
+
+  describe('role split', () => {
+    const multi: Plan = {
+      commands: { install: 'i', test: 't' },
+      contract: 'POST /api/sum returns {total}',
+      tasks: [
+        { id: 'T1', title: 'ui', acceptanceChecks: [], instructions: 'build ui', area: 'frontend' },
+        { id: 'T2', title: 'api', acceptanceChecks: [], instructions: 'build api', area: 'backend' },
+        { id: 'T3', title: 'api2', acceptanceChecks: [], instructions: 'more api', area: 'backend' },
+        { id: 'T4', title: 'docker', acceptanceChecks: [], instructions: 'dockerize', area: 'infra' },
+      ],
+    };
+
+    it('each session uses the task area as role and ROLE_MODELS[area]', async () => {
+      const f = fakes();
+      await runBuild(ctx, spec, multi, undefined, f.deps);
+      expect(f.reqs.map((r) => r.role)).toEqual(['infra', 'backend', 'backend', 'frontend']);
+      for (const r of f.reqs) expect(r).toMatchObject({ model: 'claude-sonnet-5-5', effort: 'medium', systemPromptMode: 'append' });
+    });
+
+    it('system prompt is build.md + role-<area>.md', async () => {
+      const f = fakes();
+      await runBuild(ctx, spec, multi, undefined, f.deps);
+      const build = await loadPrompt('build.md');
+      for (const r of f.reqs) {
+        expect(r.systemPrompt).toBe(`${build}\n\n${await loadPrompt(`role-${r.role}.md`)}`);
+      }
+    });
+
+    it('last task of an area asks for a handoff at the container path; other tasks do not', async () => {
+      const f = fakes();
+      await runBuild(ctx, spec, multi, undefined, f.deps);
+      const marker = 'write a short handoff note for the next developer to';
+      const [infra, api1, api2, ui] = f.reqs.map((r) => r.prompt);
+      expect(infra).toContain(`${marker} \`/workspace/.anton/jobs/j1/handoffs/infra.md\``);
+      expect(api1).not.toContain(marker);
+      expect(api2).toContain(`${marker} \`/workspace/.anton/jobs/j1/handoffs/backend.md\``);
+      expect(ui).toContain('/workspace/.anton/jobs/j1/handoffs/frontend.md');
+    });
+
+    it('a frontend task prompt contains the backend handoff text and the contract', async () => {
+      await mkdir(join(ctx.jobDir, 'handoffs'), { recursive: true });
+      await writeFile(join(ctx.jobDir, 'handoffs', 'backend.md'), 'BACKEND HANDOFF: run uvicorn app:app');
+      const f = fakes();
+      await runBuild(ctx, spec, multi, undefined, f.deps);
+      const ui = f.reqs[3]!.prompt;
+      expect(ui).toContain('BACKEND HANDOFF: run uvicorn app:app');
+      expect(ui).toContain('POST /api/sum returns {total}');
+    });
+
+    it('role-infra prompt forbids deploying', async () => {
+      expect(await loadPrompt('role-infra.md')).toMatch(/never deploy/i);
+    });
   });
 });
