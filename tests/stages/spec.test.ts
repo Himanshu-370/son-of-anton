@@ -40,6 +40,7 @@ describe('runSpec', () => {
     expect(reqs[0]!.resumeSessionId).toBeUndefined();
     expect(reqs[1]!.resumeSessionId).toBe('s1');
     expect(reqs[2]!.prompt).toContain('A: yes');
+    for (const r of reqs) expect(r.outputSchema!.type).toBe('object');
     expect(reqs[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high', maxTurns: 30, budgetUsd: 9 });
   });
 
@@ -49,6 +50,16 @@ describe('runSpec', () => {
     expect(reqs).toHaveLength(6);
     expect(reqs[5]!.prompt).toContain('write the spec now');
     expect(reqs[4]!.prompt).not.toContain('write the spec now');
+    for (const r of reqs) expect(r.outputSchema!.type).toBe('object');
+    expect(JSON.stringify(reqs[4]!.outputSchema)).toContain('questions');
+    expect(JSON.stringify(reqs[5]!.outputSchema)).not.toContain('questions');
+  });
+
+  it('rejects kind=questions with no questions, and kind=spec with no spec', async () => {
+    for (const bad of [{ kind: 'questions' }, { kind: 'questions', questions: [] }, { kind: 'spec' }]) {
+      const { fn } = fakeRun([bad]);
+      await expect(runSpec(ctx, 'x', async () => [], { runAgent: fn })).rejects.toThrow();
+    }
   });
 });
 
@@ -66,6 +77,13 @@ describe('writeSpec / readApprovedSpec', () => {
     expect(out.tech).toEqual(['node']);
     expect(await readFile(join(ctx.jobDir, 'spec.generated.md'), 'utf8')).toBe(md);
     expect(JSON.parse(await readFile(join(ctx.jobDir, 'spec.approved.json'), 'utf8')).acceptanceChecks).toHaveLength(3);
+  });
+
+  it('collapses whitespace in check text so round-trip is lossless', async () => {
+    const multi: SpecDoc = { ...spec, acceptanceChecks: [{ id: 'AC-1', text: 'adds  a\nhabit\n  fast' }] };
+    await writeSpec(ctx.jobDir, multi);
+    const out = await readApprovedSpec(ctx.jobDir);
+    expect(out.acceptanceChecks[0]!.text).toBe('adds a habit fast');
   });
 
   it('rejects duplicates and zero checks', async () => {

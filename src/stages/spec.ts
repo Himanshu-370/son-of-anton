@@ -3,13 +3,16 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
+import { writeFileAtomic } from '../core/atomic.js';
 import { remainingUsd } from '../core/budget.js';
 import { DEFAULTS } from '../core/config.js';
 import type { JobState } from '../core/state.js';
+import type { AcceptanceCheck } from '../kits/types.js';
+import { loadPrompt } from './prompts.js';
 
 export const MAX_QUESTION_ROUNDS = 5;
 
-const AcceptanceCheckSchema = z.object({ id: z.string().regex(/^AC-\d+$/), text: z.string().min(1) });
+const AcceptanceCheckSchema: z.ZodType<AcceptanceCheck> = z.object({ id: z.string().regex(/^AC-\d+$/), text: z.string().min(1) });
 
 const specShape = {
   title: z.string().min(1),
@@ -29,10 +32,20 @@ export const SpecDocSchema = SpecDocBaseSchema.refine(
 );
 export type SpecDoc = z.infer<typeof SpecDocBaseSchema>;
 
-const SpecTurnSchema = z.discriminatedUnion('kind', [
-  z.object({ kind: z.literal('questions'), questions: z.array(z.string().min(1)).min(1) }),
-  z.object({ kind: z.literal('spec'), spec: SpecDocSchema }),
-]);
+const turnShape = {
+  kind: z.enum(['questions', 'spec']),
+  questions: z.array(z.string().min(1)).optional(),
+  spec: SpecDocSchema.optional(),
+};
+const SpecTurnSchema = z.object(turnShape).superRefine((t, ctx) => {
+  if (t.kind === 'questions' && !t.questions?.length) {
+    ctx.addIssue({ code: 'custom', message: 'kind=questions requires non-empty questions', path: ['questions'] });
+  }
+  if (t.kind === 'spec' && !t.spec) {
+    ctx.addIssue({ code: 'custom', message: 'kind=spec requires spec', path: ['spec'] });
+  }
+});
+const SpecOnlyTurnSchema = z.object({ kind: z.literal('spec'), spec: SpecDocSchema });
 
 export class SpecNotProduced extends Error {
   constructor(message = 'agent did not produce a spec') {
@@ -43,14 +56,8 @@ export class SpecNotProduced extends Error {
 
 export type SpecDeps = { runAgent?: typeof defaultRunAgent };
 
-export async function loadPrompt(name: string): Promise<string> {
-  return fsp.readFile(new URL(`../../src/stages/prompts/${name}`, import.meta.url), 'utf8');
-}
-
-const SPEC_ONLY_JSON_SCHEMA = z.toJSONSchema(
-  z.object({ kind: z.literal('spec'), spec: SpecDocSchema }),
-) as Record<string, unknown>;
-const SPEC_TURN_JSON_SCHEMA = z.toJSONSchema(SpecTurnSchema) as Record<string, unknown>;
+const SPEC_ONLY_JSON_SCHEMA = z.toJSONSchema(SpecOnlyTurnSchema) as Record<string, unknown>;
+const SPEC_TURN_JSON_SCHEMA = z.toJSONSchema(z.object(turnShape)) as Record<string, unknown>;
 
 /**
  * Question loop. Returns the spec and the latest job state (cost accounting from runAgent).
@@ -86,10 +93,11 @@ export async function runSpec(
     cur = { ...cur, state: res.state };
     sessionId = res.sessionId;
     const turn = SpecTurnSchema.parse(res.output);
-    if (turn.kind === 'spec') return { spec: turn.spec, state: res.state };
+    if (turn.kind === 'spec') return { spec: turn.spec!, state: res.state };
     if (final) throw new SpecNotProduced();
-    const answers = await ask(turn.questions);
-    prompt = turn.questions.map((q, i) => `Q: ${q}\nA: ${answers[i] ?? '(no answer)'}`).join('\n\n');
+    const questions = turn.questions!;
+    const answers = await ask(questions);
+    prompt = questions.map((q, i) => `Q: ${q}\nA: ${answers[i] ?? '(no answer)'}`).join('\n\n');
   }
   throw new SpecNotProduced();
 }
@@ -113,16 +121,16 @@ function renderSpec(s: SpecDoc): string {
     '',
     '## Acceptance checks',
     '',
-    s.acceptanceChecks.map((c) => `- **${c.id}**: ${c.text}`).join('\n'),
+    s.acceptanceChecks.map((c) => `- **${c.id}**: ${c.text.replace(/\s+/g, ' ').trim()}`).join('\n'),
     '',
   ].join('\n');
 }
 
 export async function writeSpec(jobDir: string, spec: SpecDoc): Promise<void> {
   const md = renderSpec(spec);
-  await fsp.writeFile(join(jobDir, 'spec.json'), JSON.stringify(spec, null, 2) + '\n');
-  await fsp.writeFile(join(jobDir, 'spec.generated.md'), md);
-  await fsp.writeFile(join(jobDir, 'spec.md'), md);
+  await writeFileAtomic(join(jobDir, 'spec.json'), JSON.stringify(spec, null, 2) + '\n');
+  await writeFileAtomic(join(jobDir, 'spec.generated.md'), md);
+  await writeFileAtomic(join(jobDir, 'spec.md'), md);
 }
 
 /** Title and acceptance checks come from (possibly human-edited) spec.md; the rest from spec.json. */
@@ -146,6 +154,6 @@ export async function readApprovedSpec(jobDir: string): Promise<SpecDoc> {
   if (checks.length === 0) throw new Error('spec.md has no acceptance checks (expected lines like "- **AC-1**: ...")');
 
   const spec = SpecDocBaseSchema.parse({ ...(base as object), title, acceptanceChecks: checks });
-  await fsp.writeFile(join(jobDir, 'spec.approved.json'), JSON.stringify(spec, null, 2) + '\n');
+  await writeFileAtomic(join(jobDir, 'spec.approved.json'), JSON.stringify(spec, null, 2) + '\n');
   return spec;
 }

@@ -1,16 +1,24 @@
-import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { StageCtx } from '../agent/host-runner.js';
 import { runAgent as defaultRunAgent } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
+import { writeFileAtomic } from '../core/atomic.js';
 import { remainingUsd } from '../core/budget.js';
 import { DEFAULTS } from '../core/config.js';
 import type { JobState } from '../core/state.js';
-import { loadPrompt, type SpecDoc } from './spec.js';
+import type { Commands } from '../kits/types.js';
+import { loadPrompt } from './prompts.js';
+import type { SpecDoc } from './spec.js';
+
+const CommandsSchema: z.ZodType<Commands> = z.object({
+  install: z.string().min(1),
+  test: z.string().min(1),
+  run: z.string().min(1).optional(),
+});
 
 export const PlanSchema = z.object({
-  commands: z.object({ install: z.string().min(1), test: z.string().min(1), run: z.string().min(1).optional() }),
+  commands: CommandsSchema,
   tasks: z
     .array(
       z.object({
@@ -73,7 +81,7 @@ export async function runPlan(
   const res = await run(ctx, req);
   const plan = PlanSchema.parse(res.output);
   validatePlanCoverage(plan, spec.acceptanceChecks.map((c) => c.id));
-  await fsp.writeFile(join(ctx.jobDir, 'plan.json'), JSON.stringify(plan, null, 2) + '\n');
-  await fsp.writeFile(join(ctx.jobDir, 'plan.md'), renderPlan(plan));
+  await writeFileAtomic(join(ctx.jobDir, 'plan.json'), JSON.stringify(plan, null, 2) + '\n');
+  await writeFileAtomic(join(ctx.jobDir, 'plan.md'), renderPlan(plan));
   return { plan, state: res.state };
 }
