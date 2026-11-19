@@ -161,4 +161,9 @@ describe('git helper', () => {
     expect(d).not.toContain('a.txt');
     await expect(access(marker)).rejects.toThrow();
   });
+
+  it('diffSince rejects a malformed sha', async () => {
+    await expect(diffSince(repo, '--output=/tmp/x')).rejects.toThrow(/invalid sha/);
+    await expect(diffSince(repo, 'HEAD~1')).rejects.toThrow(/invalid sha/);
+  });
 });

@@ -47,6 +47,12 @@
  *   session runs with bypassPermissions it would restrict nothing. NOT `disallowedTools` either:
  *   a deny-list would let any tool we forgot to list through. When req.tools is unset, `tools` is
  *   left out and SDK defaults apply.
+ * - Read-only isolation (P2-R2): `tools` does not govern MCP tools, and /workspace is agent-writable,
+ *   so a planted `.mcp.json` or `.claude/settings.json` could hand a reviewer write/shell tools.
+ *   When req.tools is set we also pass `strictMcpConfig: true` (only MCP servers from the
+ *   `mcpServers` option; ignores project .mcp.json, user settings, plugins), `mcpServers: {}`
+ *   (so that set is empty) and `settingSources: []` (SDK isolation mode: no user/project/local
+ *   filesystem settings are loaded). Builder sessions (no tools) are unchanged.
  * - SDK budget stop: an `error_max_budget_usd` result becomes an error event with `code: 'budget'`,
  *   which the host maps to BudgetExceeded (job pauses as budget_cap) rather than a generic error.
  * - Structured output is native, and we also validate the returned value against req.outputSchema
@@ -83,7 +89,13 @@ export function buildOptions(req: AgentRequest): Options {
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
   };
-  if (req.tools) options.tools = req.tools;
+  if (req.tools) {
+    options.tools = req.tools;
+    // MCP tools and settings are separate channels from `tools` (see header): close both.
+    options.strictMcpConfig = true;
+    options.mcpServers = {};
+    options.settingSources = [];
+  }
   if (req.resumeSessionId) options.resume = req.resumeSessionId;
   if (req.outputSchema) options.outputFormat = { type: 'json_schema', schema: req.outputSchema };
   return options;

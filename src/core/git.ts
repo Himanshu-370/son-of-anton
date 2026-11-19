@@ -73,7 +73,8 @@ export async function listTags(repo: string, pattern: string): Promise<string[]>
 
 /** Unified diff of everything committed after `sha` up to HEAD (`git diff <sha>..HEAD`). */
 export async function diffSince(repo: string, sha: string): Promise<string> {
-  return git(repo, ['diff', '--no-color', '--no-ext-diff', `${sha}..HEAD`]);
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new Error(`invalid sha for diffSince: ${JSON.stringify(sha)}`);
+  return git(repo, ['diff', '--no-color', '--no-ext-diff', `${sha}..HEAD`, '--']);
 }
 
 export async function headSha(repo: string): Promise<string> {

@@ -41,6 +41,10 @@ export function findingId(file: string, summary: string): string {
 }
 
 function renderPrompt(spec: SpecDoc, plan: Plan, diff: string): string {
+  const trimmed = trimOutput(diff, { headLines: 400, tailLines: 400 });
+  // Fence longer than any backtick run in the diff, so the diff cannot close it early.
+  const longest = Math.max(0, ...(trimmed.match(/`+/g) ?? []).map((m) => m.length));
+  const fence = '`'.repeat(Math.max(3, longest + 1));
   const checks = spec.acceptanceChecks.map((c) => `- ${c.id}: ${c.text}`).join('\n');
   const tasks = plan.tasks.map((t) => `- ${t.id} [${t.area}] ${t.title} (${t.acceptanceChecks.join(', ') || 'no checks'})`).join('\n');
   return [
@@ -64,9 +68,9 @@ function renderPrompt(spec: SpecDoc, plan: Plan, diff: string): string {
     '',
     'The full code is readable in `/workspace`; the diff below may be trimmed.',
     '',
-    '```diff',
-    trimOutput(diff, { headLines: 400, tailLines: 400 }),
-    '```',
+    `${fence}diff`,
+    trimmed,
+    fence,
   ].join('\n');
 }
 
@@ -94,6 +98,13 @@ export async function runCodeReview(
   };
   const res = await run(ctx, req);
   const out = OutputSchema.parse(res.output);
-  const findings: ReviewFinding[] = out.findings.map((f) => ({ id: findingId(f.file, f.summary), ...f }));
+  const seen = new Set<string>();
+  const findings: ReviewFinding[] = [];
+  for (const f of out.findings) {
+    const id = findingId(f.file, f.summary);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    findings.push({ id, ...f });
+  }
   return { findings, state: res.state };
 }

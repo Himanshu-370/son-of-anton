@@ -234,6 +234,9 @@ describe('entry main', () => {
     });
     expect(calls[0]!.options.tools).toEqual(['Read', 'Grep', 'Glob']);
     expect(calls[0]!.options.allowedTools).toBeUndefined();
+    expect(calls[0]!.options.strictMcpConfig).toBe(true);
+    expect(calls[0]!.options.mcpServers).toEqual({});
+    expect(calls[0]!.options.settingSources).toEqual([]);
   });
 
   it('no tools field leaves defaults unchanged', async () => {
@@ -242,5 +245,6 @@ describe('entry main', () => {
     });
     expect('tools' in calls[0]!.options).toBe(false);
     expect('allowedTools' in calls[0]!.options).toBe(false);
+    for (const k of ['strictMcpConfig', 'mcpServers', 'settingSources']) expect(k in calls[0]!.options).toBe(false);
   });
 });
