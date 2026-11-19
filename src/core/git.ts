@@ -71,6 +71,11 @@ export async function listTags(repo: string, pattern: string): Promise<string[]>
   return out.split('\n').map((t) => t.trim()).filter(Boolean);
 }
 
+/** Unified diff of everything committed after `sha` up to HEAD (`git diff <sha>..HEAD`). */
+export async function diffSince(repo: string, sha: string): Promise<string> {
+  return git(repo, ['diff', '--no-color', '--no-ext-diff', `${sha}..HEAD`]);
+}
+
 export async function headSha(repo: string): Promise<string> {
   return (await git(repo, ['rev-parse', 'HEAD'])).trim();
 }

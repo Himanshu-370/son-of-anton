@@ -227,4 +227,20 @@ describe('entry main', () => {
     expect(lines).toHaveLength(1);
     expect(AgentEventSchema.parse(JSON.parse(lines[0]))).toMatchObject({ type: 'error', totalUsd: 0 });
   });
+
+  it('tools restricts the session to exactly the listed tools', async () => {
+    const { calls } = await run({ ...baseReq, tools: ['Read', 'Grep', 'Glob'] }, async function* () {
+      yield success(0.1);
+    });
+    expect(calls[0]!.options.tools).toEqual(['Read', 'Grep', 'Glob']);
+    expect(calls[0]!.options.allowedTools).toBeUndefined();
+  });
+
+  it('no tools field leaves defaults unchanged', async () => {
+    const { calls } = await run(baseReq, async function* () {
+      yield success(0.1);
+    });
+    expect('tools' in calls[0]!.options).toBe(false);
+    expect('allowedTools' in calls[0]!.options).toBe(false);
+  });
 });

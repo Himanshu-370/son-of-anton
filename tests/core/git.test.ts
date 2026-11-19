@@ -3,7 +3,7 @@ import { access, chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
-import { commitAll, tag, headSha, ensureAntonIgnored, listTags } from '../../src/core/git.js';
+import { commitAll, tag, headSha, ensureAntonIgnored, listTags, diffSince } from '../../src/core/git.js';
 
 const git = (repo: string, ...args: string[]) =>
   execa('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo });
@@ -144,5 +144,21 @@ describe('git helper', () => {
     const { stdout } = await git(repo, 'ls-files');
     expect(stdout.split('\n')).toContain('b.txt');
     expect(stdout).not.toContain('.anton');
+  });
+
+  it('diffSince returns only the changes after the given sha, and ignores repo hooks', async () => {
+    await writeFile(join(repo, 'a.txt'), 'one\n');
+    const base = (await commitAll(repo, 'first'))!;
+    const marker = join(repo, '..', `${repo.split('/').pop()}-diff-marker`);
+    await mkdir(join(repo, '.git', 'hooks'), { recursive: true });
+    await writeFile(join(repo, '.git', 'hooks', 'post-commit'), `#!/bin/sh\ntouch "${marker}"\n`);
+    await chmod(join(repo, '.git', 'hooks', 'post-commit'), 0o755);
+    await writeFile(join(repo, 'b.txt'), 'two\n');
+    await commitAll(repo, 'second');
+    const d = await diffSince(repo, base);
+    expect(d).toContain('b.txt');
+    expect(d).toContain('+two');
+    expect(d).not.toContain('a.txt');
+    await expect(access(marker)).rejects.toThrow();
   });
 });

@@ -7,7 +7,7 @@ export const AgentRequestSchema = z.object({
   systemPrompt: z.string(),
   /**
    * 'replace' (default): systemPrompt replaces the SDK's default prompt. 'append': the Claude Code
-   * preset prompt is kept and systemPrompt is appended to it (used by the build role).
+   * preset prompt is kept and systemPrompt is appended to it (used by the role-split build agents).
    */
   systemPromptMode: z.enum(['replace', 'append']).optional(),
   prompt: z.string(),
@@ -21,6 +21,11 @@ export const AgentRequestSchema = z.object({
    * counts only the increment over it, and the entry offsets its interim estimates by it. Default 0.
    */
   baseUsd: z.number().min(0).optional(),
+  /**
+   * Exact built-in tool set for the session (read-only reviewers). Passed as the SDK `tools`
+   * option, so no other built-in tool exists for the session. Omitted: SDK defaults.
+   */
+  tools: z.array(z.string()).optional(),
 });
 export type AgentRequest = z.infer<typeof AgentRequestSchema>;
 

@@ -35,11 +35,18 @@
  *   result message, so a finished call over the cap is returned, not killed: R4). A cost event is
  *   emitted only when the estimate rises, so cost events never decrease: if the estimate overshot,
  *   the host has already counted the higher figure.
- * - System prompt choice (req.systemPromptMode): the build role uses 'append' (the preset form):
- *   it is a long, tool-heavy coding session that benefits from Claude Code's default guidance on
- *   tools, editing and running commands, with the build rules appended. Spec and plan keep 'replace'
- *   (the default): they are short structured-output turns whose role prompt fully defines the job,
- *   and the coding-agent default prompt would only add tokens and competing instructions.
+ * - System prompt choice (req.systemPromptMode): the build roles (frontend/backend/infra) use 'append'
+ *   (the preset form): they are long, tool-heavy coding sessions that benefit from Claude Code's
+ *   default guidance on tools, editing and running commands, with the role rules appended. The
+ *   pm and tech_lead roles keep 'replace' (the default): they are short structured-output turns
+ *   whose role prompt fully defines the job, and the coding-agent default prompt would only add
+ *   tokens and competing instructions.
+ * - Tool restriction (req.tools, used by read-only reviewers): mapped to the SDK `tools` option,
+ *   which "specifies the base set of available built-in tools", so only those tools exist in the
+ *   session. NOT `allowedTools`: that only auto-approves tools without prompting, and since the
+ *   session runs with bypassPermissions it would restrict nothing. NOT `disallowedTools` either:
+ *   a deny-list would let any tool we forgot to list through. When req.tools is unset, `tools` is
+ *   left out and SDK defaults apply.
  * - SDK budget stop: an `error_max_budget_usd` result becomes an error event with `code: 'budget'`,
  *   which the host maps to BudgetExceeded (job pauses as budget_cap) rather than a generic error.
  * - Structured output is native, and we also validate the returned value against req.outputSchema
@@ -76,6 +83,7 @@ export function buildOptions(req: AgentRequest): Options {
     permissionMode: 'bypassPermissions',
     allowDangerouslySkipPermissions: true,
   };
+  if (req.tools) options.tools = req.tools;
   if (req.resumeSessionId) options.resume = req.resumeSessionId;
   if (req.outputSchema) options.outputFormat = { type: 'json_schema', schema: req.outputSchema };
   return options;
