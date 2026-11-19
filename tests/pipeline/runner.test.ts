@@ -1,0 +1,175 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { BudgetExceeded, type StageCtx } from '../../src/agent/host-runner.js';
+import { isRunning } from '../../src/core/lock.js';
+import { jobDir as jobDirOf } from '../../src/core/paths.js';
+import { registerProject } from '../../src/core/registry.js';
+import { loadState, saveState, transition, type JobState } from '../../src/core/state.js';
+import type { CheckResult, Kit } from '../../src/kits/types.js';
+import { runUnattended, type RunnerDeps } from '../../src/pipeline/runner.js';
+import type { Plan } from '../../src/stages/plan.js';
+import type { SpecDoc } from '../../src/stages/spec.js';
+import type { VerifyResult } from '../../src/stages/verify.js';
+
+const spec: SpecDoc = {
+  title: 'Sum CLI', summary: 's', outOfScope: [], kit: 'fallback', tech: [],
+  acceptanceChecks: [{ id: 'AC-1', text: 'sums' }],
+};
+const plan: Plan = {
+  commands: { install: 'i', test: 't' },
+  tasks: [{ id: 'T1', title: 'x', acceptanceChecks: ['AC-1'], instructions: 'y' }],
+};
+const kit: Kit = { name: 'fake', dockerfile: '', detect: () => 1, verify: async () => ({ results: [], runOk: true, failureReport: '' }) };
+
+let repo: string;
+let dir: string;
+
+async function setup(over: Partial<JobState> = {}): Promise<void> {
+  process.env.ANTON_HOME = await mkdtemp(join(tmpdir(), 'anton-runner-'));
+  repo = join(process.env.ANTON_HOME, 'projects', 'p');
+  dir = jobDirOf(repo, '1-init');
+  await mkdir(dir, { recursive: true });
+  await registerProject('p', repo);
+  await writeFile(join(dir, 'spec.approved.json'), JSON.stringify(spec));
+  await saveState(dir, {
+    jobId: '1-init', project: 'p', stage: 'plan', round: 0, maxRounds: 3, budgetUsd: 10, spentUsd: 0,
+    warned80: false, completedTasks: [], updatedAt: '', ...over,
+  });
+}
+
+function fakes(overrides: Partial<RunnerDeps> = {}) {
+  const calls: string[] = [];
+  const stopped: string[] = [];
+  const notify = vi.fn(async () => undefined);
+  let verifyCalls = 0;
+  const pass: CheckResult = { id: 'AC-1', status: 'pass', tests: ['AC-1: ok'] };
+  const fail: CheckResult = { id: 'AC-1', status: 'fail', reason: 'failing', tests: [] };
+  const deliverInputs: unknown[] = [];
+  const deps: RunnerDeps = {
+    startContainer: async (slug) => `anton-${slug}`,
+    stopContainer: async (name) => { stopped.push(name); },
+    notify,
+    kit,
+    log: () => undefined,
+    runPlan: async (ctx: StageCtx) => { calls.push('plan'); return { plan, state: ctx.state }; },
+    runBuild: async (ctx: StageCtx) => {
+      calls.push('build');
+      const s = transition(ctx.state, 'verify');
+      await saveState(ctx.jobDir, s);
+      return s;
+    },
+    runVerify: async (ctx: StageCtx): Promise<VerifyResult> => {
+      calls.push('verify');
+      verifyCalls++;
+      const ok = verifyCalls > 1;
+      const s = ok ? transition(ctx.state, 'deliver') : transition(ctx.state, 'build', { round: ctx.state.round + 1 });
+      await saveState(ctx.jobDir, s);
+      return { state: s, passed: ok, results: [ok ? pass : fail], runOk: true, failureReport: ok ? '' : 'rep' };
+    },
+    runDeliver: async (ctx: StageCtx, _spec, _plan, input) => {
+      calls.push('deliver');
+      deliverInputs.push(input);
+      const s = transition(ctx.state, 'awaiting_final_review');
+      await saveState(ctx.jobDir, s);
+      return s;
+    },
+    ...overrides,
+  };
+  return { deps, calls, stopped, notify, deliverInputs, pass };
+}
+
+describe('runUnattended', () => {
+  beforeEach(async () => { await setup(); });
+
+  it('plan → build → verify(fail) → build → verify(pass) → deliver → awaiting_final_review', async () => {
+    const f = fakes();
+    await runUnattended('p', f.deps);
+    expect(f.calls).toEqual(['plan', 'build', 'verify', 'build', 'verify', 'deliver']);
+    expect(await loadState(dir)).toMatchObject({ stage: 'awaiting_final_review', round: 2 });
+    expect(f.deliverInputs).toEqual([{ results: [f.pass], runOk: true }]);
+    expect(f.notify).toHaveBeenCalledTimes(1);
+    expect(f.stopped).toEqual(['anton-p']);
+    expect(await isRunning(repo)).toEqual({ running: false });
+  });
+
+  it('notifies only after the container is stopped and the lock released (review and pause)', async () => {
+    for (const over of [{}, { runBuild: async () => { throw new BudgetExceeded(); } }] as Partial<RunnerDeps>[]) {
+      await setup();
+      const order: string[] = [];
+      const f = fakes({
+        ...over,
+        acquireLock: async () => async () => { order.push('release'); },
+        stopContainer: async () => { order.push('stop'); },
+        notify: async () => { order.push('notify'); },
+      });
+      await runUnattended('p', f.deps);
+      expect(order).toEqual(['stop', 'release', 'notify']);
+    }
+  });
+
+  it('plan → build sets round 1', async () => {
+    let roundAtBuild = -1;
+    const f = fakes({
+      runBuild: async (ctx: StageCtx) => {
+        roundAtBuild = ctx.state.round;
+        throw new BudgetExceeded();
+      },
+    });
+    await runUnattended('p', f.deps);
+    expect(roundAtBuild).toBe(1);
+  });
+
+  it('a throwing stage pauses with error, logs it, releases the lock and stops the container', async () => {
+    const f = fakes({ runBuild: async () => { throw new Error('kaboom'); } });
+    await runUnattended('p', f.deps);
+    expect(await loadState(dir)).toMatchObject({ stage: 'paused', pausedFrom: 'build', pauseReason: 'error' });
+    expect(await readFile(join(dir, 'logs', 'error.log'), 'utf8')).toContain('kaboom');
+    expect(f.notify).toHaveBeenCalledTimes(1);
+    expect(f.stopped).toEqual(['anton-p']);
+    expect(await isRunning(repo)).toEqual({ running: false });
+  });
+
+  it('BudgetExceeded from build → paused/budget_cap', async () => {
+    const f = fakes({ runBuild: async () => { throw new BudgetExceeded(); } });
+    await runUnattended('p', f.deps);
+    expect(await loadState(dir)).toMatchObject({ stage: 'paused', pausedFrom: 'build', pauseReason: 'budget_cap' });
+    expect(f.notify).toHaveBeenCalledTimes(1);
+    expect(f.notify.mock.calls[0]).toEqual(['Son of Anton', expect.stringContaining('budget')]);
+  });
+
+  it('container start failure pauses with error and still releases the lock', async () => {
+    const f = fakes({ startContainer: async () => { throw new Error('docker run failed: nope'); } });
+    await runUnattended('p', f.deps);
+    expect(await loadState(dir)).toMatchObject({ stage: 'paused', pauseReason: 'error' });
+    expect(f.calls).toEqual([]);
+    expect(await isRunning(repo)).toEqual({ running: false });
+  });
+
+  it('deliver after accept-as-is passes no verify result (runDeliver reads results.json)', async () => {
+    await setup({ stage: 'deliver', round: 3, completedTasks: ['T1'] });
+    await writeFile(join(dir, 'plan.json'), JSON.stringify(plan));
+    const f = fakes();
+    await runUnattended('p', f.deps);
+    expect(f.calls).toEqual(['deliver']);
+    expect(f.deliverInputs).toEqual([undefined]);
+    expect(f.notify).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failing notify on success is not treated as a run error', async () => {
+    const f = fakes({ notify: async () => { throw new Error('osascript broke'); } });
+    await runUnattended('p', f.deps);
+    expect(await loadState(dir)).toMatchObject({ stage: 'awaiting_final_review' });
+    await expect(readFile(join(dir, 'logs', 'error.log'), 'utf8')).rejects.toThrow();
+    expect(await isRunning(repo)).toEqual({ running: false });
+  });
+
+  it('does nothing at a waiting stage', async () => {
+    await setup({ stage: 'awaiting_spec_approval' });
+    const f = fakes();
+    await runUnattended('p', f.deps);
+    expect(f.calls).toEqual([]);
+    expect(f.notify).not.toHaveBeenCalled();
+  });
+});

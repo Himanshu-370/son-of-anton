@@ -1,0 +1,33 @@
+import { commitAll, tag } from '../../core/git.js';
+import { saveState, transition } from '../../core/state.js';
+import { readApprovedSpec } from '../../stages/spec.js';
+import { guard, resolveDeps, resolveJob, type CliDeps } from '../deps.js';
+import { preflightOr2 } from './shared.js';
+
+/** `anton approve <project>`: approve the spec (start the background run) or the final delivery. */
+export async function approveCommand(project: string, deps: CliDeps = {}): Promise<number> {
+  const d = resolveDeps(deps);
+  return guard(d, async () => {
+    const job = await resolveJob(project);
+    const { state } = job;
+    if (state.stage === 'awaiting_spec_approval') {
+      const code = await preflightOr2(d);
+      if (code !== 0) return code;
+      await readApprovedSpec(job.jobDir);
+      await commitAll(job.repo, 'chore: spec approved');
+      await tag(job.repo, `anton/${job.jobId}/spec-approved`);
+      await saveState(job.jobDir, transition(state, 'plan'));
+      d.spawnRun(project, job.jobDir);
+      d.out(`Spec approved. ${project} is now running in the background.`);
+      d.out(`Follow it with: anton logs -f ${project}`);
+      return 0;
+    }
+    if (state.stage === 'awaiting_final_review') {
+      await saveState(job.jobDir, transition(state, 'done'));
+      d.out(`${project}: delivery approved. Done.`);
+      return 0;
+    }
+    d.err(`Nothing to approve (stage: ${state.stage})`);
+    return 1;
+  });
+}

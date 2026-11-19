@@ -1,0 +1,169 @@
+import { describe, it, expect } from 'vitest';
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import type { ExecFn } from '../../src/core/exec.js';
+import {
+  preflight,
+  PreflightError,
+  ensureImage,
+  startContainer,
+  stopContainer,
+  runIn,
+} from '../../src/docker/container.js';
+
+type Call = { cmd: string; args: string[] };
+const ok = { exitCode: 0, stdout: '', stderr: '' };
+function fake(handler?: (c: Call) => Partial<typeof ok>) {
+  const calls: Call[] = [];
+  const exec: ExecFn = async (cmd, args) => {
+    calls.push({ cmd, args });
+    return { ...ok, ...(handler?.({ cmd, args }) ?? {}) };
+  };
+  return { exec, calls };
+}
+
+describe('preflight', () => {
+  it('preflight throws Docker message when docker info exits 1', async () => {
+    const { exec } = fake(() => ({ exitCode: 1 }));
+    const p = preflight(exec, { ANTHROPIC_API_KEY: 'k' });
+    await expect(p).rejects.toBeInstanceOf(PreflightError);
+    await expect(p).rejects.toThrow("Docker isn't running. Start Docker Desktop and try again.");
+  });
+
+  it('preflight throws API key message when env missing', async () => {
+    const { exec } = fake();
+    await expect(preflight(exec, {})).rejects.toThrow('ANTHROPIC_API_KEY is not set.');
+  });
+
+  it('preflight passes when docker and key are present', async () => {
+    const { exec, calls } = fake();
+    await preflight(exec, { ANTHROPIC_API_KEY: 'k' });
+    expect(calls[0]).toEqual({ cmd: 'docker', args: ['info'] });
+  });
+});
+
+async function makeKit(stageFiles: Record<string, string> | null = { 'entry.js': 'e', 'sub/x.json': '{}' }) {
+  const dir = await mkdtemp(join(tmpdir(), 'anton-kit-'));
+  await writeFile(join(dir, 'Dockerfile'), 'FROM scratch\n');
+  if (stageFiles) {
+    for (const [rel, body] of Object.entries(stageFiles)) {
+      await mkdir(dirname(join(dir, '.stage', rel)), { recursive: true });
+      await writeFile(join(dir, '.stage', rel), body);
+    }
+  }
+  return { dir, dockerfile: join(dir, 'Dockerfile') };
+}
+
+describe('ensureImage', () => {
+  it('skips build when image exists and returns a versioned, content-hashed tag', async () => {
+    const kit = await makeKit();
+    const { exec, calls } = fake();
+    const tag = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    expect(tag).toMatch(/^anton\/kit-node:\d+\.\d+\.\d+-[0-9a-f]{12}$/);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].args).toEqual(['image', 'inspect', tag]);
+  });
+
+  it('tag hash changes when a staged file or the Dockerfile changes, and is stable otherwise', async () => {
+    const kit = await makeKit();
+    const { exec } = fake();
+    const t1 = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    expect(await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec)).toBe(t1);
+    await writeFile(join(kit.dir, '.stage', 'sub', 'x.json'), '{"a":1}');
+    const t2 = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    expect(t2).not.toBe(t1);
+    await writeFile(kit.dockerfile, 'FROM scratch\nRUN true\n');
+    const t3 = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    expect(t3).not.toBe(t2);
+  });
+
+  it('throws a clear error when .stage/ is missing', async () => {
+    const kit = await makeKit(null);
+    const { exec, calls } = fake();
+    await expect(ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec)).rejects.toThrow(
+      'Kit image files not staged — run: npm run build:image',
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('builds with -t, -f and the dockerfile dir when missing', async () => {
+    const kit = await makeKit();
+    const { exec, calls } = fake((c) => (c.args[0] === 'image' ? { exitCode: 1 } : {}));
+    const tag = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    expect(calls[1].args).toEqual(['build', '-t', tag, '-f', kit.dockerfile, kit.dir]);
+  });
+
+  it('throws with trimmed stderr when build fails', async () => {
+    const kit = await makeKit();
+    const { exec } = fake((c) =>
+      c.args[0] === 'image' ? { exitCode: 1 } : { exitCode: 1, stderr: '  boom\n' },
+    );
+    await expect(ensureImage({ name: 'n', dockerfile: kit.dockerfile }, exec)).rejects.toThrow(/boom$/);
+  });
+});
+
+describe('startContainer', () => {
+  it('startContainer passes exactly one -v mount: <repo>:/workspace', async () => {
+    const { exec, calls } = fake();
+    const name = await startContainer('s1', '/repo', 'img:1', exec);
+    expect(name).toBe('anton-s1');
+    const run = calls.find((c) => c.args[0] === 'run')!;
+    expect(run.args.filter((a) => a === '-v')).toHaveLength(1);
+    expect(run.args[run.args.indexOf('-v') + 1]).toBe('/repo:/workspace');
+    expect(run.args).toEqual([
+      'run', '-d', '--name', 'anton-s1', '-v', '/repo:/workspace', '-w', '/workspace',
+      '-e', 'ANTHROPIC_API_KEY', 'img:1', 'sleep', 'infinity',
+    ]);
+  });
+
+  it('removes a pre-existing container before run', async () => {
+    const { exec, calls } = fake();
+    await startContainer('s1', '/repo', 'img:1', exec);
+    expect(calls[0].args).toEqual(['rm', '-f', 'anton-s1']);
+    expect(calls[1].args[0]).toBe('run');
+  });
+
+  it('startContainer passes the API key by name only', async () => {
+    const prev = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'sk-secret-value';
+    try {
+      const { exec, calls } = fake();
+      await startContainer('s1', '/repo', 'img:1', exec);
+      const args = calls.flatMap((c) => c.args);
+      expect(args).toContain('ANTHROPIC_API_KEY');
+      expect(args[args.indexOf('ANTHROPIC_API_KEY') - 1]).toBe('-e');
+      expect(args.join(' ')).not.toContain('sk-secret-value');
+    } finally {
+      if (prev === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prev;
+    }
+  });
+
+  it('throws when docker run fails', async () => {
+    const { exec } = fake((c) => (c.args[0] === 'run' ? { exitCode: 125, stderr: 'nope' } : {}));
+    await expect(startContainer('s1', '/repo', 'img', exec)).rejects.toThrow('nope');
+  });
+});
+
+describe('stopContainer / runIn', () => {
+  it('stopContainer swallows errors', async () => {
+    const exec: ExecFn = async () => {
+      throw new Error('spawn failed');
+    };
+    await expect(stopContainer('anton-s1', exec)).resolves.toBeUndefined();
+  });
+
+  it('stopContainer runs docker rm -f', async () => {
+    const { exec, calls } = fake();
+    await stopContainer('anton-s1', exec);
+    expect(calls[0]).toEqual({ cmd: 'docker', args: ['rm', '-f', 'anton-s1'] });
+  });
+
+  it('runIn uses sh -lc', async () => {
+    const { exec, calls } = fake(() => ({ stdout: 'hi' }));
+    const r = await runIn('anton-s1', 'echo hi', exec);
+    expect(r.stdout).toBe('hi');
+    expect(calls[0].args).toEqual(['exec', 'anton-s1', 'sh', '-lc', 'echo hi']);
+  });
+});

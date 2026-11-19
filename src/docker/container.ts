@@ -1,0 +1,114 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { readdir, readFile, stat } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { execa } from 'execa';
+import { defaultExec, type ExecFn } from '../core/exec.js';
+
+export class PreflightError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PreflightError';
+  }
+}
+
+export async function preflight(
+  exec: ExecFn = defaultExec,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+  let dockerOk = false;
+  try {
+    dockerOk = (await exec('docker', ['info'])).exitCode === 0;
+  } catch {
+    dockerOk = false;
+  }
+  if (!dockerOk) throw new PreflightError("Docker isn't running. Start Docker Desktop and try again.");
+  if (!env.ANTHROPIC_API_KEY) throw new PreflightError('ANTHROPIC_API_KEY is not set.');
+}
+
+function packageVersion(): string {
+  const pkgPath = fileURLToPath(new URL('../../package.json', import.meta.url));
+  return (JSON.parse(readFileSync(pkgPath, 'utf8')) as { version: string }).version;
+}
+
+async function listFiles(dir: string, prefix = ''): Promise<string[]> {
+  const out: string[] = [];
+  for (const ent of await readdir(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
+    if (ent.isDirectory()) out.push(...(await listFiles(join(dir, ent.name), rel)));
+    else if (ent.isFile()) out.push(rel);
+  }
+  return out;
+}
+
+/** First 12 hex of sha256 over the Dockerfile and every file under `.stage/` (sorted paths + contents). */
+async function kitContentHash(dockerfile: string, stageDir: string): Promise<string> {
+  const h = createHash('sha256');
+  h.update('Dockerfile\0').update(await readFile(dockerfile)).update('\0');
+  for (const rel of (await listFiles(stageDir)).sort()) {
+    h.update(`.stage/${rel}\0`).update(await readFile(join(stageDir, rel))).update('\0');
+  }
+  return h.digest('hex').slice(0, 12);
+}
+
+/**
+ * Tag: `anton/kit-<name>:<version>-<hash>`. The content hash means a changed entry or Dockerfile
+ * gets a new tag, so a stale image is never reused.
+ */
+export async function ensureImage(
+  kit: { name: string; dockerfile: string },
+  exec: ExecFn = defaultExec,
+): Promise<string> {
+  const context = dirname(kit.dockerfile);
+  const stageDir = join(context, '.stage');
+  const staged = await stat(stageDir).then((s) => s.isDirectory(), () => false);
+  if (!staged) throw new Error('Kit image files not staged — run: npm run build:image');
+  const tag = `anton/kit-${kit.name}:${packageVersion()}-${await kitContentHash(kit.dockerfile, stageDir)}`;
+  const have = await exec('docker', ['image', 'inspect', tag]);
+  if (have.exitCode === 0) return tag;
+  const build = await exec('docker', ['build', '-t', tag, '-f', kit.dockerfile, context]);
+  if (build.exitCode !== 0) {
+    throw new Error(`docker build failed for ${tag}: ${build.stderr.trim()}`);
+  }
+  return tag;
+}
+
+export async function startContainer(
+  slug: string,
+  repoPath: string,
+  image: string,
+  exec: ExecFn = defaultExec,
+): Promise<string> {
+  const name = `anton-${slug}`;
+  await exec('docker', ['rm', '-f', name]).catch(() => undefined);
+  const r = await exec('docker', [
+    'run', '-d', '--name', name,
+    '-v', `${repoPath}:/workspace`,
+    '-w', '/workspace',
+    '-e', 'ANTHROPIC_API_KEY',
+    image, 'sleep', 'infinity',
+  ]);
+  if (r.exitCode !== 0) throw new Error(`docker run failed: ${r.stderr.trim()}`);
+  return name;
+}
+
+/** Streaming handle for `docker exec -i` (no shell). */
+export function execIn(name: string, cmd: string[], opts: { timeoutMs?: number } = {}) {
+  return execa('docker', ['exec', '-i', name, ...cmd], {
+    timeout: opts.timeoutMs,
+    reject: false,
+  });
+}
+
+export function runIn(name: string, shellCmd: string, exec: ExecFn = defaultExec) {
+  return exec('docker', ['exec', name, 'sh', '-lc', shellCmd]);
+}
+
+export async function stopContainer(name: string, exec: ExecFn = defaultExec): Promise<void> {
+  try {
+    await exec('docker', ['rm', '-f', name]);
+  } catch {
+    /* ignore */
+  }
+}
