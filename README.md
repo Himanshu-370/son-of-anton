@@ -19,7 +19,7 @@ npm link              # puts `anton` on your PATH
 
 ## Commands
 
-- `anton new "<description>" [--budget <usd>]` creates a project and writes its spec with you interactively.
+- `anton new "<description>" [--budget <usd>]` creates a project and writes its spec with you interactively. Afterwards, review and edit the acceptance checks in `spec.md`, then run `anton approve <name>`.
 - `anton approve <project>` approves the spec (starts the background build) or the final delivery.
 - `anton reject <project> --notes "<text>"` sends the delivery back to build with your notes.
 - `anton resume <project> [--budget <usd>] [--accept-as-is]` continues a paused job; `--budget` raises the cap, `--accept-as-is` delivers despite failing checks.
@@ -51,8 +51,8 @@ ANTON_E2E=1 npm run test:e2e               # also runs Docker-only e2e tests
 ANTON_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/new-project.e2e.test.ts
 ```
 
-The last one builds a real project end to end with the API and costs up to about $3.
+The last one builds a real project end to end with the API and costs up to about $3. It runs only when BOTH `ANTON_E2E=1` and `ANTHROPIC_API_KEY` are set; with `ANTON_E2E=1` alone (no key), only the Docker-only e2e tests run and it is skipped.
 
 ## Phase 1 limits
 
-Fallback kit only, CLI only, new projects only, no Slack yet. See `docs/superpowers/plans/2026-11-19-son-of-anton-roadmap.md`.
+Fallback kit only, CLI only, new projects only, no Slack yet. See the [roadmap](docs/superpowers/plans/2026-11-19-son-of-anton-roadmap.md).

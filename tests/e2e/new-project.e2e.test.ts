@@ -20,6 +20,7 @@ const exists = (p: string) => access(p).then(() => true, () => false);
 let home: string | undefined;
 let prevHome: string | undefined;
 const project = slugify(DESCRIPTION);
+let jobIdOf: string | undefined;
 
 describe.skipIf(!process.env.ANTON_E2E || !process.env.ANTHROPIC_API_KEY)('new project e2e', () => {
   beforeAll(async () => {
@@ -33,7 +34,19 @@ describe.skipIf(!process.env.ANTON_E2E || !process.env.ANTHROPIC_API_KEY)('new p
 
   afterAll(async () => {
     if (home) {
-      await anton('abandon', project); // stops the container; harmless if already done
+      // Stop the detached runner first: abandon is refused while the lock is held.
+      await anton('stop', project);
+      const ab = await anton('abandon', project);
+      if (ab.exitCode !== 0) {
+        const stage = await readFile(join(home, 'projects', project, '.anton', 'jobs', jobIdOf ?? '', 'state.json'), 'utf8')
+          .then((t) => JSON.parse(t).stage as string, () => 'unknown');
+        if (!['done', 'abandoned', 'unknown'].includes(stage)) {
+          console.warn(
+            `\n!!! E2E CLEANUP FAILED: project "${project}" (container anton-${project}) may still be running at stage ${stage}.\n` +
+              `!!! Clean up manually: anton stop ${project}; anton abandon ${project}; docker rm -f anton-${project}\n${ab.stderr}`,
+          );
+        }
+      }
       await rm(home, { recursive: true, force: true });
     }
     if (prevHome === undefined) delete process.env.ANTON_HOME;
@@ -48,6 +61,7 @@ describe.skipIf(!process.env.ANTON_E2E || !process.env.ANTHROPIC_API_KEY)('new p
     const jobsDir = join(repo, '.anton', 'jobs');
     const jobId = (await readdir(jobsDir)).sort().at(-1)!;
     const jobDir = join(jobsDir, jobId);
+    jobIdOf = jobId;
 
     const approved = await anton('approve', project);
     expect(approved.exitCode, approved.stderr).toBe(0);
@@ -62,7 +76,9 @@ describe.skipIf(!process.env.ANTON_E2E || !process.env.ANTHROPIC_API_KEY)('new p
       await new Promise((r) => setTimeout(r, 5_000));
       state = await readState();
     }
-    expect(state.stage).toBe('awaiting_final_review');
+    if (state.stage !== 'awaiting_final_review') {
+      throw new Error(`Timed out after 20 min waiting for awaiting_final_review (current stage: ${state.stage})`);
+    }
     expect(state.spentUsd).toBeLessThanOrEqual(3);
 
     expect(await exists(join(jobDir, 'REPORT.md'))).toBe(true);
