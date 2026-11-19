@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
@@ -6,7 +5,7 @@ import { remainingUsd } from '../core/budget.js';
 import { ROLE_MODELS, type Area } from '../core/config.js';
 import { diffSince as defaultDiffSince } from '../core/git.js';
 import type { JobState } from '../core/state.js';
-import { trimOutput } from '../core/trim.js';
+import { fenceDiff, sha8 } from './shared.js';
 import { loadPrompt } from '../stages/prompts.js';
 import type { Plan } from '../stages/plan.js';
 import type { SpecDoc } from '../stages/spec.js';
@@ -37,14 +36,10 @@ export type CodeReviewDeps = {
 
 /** Stable across rounds and line shifts: the first 8 hex of sha256(file + '\n' + summary). */
 export function findingId(file: string, summary: string): string {
-  return `CR-${createHash('sha256').update(`${file}\n${summary}`).digest('hex').slice(0, 8)}`;
+  return `CR-${sha8(`${file}\n${summary}`)}`;
 }
 
 function renderPrompt(spec: SpecDoc, plan: Plan, diff: string): string {
-  const trimmed = trimOutput(diff, { headLines: 400, tailLines: 400 });
-  // Fence longer than any backtick run in the diff, so the diff cannot close it early.
-  const longest = Math.max(0, ...(trimmed.match(/`+/g) ?? []).map((m) => m.length));
-  const fence = '`'.repeat(Math.max(3, longest + 1));
   const checks = spec.acceptanceChecks.map((c) => `- ${c.id}: ${c.text}`).join('\n');
   const tasks = plan.tasks.map((t) => `- ${t.id} [${t.area}] ${t.title} (${t.acceptanceChecks.join(', ') || 'no checks'})`).join('\n');
   return [
@@ -68,9 +63,7 @@ function renderPrompt(spec: SpecDoc, plan: Plan, diff: string): string {
     '',
     'The full code is readable in `/workspace`; the diff below may be trimmed.',
     '',
-    `${fence}diff`,
-    trimmed,
-    fence,
+    fenceDiff(diff),
   ].join('\n');
 }
 
