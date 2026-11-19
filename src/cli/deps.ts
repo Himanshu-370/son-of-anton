@@ -1,0 +1,124 @@
+import { spawn } from 'node:child_process';
+import { mkdirSync, openSync, closeSync } from 'node:fs';
+import { join } from 'node:path';
+import { createInterface } from 'node:readline/promises';
+import { fileURLToPath } from 'node:url';
+import { defaultExec, type ExecFn } from '../core/exec.js';
+import { currentJobId } from '../core/job.js';
+import { jobDir as jobDirOf } from '../core/paths.js';
+import { getProject } from '../core/registry.js';
+import { loadState, type JobState } from '../core/state.js';
+import {
+  ensureImage as dockerEnsureImage,
+  preflight as dockerPreflight,
+  startContainer as dockerStartContainer,
+  stopContainer as dockerStopContainer,
+} from '../docker/container.js';
+import { fallbackKit } from '../kits/fallback/index.js';
+import { runUnattended as defaultRunUnattended } from '../pipeline/runner.js';
+import { runSpec as defaultRunSpec } from '../stages/spec.js';
+
+/** Every external effect a command has, injectable for tests. */
+export type CliDeps = {
+  out?: (line: string) => void;
+  err?: (line: string) => void;
+  /** Used by the default preflight / image / container functions. */
+  exec?: ExecFn;
+  preflight?: () => Promise<void>;
+  ensureImage?: () => Promise<string>;
+  startContainer?: (slug: string, repo: string, image: string) => Promise<string>;
+  stopContainer?: (name: string) => Promise<void>;
+  runSpec?: typeof defaultRunSpec;
+  ask?: (questions: string[]) => Promise<string[]>;
+  /** Start the detached background run for a project. */
+  spawnRun?: (name: string, jobDir: string) => void;
+  kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
+  sleep?: (ms: number) => Promise<void>;
+  runUnattended?: (project: string) => Promise<void>;
+};
+
+export type Resolved = Required<Omit<CliDeps, 'exec'>>;
+
+/** The built CLI entry; resolves from both src/cli and dist/cli. */
+export const cliPath = (): string => fileURLToPath(new URL('../../dist/cli/index.js', import.meta.url));
+
+export function defaultSpawnRun(name: string, jobDir: string): void {
+  const logs = join(jobDir, 'logs');
+  mkdirSync(logs, { recursive: true });
+  const logFd = openSync(join(logs, 'runner.log'), 'a');
+  try {
+    spawn(process.execPath, [cliPath(), '_run', name], { detached: true, stdio: ['ignore', logFd, logFd] }).unref();
+  } finally {
+    closeSync(logFd);
+  }
+}
+
+/** Interactive question loop on the terminal. */
+export async function readlineAsk(questions: string[]): Promise<string[]> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answers: string[] = [];
+    for (const [i, q] of questions.entries()) {
+      answers.push((await rl.question(`\n${i + 1}. ${q}\n> `)).trim());
+    }
+    return answers;
+  } finally {
+    rl.close();
+  }
+}
+
+export function resolveDeps(d: CliDeps = {}): Resolved {
+  const exec = d.exec ?? defaultExec;
+  return {
+    out: d.out ?? ((l) => console.log(l)),
+    err: d.err ?? ((l) => console.error(l)),
+    preflight: d.preflight ?? (() => dockerPreflight(exec)),
+    ensureImage: d.ensureImage ?? (() => dockerEnsureImage(fallbackKit, exec)),
+    startContainer: d.startContainer ?? ((s, r, i) => dockerStartContainer(s, r, i, exec)),
+    stopContainer: d.stopContainer ?? ((n) => dockerStopContainer(n, exec)),
+    runSpec: d.runSpec ?? defaultRunSpec,
+    ask: d.ask ?? readlineAsk,
+    spawnRun: d.spawnRun ?? defaultSpawnRun,
+    kill: d.kill ?? ((pid, sig) => { process.kill(pid, sig); }),
+    sleep: d.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+    runUnattended: d.runUnattended ?? ((p) => defaultRunUnattended(p)),
+  };
+}
+
+export type ResolvedJob = { name: string; repo: string; jobId: string; jobDir: string; state: JobState };
+
+/** A project's current job and its state. */
+export async function resolveJob(name: string): Promise<ResolvedJob> {
+  const { repoPath: repo } = await getProject(name);
+  const jobId = await currentJobId(repo);
+  const jobDir = jobDirOf(repo, jobId);
+  return { name, repo, jobId, jobDir, state: await loadState(jobDir) };
+}
+
+/** Parses a `--budget` value; returns undefined when absent, throws UsageError when invalid. */
+export function parseBudget(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) throw new UsageError(`--budget must be a positive number of USD (got "${raw}")`);
+  return n;
+}
+
+/** A usage or state error: printed without a stack, exit 1. */
+export class UsageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UsageError';
+  }
+}
+
+/** Runs a command body; maps thrown errors to an exit code (1) with the message on stderr. */
+export async function guard(d: Resolved, body: () => Promise<number>): Promise<number> {
+  try {
+    return await body();
+  } catch (e) {
+    d.err(e instanceof Error ? e.message : String(e));
+    return 1;
+  }
+}
+
+export const usd = (n: number) => `$${n.toFixed(2)}`;

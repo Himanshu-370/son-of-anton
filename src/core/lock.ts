@@ -28,6 +28,11 @@ async function readHolder(path: string): Promise<number | undefined> {
   }
 }
 
+/** The pid recorded in the repo's run lock, alive or not. */
+export async function lockHolder(repo: string): Promise<number | undefined> {
+  return readHolder(lockPath(repo));
+}
+
 export async function isRunning(repo: string): Promise<{ running: boolean; pid?: number }> {
   const pid = await readHolder(lockPath(repo));
   return pid !== undefined && pidAlive(pid) ? { running: true, pid } : { running: false };
