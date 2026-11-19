@@ -77,6 +77,12 @@ export async function diffSince(repo: string, sha: string): Promise<string> {
   return git(repo, ['diff', '--no-color', '--no-ext-diff', `${sha}..HEAD`, '--']);
 }
 
+/** The commit sha a ref (tag, branch, sha) points to. Throws if it does not resolve to a commit. */
+export async function revParse(repo: string, ref: string): Promise<string> {
+  if (ref === '' || ref.startsWith('-') || /\s/.test(ref)) throw new Error(`invalid ref for revParse: ${JSON.stringify(ref)}`);
+  return (await git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).trim();
+}
+
 export async function headSha(repo: string): Promise<string> {
   return (await git(repo, ['rev-parse', 'HEAD'])).trim();
 }

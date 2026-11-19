@@ -3,7 +3,7 @@ import { access, chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
-import { commitAll, tag, headSha, ensureAntonIgnored, listTags, diffSince } from '../../src/core/git.js';
+import { commitAll, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse } from '../../src/core/git.js';
 
 const git = (repo: string, ...args: string[]) =>
   execa('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo });
@@ -165,5 +165,14 @@ describe('git helper', () => {
   it('diffSince rejects a malformed sha', async () => {
     await expect(diffSince(repo, '--output=/tmp/x')).rejects.toThrow(/invalid sha/);
     await expect(diffSince(repo, 'HEAD~1')).rejects.toThrow(/invalid sha/);
+  });
+
+  it('revParse resolves a tag to its commit sha and rejects bad refs', async () => {
+    await writeFile(join(repo, 'a.txt'), 'a');
+    const sha = (await commitAll(repo, 'first'))!;
+    await tag(repo, 'anton/j1/spec-approved');
+    expect(await revParse(repo, 'anton/j1/spec-approved')).toBe(sha);
+    await expect(revParse(repo, 'anton/j1/missing')).rejects.toThrow();
+    await expect(revParse(repo, '--output=/tmp/x')).rejects.toThrow(/invalid ref/);
   });
 });

@@ -32,6 +32,8 @@ export const JobStateSchema = z.object({
   warned80: z.boolean(),
   completedTasks: z.array(z.string()),
   lastFailureSignature: z.string().optional(),
+  /** HEAD at the last verify pass; the next review round diffs from here. */
+  reviewedSha: z.string().optional(),
   updatedAt: z.string(),
 });
 export type JobState = z.infer<typeof JobStateSchema>;
