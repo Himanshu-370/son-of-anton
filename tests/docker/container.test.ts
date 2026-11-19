@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import type { ExecFn } from '../../src/core/exec.js';
 import {
   preflight,
@@ -40,26 +43,63 @@ describe('preflight', () => {
   });
 });
 
+async function makeKit(stageFiles: Record<string, string> | null = { 'entry.js': 'e', 'sub/x.json': '{}' }) {
+  const dir = await mkdtemp(join(tmpdir(), 'anton-kit-'));
+  await writeFile(join(dir, 'Dockerfile'), 'FROM scratch\n');
+  if (stageFiles) {
+    for (const [rel, body] of Object.entries(stageFiles)) {
+      await mkdir(dirname(join(dir, '.stage', rel)), { recursive: true });
+      await writeFile(join(dir, '.stage', rel), body);
+    }
+  }
+  return { dir, dockerfile: join(dir, 'Dockerfile') };
+}
+
 describe('ensureImage', () => {
-  it('skips build when image exists and returns versioned tag', async () => {
+  it('skips build when image exists and returns a versioned, content-hashed tag', async () => {
+    const kit = await makeKit();
     const { exec, calls } = fake();
-    const tag = await ensureImage({ name: 'node', dockerfile: '/k/node/Dockerfile' }, exec);
-    expect(tag).toMatch(/^anton\/kit-node:\d+\.\d+\.\d+/);
+    const tag = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    expect(tag).toMatch(/^anton\/kit-node:\d+\.\d+\.\d+-[0-9a-f]{12}$/);
     expect(calls).toHaveLength(1);
-    expect(calls[0].args.slice(0, 2)).toEqual(['image', 'inspect']);
+    expect(calls[0].args).toEqual(['image', 'inspect', tag]);
+  });
+
+  it('tag hash changes when a staged file or the Dockerfile changes, and is stable otherwise', async () => {
+    const kit = await makeKit();
+    const { exec } = fake();
+    const t1 = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    expect(await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec)).toBe(t1);
+    await writeFile(join(kit.dir, '.stage', 'sub', 'x.json'), '{"a":1}');
+    const t2 = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    expect(t2).not.toBe(t1);
+    await writeFile(kit.dockerfile, 'FROM scratch\nRUN true\n');
+    const t3 = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    expect(t3).not.toBe(t2);
+  });
+
+  it('throws a clear error when .stage/ is missing', async () => {
+    const kit = await makeKit(null);
+    const { exec, calls } = fake();
+    await expect(ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec)).rejects.toThrow(
+      'Kit image files not staged — run: npm run build:image',
+    );
+    expect(calls).toHaveLength(0);
   });
 
   it('builds with -t, -f and the dockerfile dir when missing', async () => {
+    const kit = await makeKit();
     const { exec, calls } = fake((c) => (c.args[0] === 'image' ? { exitCode: 1 } : {}));
-    const tag = await ensureImage({ name: 'node', dockerfile: '/k/node/Dockerfile' }, exec);
-    expect(calls[1].args).toEqual(['build', '-t', tag, '-f', '/k/node/Dockerfile', '/k/node']);
+    const tag = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    expect(calls[1].args).toEqual(['build', '-t', tag, '-f', kit.dockerfile, kit.dir]);
   });
 
   it('throws with trimmed stderr when build fails', async () => {
+    const kit = await makeKit();
     const { exec } = fake((c) =>
       c.args[0] === 'image' ? { exitCode: 1 } : { exitCode: 1, stderr: '  boom\n' },
     );
-    await expect(ensureImage({ name: 'n', dockerfile: '/k/Dockerfile' }, exec)).rejects.toThrow(/boom$/);
+    await expect(ensureImage({ name: 'n', dockerfile: kit.dockerfile }, exec)).rejects.toThrow(/boom$/);
   });
 });
 

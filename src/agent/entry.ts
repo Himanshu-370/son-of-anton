@@ -23,10 +23,13 @@
  *   `is_error: true` can also appear with subtype success (seen for "Not logged in"); treated as error.
  *   A single-shot query() THROWS after yielding an error result, so that throw is ignored once a
  *   result has been seen.
- * - Mid-run usage: assistant messages carry only token `usage` (with placeholder output_tokens) and
- *   NO USD figure. USD is reported only on result messages. So a `cost` event is emitted whenever
- *   a result message arrives (once per single-shot call, right before the terminal event), and no
- *   cost is estimated from tokens mid-run.
+ * - Mid-run usage: assistant messages carry only token `usage` (input, output, cache read and cache
+ *   creation; per-step output_tokens is a placeholder from message_start, so it undercounts) and NO
+ *   USD figure. USD is reported only on result messages. Per ruling R6 we emit interim cumulative
+ *   `cost` events estimated from that usage with ./pricing.ts. Usage is deduplicated by message id,
+ *   because parallel tool uses share one id. When the result arrives, its `total_cost_usd` is
+ *   authoritative for the result/error event. A cost event is emitted only when the total rises, so
+ *   cost events never decrease: if the estimate overshot, the host has already counted the higher figure.
  * - Structured output is native, and we also validate the returned value against req.outputSchema
  *   with zod's `z.fromJSONSchema`, falling back to an "is a JSON object" check if zod can't convert
  *   the schema. If `structured_output` is absent, the final text is parsed as JSON.
@@ -35,6 +38,7 @@ import { readFile, realpath } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { estimateUsd } from './pricing.js';
 import { AgentRequestSchema, type AgentEvent, type AgentRequest } from './protocol.js';
 
 export type EntryDeps = {
@@ -117,7 +121,15 @@ export async function main(requestPath: string, deps: EntryDeps = {}): Promise<v
   }
 
   const query = deps.query ?? (await import('@anthropic-ai/claude-agent-sdk')).query;
-  let lastTotal = 0;
+  /** Highest cumulative total emitted so far (estimate or authoritative). Never decreases. */
+  let emitted = 0;
+  const emitCost = (total: number) => {
+    if (total > emitted) {
+      emitted = total;
+      emit({ type: 'cost', totalUsd: total });
+    }
+  };
+  const perMessageUsd = new Map<string, number>();
   let terminal: AgentEvent | undefined;
   try {
     for await (const msg of query({ prompt: req.prompt, options: buildOptions(req) })) {
@@ -126,17 +138,24 @@ export async function main(requestPath: string, deps: EntryDeps = {}): Promise<v
           if (block.type === 'text' && block.text.trim()) emit({ type: 'log', text: block.text });
           else if (block.type === 'tool_use') emit({ type: 'log', text: `tool: ${block.name}` });
         }
+        if (msg.message.usage) {
+          const usd = estimateUsd(msg.message.model || req.model, msg.message.usage);
+          const id = msg.message.id;
+          perMessageUsd.set(id, Math.max(perMessageUsd.get(id) ?? 0, usd));
+          let sum = 0;
+          for (const v of perMessageUsd.values()) sum += v;
+          emitCost(sum);
+        }
       } else if (msg.type === 'result') {
-        lastTotal = msg.total_cost_usd ?? lastTotal;
-        emit({ type: 'cost', totalUsd: lastTotal });
+        emitCost(msg.total_cost_usd ?? 0);
         terminal = terminalFromResult(req, msg);
       }
     }
   } catch (e) {
     // After an error result, single-shot query() throws by design; the result already describes it.
-    if (!terminal) terminal = { type: 'error', message: errMessage(e), totalUsd: lastTotal };
+    if (!terminal) terminal = { type: 'error', message: errMessage(e), totalUsd: emitted };
   }
-  emit(terminal ?? { type: 'error', message: 'agent ended without a result', totalUsd: lastTotal });
+  emit(terminal ?? { type: 'error', message: 'agent ended without a result', totalUsd: emitted });
 }
 
 async function isEntryScript(): Promise<boolean> {

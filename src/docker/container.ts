@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { readdir, readFile, stat } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
 import { defaultExec, type ExecFn } from '../core/exec.js';
@@ -30,14 +32,42 @@ function packageVersion(): string {
   return (JSON.parse(readFileSync(pkgPath, 'utf8')) as { version: string }).version;
 }
 
+async function listFiles(dir: string, prefix = ''): Promise<string[]> {
+  const out: string[] = [];
+  for (const ent of await readdir(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${ent.name}` : ent.name;
+    if (ent.isDirectory()) out.push(...(await listFiles(join(dir, ent.name), rel)));
+    else if (ent.isFile()) out.push(rel);
+  }
+  return out;
+}
+
+/** First 12 hex of sha256 over the Dockerfile and every file under `.stage/` (sorted paths + contents). */
+async function kitContentHash(dockerfile: string, stageDir: string): Promise<string> {
+  const h = createHash('sha256');
+  h.update('Dockerfile\0').update(await readFile(dockerfile)).update('\0');
+  for (const rel of (await listFiles(stageDir)).sort()) {
+    h.update(`.stage/${rel}\0`).update(await readFile(join(stageDir, rel))).update('\0');
+  }
+  return h.digest('hex').slice(0, 12);
+}
+
+/**
+ * Tag: `anton/kit-<name>:<version>-<hash>`. The content hash means a changed entry or Dockerfile
+ * gets a new tag, so a stale image is never reused.
+ */
 export async function ensureImage(
   kit: { name: string; dockerfile: string },
   exec: ExecFn = defaultExec,
 ): Promise<string> {
-  const tag = `anton/kit-${kit.name}:${packageVersion()}`;
+  const context = dirname(kit.dockerfile);
+  const stageDir = join(context, '.stage');
+  const staged = await stat(stageDir).then((s) => s.isDirectory(), () => false);
+  if (!staged) throw new Error('Kit image files not staged — run: npm run build:image');
+  const tag = `anton/kit-${kit.name}:${packageVersion()}-${await kitContentHash(kit.dockerfile, stageDir)}`;
   const have = await exec('docker', ['image', 'inspect', tag]);
   if (have.exitCode === 0) return tag;
-  const build = await exec('docker', ['build', '-t', tag, '-f', kit.dockerfile, dirname(kit.dockerfile)]);
+  const build = await exec('docker', ['build', '-t', tag, '-f', kit.dockerfile, context]);
   if (build.exitCode !== 0) {
     throw new Error(`docker build failed for ${tag}: ${build.stderr.trim()}`);
   }

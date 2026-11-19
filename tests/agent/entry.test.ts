@@ -16,10 +16,13 @@ const success = (total: number, extra: Record<string, unknown> = {}) => ({
   type: 'result', subtype: 'success', is_error: false, result: 'done', session_id: 'sess-1',
   total_cost_usd: total, num_turns: 1, ...extra,
 });
-const assistant = (text: string) => ({
+type Usage = { input_tokens: number; output_tokens: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number };
+const assistant = (text: string, id = 'msg', usage: Usage = { input_tokens: 0, output_tokens: 0 }, model?: string) => ({
   type: 'assistant', session_id: 'sess-1', parent_tool_use_id: null,
-  message: { id: 'msg', content: [{ type: 'text', text }], usage: { input_tokens: 1, output_tokens: 1 } },
+  message: { id, model, content: [{ type: 'text', text }], usage },
 });
+const costs = (events: AgentEvent[]) =>
+  events.filter((e): e is Extract<AgentEvent, { type: 'cost' }> => e.type === 'cost').map((e) => e.totalUsd);
 
 let dir: string;
 beforeEach(async () => {
@@ -47,16 +50,41 @@ async function run(req: AgentRequest, script: (opts: unknown) => AsyncGenerator<
 
 describe('entry main', () => {
   it('emits cost events as usage arrives and a final result with output', async () => {
+    // claude-test is unknown -> opus prices: $4/M in, $20/M out, cache read 0.4, cache write 5.
     const { events } = await run(baseReq, async function* () {
       yield { type: 'system', subtype: 'init', session_id: 'sess-1' };
-      yield assistant('working on it');
+      yield assistant('working on it', 'm1', { input_tokens: 1000, output_tokens: 500 }); // 0.004 + 0.01
+      // same id again (parallel tool use): must not double count
+      yield assistant('more of m1', 'm1', { input_tokens: 1000, output_tokens: 500 });
+      yield assistant('step 2', 'm2', { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 10_000, cache_creation_input_tokens: 1000 }); // 0.004 + 0.005
       yield success(0.42);
     });
     expect(events).toContainEqual({ type: 'log', text: 'working on it' });
-    expect(events).toContainEqual({ type: 'cost', totalUsd: 0.42 });
+    const c = costs(events);
+    expect(c).toHaveLength(3);
+    expect(c[0]).toBeCloseTo(0.014, 10);
+    expect(c[1]).toBeCloseTo(0.023, 10);
+    expect(c[2]).toBe(0.42); // authoritative total from the result message
+    const firstCost = events.findIndex((e) => e.type === 'cost');
+    expect(firstCost).toBeLessThan(events.findIndex((e) => e.type === 'log' && e.text === 'step 2'));
     expect(events.at(-1)).toEqual({ type: 'result', ok: true, output: 'done', sessionId: 'sess-1', totalUsd: 0.42 });
-    const costIdx = events.findIndex((e) => e.type === 'cost');
-    expect(costIdx).toBeLessThan(events.length - 1);
+  });
+
+  it('prices interim cost by the model on the assistant message (haiku)', async () => {
+    const { events } = await run({ ...baseReq, model: 'claude-haiku-5-5' }, async function* () {
+      yield assistant('a', 'h1', { input_tokens: 1_000_000, output_tokens: 1_000_000 }, 'claude-haiku-5-5');
+      yield success(0.7);
+    });
+    expect(costs(events)[0]).toBeCloseTo(0.6, 10);
+  });
+
+  it('result total below the interim estimate does not emit a decreasing cost event', async () => {
+    const { events } = await run(baseReq, async function* () {
+      yield assistant('a', 'm1', { input_tokens: 1000, output_tokens: 500 }); // 0.014
+      yield success(0.01);
+    });
+    expect(costs(events)).toEqual([expect.closeTo(0.014, 10)]);
+    expect(events.at(-1)).toMatchObject({ type: 'result', totalUsd: 0.01 });
   });
 
   it('passes model, cwd=/workspace, maxTurns and systemPrompt through', async () => {
@@ -123,12 +151,12 @@ describe('entry main', () => {
   });
 
   it('uncaught SDK exception becomes an error event with totalUsd so far', async () => {
-    // The SDK reports USD only on result messages, so "so far" is 0 until one arrives.
+    // No result message yet, so "so far" is the interim token-based estimate.
     const { events } = await run(baseReq, async function* () {
-      yield assistant('step');
+      yield assistant('step', 'm1', { input_tokens: 1000, output_tokens: 500 });
       throw new Error('kaboom');
     });
-    expect(events.at(-1)).toEqual({ type: 'error', message: 'kaboom', totalUsd: 0 });
+    expect(events.at(-1)).toEqual({ type: 'error', message: 'kaboom', totalUsd: expect.closeTo(0.014, 10) });
 
     // A crash result (error_during_execution) carries the total seen; a later throw adds nothing.
     const { events: ev2 } = await run(baseReq, async function* () {
