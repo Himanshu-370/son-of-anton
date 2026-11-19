@@ -158,6 +158,12 @@ describe('runAgent', () => {
     expect((await loadState(ctx.jobDir)).warned80).toBe(true);
   });
 
+  it("an error event with code 'budget' (SDK maxBudgetUsd stop) throws BudgetExceeded, cost recorded", async () => {
+    const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'error_max_budget_usd', code: 'budget', totalUsd: 0.6 })]);
+    await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toBeInstanceOf(BudgetExceeded);
+    expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(0.6);
+  });
+
   it('error event crossing cap throws AgentError', async () => {
     await setState({ budgetUsd: 1 });
     const f = fake([L({ type: 'error', message: 'boom', totalUsd: 1.5 })]);

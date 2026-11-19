@@ -35,6 +35,9 @@ export type CliDeps = {
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
   sleep?: (ms: number) => Promise<void>;
   runUnattended?: (project: string) => Promise<void>;
+  /** Install a SIGINT handler; returns a function that removes it. */
+  onSigint?: (handler: () => Promise<void> | void) => () => void;
+  exit?: (code: number) => void;
 };
 
 export type Resolved = Required<Omit<CliDeps, 'exec'>>;
@@ -53,9 +56,20 @@ export function defaultSpawnRun(name: string, jobDir: string): void {
   }
 }
 
+export function defaultOnSigint(handler: () => Promise<void> | void): () => void {
+  const listener = () => void handler();
+  process.on('SIGINT', listener);
+  return () => {
+    process.off('SIGINT', listener);
+  };
+}
+
 /** Interactive question loop on the terminal. */
 export async function readlineAsk(questions: string[]): Promise<string[]> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
+  // In raw mode readline swallows Ctrl-C (it would just close the interface); forward it as a real
+  // SIGINT so `anton new`'s handler stops the container.
+  rl.on('SIGINT', () => process.kill(process.pid, 'SIGINT'));
   try {
     const answers: string[] = [];
     for (const [i, q] of questions.entries()) {
@@ -82,6 +96,8 @@ export function resolveDeps(d: CliDeps = {}): Resolved {
     kill: d.kill ?? ((pid, sig) => { process.kill(pid, sig); }),
     sleep: d.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
     runUnattended: d.runUnattended ?? ((p) => defaultRunUnattended(p)),
+    onSigint: d.onSigint ?? defaultOnSigint,
+    exit: d.exit ?? ((code) => { process.exit(code); }),
   };
 }
 

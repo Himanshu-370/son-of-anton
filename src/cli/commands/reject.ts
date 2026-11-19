@@ -4,7 +4,7 @@ import { writeFileAtomic } from '../../core/atomic.js';
 import { saveState, transition } from '../../core/state.js';
 import { failureReportPath } from '../../stages/verify.js';
 import { guard, resolveDeps, resolveJob, UsageError, type CliDeps } from '../deps.js';
-import { preflightOr2 } from './shared.js';
+import { preflightOr2, refuseIfRunning } from './shared.js';
 
 /**
  * `anton reject <project> --notes "<text>"`: send the delivery back to build. The notes become
@@ -20,6 +20,12 @@ export async function rejectCommand(project: string, opts: { notes: string }, de
       d.err(`Nothing to reject (stage: ${job.state.stage})`);
       return 1;
     }
+    // The runner that reached awaiting_final_review may still be stopping its container and
+    // releasing the lock; a run spawned now would die with AlreadyRunning in runner.log.
+    const busy = await refuseIfRunning(d, job.repo, project, (pid) =>
+      `${project}'s previous run (pid ${pid}) is still finishing — try again in a moment.`,
+    );
+    if (busy !== 0) return 1;
     const code = await preflightOr2(d);
     if (code !== 0) return code;
 

@@ -155,6 +155,17 @@ describe('anton reject', () => {
     expect(h.spawned).toEqual(['p']);
   });
 
+  it('while the previous runner is still finishing (live lock) → exit 1 "still finishing", nothing changed', async () => {
+    const { repo, dir } = await project('p', { stage: 'awaiting_final_review', round: 2 });
+    await writeFile(join(repo, '.anton', 'run.lock'), JSON.stringify({ pid: process.pid }));
+    const h = harness();
+    expect(await rejectCommand('p', { notes: 'make it blue' }, h.deps)).toBe(1);
+    expect(h.errText()).toMatch(/still finishing.*try again in a moment/);
+    expect(h.spawned).toEqual([]);
+    expect((await loadState(dir)).stage).toBe('awaiting_final_review');
+    await expect(access(failureReportPath(dir))).rejects.toThrow();
+  });
+
   it('not at awaiting_final_review → exit 1', async () => {
     await project('p', { stage: 'build', round: 1 });
     const h = harness();
@@ -344,6 +355,49 @@ describe('anton new', () => {
       'Spec stage failed: agent exploded. Clean up with: anton abandon a-habit-tracker, then run anton new again.',
     );
     expect(stopped).toEqual(['anton-a-habit-tracker']);
+  });
+
+  it('Ctrl-C during the spec loop stops the container, prints the abandon hint, exits 130; handler removed after', async () => {
+    const order: string[] = [];
+    let handler: (() => Promise<void> | void) | undefined;
+    const exit = vi.fn((code: number) => { order.push(`exit:${code}`); });
+    const h = harness({
+      ensureImage: async () => 'img',
+      startContainer: async (slug) => `anton-${slug}`,
+      stopContainer: async (n) => { order.push(`stop:${n}`); },
+      onSigint: (fn) => { handler = fn; order.push('on'); return () => { handler = undefined; order.push('off'); }; },
+      exit: exit as never,
+      runSpec: async () => {
+        expect(handler).toBeDefined();
+        await handler!(); // simulated SIGINT while asking questions
+        throw new Error('interrupted');
+      },
+    });
+    await newCommand('a habit tracker', {}, h.deps);
+    expect(order.slice(0, 3)).toEqual(['on', 'stop:anton-a-habit-tracker', 'exit:130']);
+    expect(order).toContain('off');
+    expect(handler).toBeUndefined();
+    expect(h.errText()).toContain('anton abandon a-habit-tracker');
+  });
+
+  it('a normal spec run registers and removes the SIGINT handler without exiting', async () => {
+    const spec: SpecDoc = {
+      title: 'Habits', summary: 's', outOfScope: [], kit: 'fallback', tech: [],
+      acceptanceChecks: [{ id: 'AC-1', text: 'tracks' }],
+    };
+    const exit = vi.fn();
+    let registered = 0;
+    let removed = 0;
+    const h = harness({
+      ensureImage: async () => 'img',
+      startContainer: async (slug) => `anton-${slug}`,
+      onSigint: () => { registered++; return () => { removed++; }; },
+      exit: exit as never,
+      runSpec: async (ctx) => ({ spec, state: ctx.state }),
+    });
+    expect(await newCommand('a habit tracker', {}, h.deps)).toBe(0);
+    expect([registered, removed]).toEqual([1, 1]);
+    expect(exit).not.toHaveBeenCalled();
   });
 
   it('rejects a non-numeric --budget with exit 1', async () => {

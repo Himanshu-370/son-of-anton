@@ -94,6 +94,21 @@ describe('runUnattended', () => {
     expect(await isRunning(repo)).toEqual({ running: false });
   });
 
+  it('notifies only after the container is stopped and the lock released (review and pause)', async () => {
+    for (const over of [{}, { runBuild: async () => { throw new BudgetExceeded(); } }] as Partial<RunnerDeps>[]) {
+      await setup();
+      const order: string[] = [];
+      const f = fakes({
+        ...over,
+        acquireLock: async () => async () => { order.push('release'); },
+        stopContainer: async () => { order.push('stop'); },
+        notify: async () => { order.push('notify'); },
+      });
+      await runUnattended('p', f.deps);
+      expect(order).toEqual(['stop', 'release', 'notify']);
+    }
+  });
+
   it('plan → build sets round 1', async () => {
     let roundAtBuild = -1;
     const f = fakes({

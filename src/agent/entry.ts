@@ -9,7 +9,8 @@
  *   Query is an AsyncGenerator<SDKMessage>.
  * - Options used here: `model` (string), `effort` ('low'|'medium'|'high'|'xhigh'|'max'; it works with
  *   the default adaptive `thinking`, so `thinking` is left unset), `systemPrompt` (a string replaces
- *   the default prompt), `cwd`, `maxTurns`, `resume` (a session id),
+ *   the default prompt; `{ type: 'preset', preset: 'claude_code', append }` keeps Claude Code's
+ *   default prompt and appends ours), `cwd`, `maxTurns`, `resume` (a session id),
  *   `outputFormat: { type: 'json_schema', schema }` (native structured output),
  *   `maxBudgetUsd` (a native budget; it stops with an `error_max_budget_usd` result. It is a
  *   client-side estimate that can overshoot, so the host-side kill from Task 9 stays), and
@@ -34,6 +35,13 @@
  *   result message, so a finished call over the cap is returned, not killed: R4). A cost event is
  *   emitted only when the estimate rises, so cost events never decrease: if the estimate overshot,
  *   the host has already counted the higher figure.
+ * - System prompt choice (req.systemPromptMode): the build role uses 'append' (the preset form):
+ *   it is a long, tool-heavy coding session that benefits from Claude Code's default guidance on
+ *   tools, editing and running commands, with the build rules appended. Spec and plan keep 'replace'
+ *   (the default): they are short structured-output turns whose role prompt fully defines the job,
+ *   and the coding-agent default prompt would only add tokens and competing instructions.
+ * - SDK budget stop: an `error_max_budget_usd` result becomes an error event with `code: 'budget'`,
+ *   which the host maps to BudgetExceeded (job pauses as budget_cap) rather than a generic error.
  * - Structured output is native, and we also validate the returned value against req.outputSchema
  *   with zod's `z.fromJSONSchema`, falling back to an "is a JSON object" check if zod can't convert
  *   the schema. If `structured_output` is absent, the final text is parsed as JSON.
@@ -58,7 +66,10 @@ export function buildOptions(req: AgentRequest): Options {
   const options: Options = {
     model: req.model,
     effort: req.effort,
-    systemPrompt: req.systemPrompt,
+    systemPrompt:
+      req.systemPromptMode === 'append'
+        ? { type: 'preset', preset: 'claude_code', append: req.systemPrompt }
+        : req.systemPrompt,
     cwd: '/workspace',
     maxTurns: req.maxTurns,
     maxBudgetUsd: req.budgetUsd,
@@ -91,7 +102,10 @@ function terminalFromResult(req: AgentRequest, msg: Extract<SDKMessage, { type: 
   const totalUsd = msg.total_cost_usd ?? 0;
   if (msg.subtype !== 'success') {
     const errors = (msg.errors ?? []).filter(Boolean);
-    return { type: 'error', message: errors.length ? `${msg.subtype}: ${errors.join('; ')}` : msg.subtype, totalUsd };
+    const message = errors.length ? `${msg.subtype}: ${errors.join('; ')}` : msg.subtype;
+    return msg.subtype === 'error_max_budget_usd'
+      ? { type: 'error', message, totalUsd, code: 'budget' }
+      : { type: 'error', message, totalUsd };
   }
   // Observed live: auth failures arrive as subtype 'success' with is_error: true and the reason in `result`.
   if (msg.is_error) return { type: 'error', message: msg.result || 'agent reported an error', totalUsd };

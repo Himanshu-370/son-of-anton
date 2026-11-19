@@ -112,6 +112,8 @@ export async function runAgent(
         return { output: ev.output, sessionId: ev.sessionId };
       case 'error':
         await applyTotal(ev.totalUsd, child, false);
+        // The SDK's own budget stop pauses the job as budget_cap, like the host-side kill.
+        if (ev.code === 'budget') throw new BudgetExceeded(ev.message);
         throw new AgentError(ev.message);
     }
   };

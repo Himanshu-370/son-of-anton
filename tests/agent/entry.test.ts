@@ -132,6 +132,13 @@ describe('entry main', () => {
     expect(calls[0].options).not.toHaveProperty('outputFormat');
   });
 
+  it("systemPromptMode 'append' uses the claude_code preset with the role prompt appended", async () => {
+    const { calls } = await run({ ...baseReq, systemPromptMode: 'append' }, async function* () { yield success(0.01); });
+    expect(calls[0].options.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code', append: 'be terse' });
+    const replace = await run({ ...baseReq, systemPromptMode: 'replace' }, async function* () { yield success(0.01); });
+    expect(replace.calls[0].options.systemPrompt).toBe('be terse');
+  });
+
   it('passes outputSchema as a json_schema outputFormat and returns structured_output', async () => {
     const schema = { type: 'object', properties: { n: { type: 'number' } }, required: ['n'] };
     const { events, calls } = await run({ ...baseReq, outputSchema: schema }, async function* () {
@@ -172,6 +179,14 @@ describe('entry main', () => {
     expect(terminal).toHaveLength(1);
     expect(terminal[0]).toMatchObject({ type: 'error', totalUsd: 2.6 });
     expect((terminal[0] as { message: string }).message).toContain('error_max_budget_usd');
+    expect(terminal[0]).toMatchObject({ code: 'budget' });
+  });
+
+  it('other error results carry no code', async () => {
+    const { events } = await run(baseReq, async function* () {
+      yield { type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 's', total_cost_usd: 0.1, errors: [] };
+    });
+    expect(events.at(-1)).toEqual({ type: 'error', message: 'error_max_turns', totalUsd: 0.1 });
   });
 
   it('uncaught SDK exception becomes an error event with totalUsd so far', async () => {

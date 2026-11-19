@@ -98,7 +98,17 @@ export async function runBuild(
   let state = ctx.state;
 
   const session = async (prompt: string, role: string): Promise<void> => {
-    const req: AgentRequest = { role, model, effort, systemPrompt, prompt, maxTurns: 60, budgetUsd: remainingUsd(state) };
+    const req: AgentRequest = {
+      role,
+      model,
+      effort,
+      systemPrompt,
+      // Keep Claude Code's default coding prompt and append the build rules (see entry.ts).
+      systemPromptMode: 'append',
+      prompt,
+      maxTurns: 60,
+      budgetUsd: remainingUsd(state),
+    };
     state = (await run({ ...ctx, state }, req)).state;
   };
 

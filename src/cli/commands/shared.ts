@@ -14,10 +14,18 @@ export async function preflightOr2(d: Resolved): Promise<number> {
   }
 }
 
-/** Prints an error and returns 1 when a background run already holds the project's lock. */
-export async function refuseIfRunning(d: Resolved, repo: string, project: string): Promise<number> {
+/**
+ * Prints an error and returns 1 when a background run already holds the project's lock.
+ * `message` overrides the default text (e.g. when the run is known to be shutting down).
+ */
+export async function refuseIfRunning(
+  d: Resolved,
+  repo: string,
+  project: string,
+  message?: (pid: number | undefined) => string,
+): Promise<number> {
   const r = await isRunning(repo);
   if (!r.running) return 0;
-  d.err(`${project} is already running (pid ${r.pid}). Stop it first with: anton stop ${project}`);
+  d.err(message ? message(r.pid) : `${project} is already running (pid ${r.pid}). Stop it first with: anton stop ${project}`);
   return 1;
 }

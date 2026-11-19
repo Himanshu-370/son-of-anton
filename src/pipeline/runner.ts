@@ -97,6 +97,11 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
   const jobDir = jobDirOf(repo, await currentJobId(repo));
   const release = await (deps.acquireLock ?? defaultAcquireLock)(repo);
   let startedContainer = false;
+  /**
+   * The end-of-run notification is sent only after the container is stopped and the lock released,
+   * so a user acting on it (reject/resume) doesn't race this runner's shutdown.
+   */
+  let final: string | undefined;
   try {
     let state = await loadState(jobDir);
     if (!ACTIVE_STAGES.includes(state.stage)) {
@@ -138,9 +143,9 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
         }
       }
       log(`stopped at stage: ${state.stage}`);
-      if (state.stage === 'paused') await notify('Son of Anton', pauseMessage(project, state.pauseReason));
+      if (state.stage === 'paused') final = pauseMessage(project, state.pauseReason);
       else if (state.stage === 'awaiting_final_review') {
-        await notify('Son of Anton', `${project}: ready for review. See REPORT.md, then: anton approve ${project}`);
+        final = `${project}: ready for review. See REPORT.md, then: anton approve ${project}`;
       }
     } catch (e) {
       const reason: PauseReason = e instanceof BudgetExceeded ? 'budget_cap' : 'error';
@@ -154,14 +159,18 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       const latest = await loadState(jobDir);
       if (ACTIVE_STAGES.includes(latest.stage)) {
         await saveState(jobDir, pause(latest, reason));
-        await notify('Son of Anton', pauseMessage(project, reason));
+        final = pauseMessage(project, reason);
       }
     }
   } finally {
     try {
       if (startedContainer) await stopContainer(containerName(project));
     } finally {
-      await release();
+      try {
+        await release();
+      } finally {
+        if (final) await notify('Son of Anton', final);
+      }
     }
   }
 }

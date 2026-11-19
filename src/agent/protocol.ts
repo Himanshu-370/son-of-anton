@@ -5,6 +5,11 @@ export const AgentRequestSchema = z.object({
   model: z.string(),
   effort: z.enum(['low', 'medium', 'high']),
   systemPrompt: z.string(),
+  /**
+   * 'replace' (default): systemPrompt replaces the SDK's default prompt. 'append': the Claude Code
+   * preset prompt is kept and systemPrompt is appended to it (used by the build role).
+   */
+  systemPromptMode: z.enum(['replace', 'append']).optional(),
   prompt: z.string(),
   outputSchema: z.record(z.string(), z.unknown()).optional(), // JSON Schema
   resumeSessionId: z.string().optional(),
@@ -30,6 +35,12 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
     sessionId: z.string(),
     totalUsd: z.number().min(0),
   }),
-  z.object({ type: z.literal('error'), message: z.string(), totalUsd: z.number().min(0) }),
+  z.object({
+    type: z.literal('error'),
+    message: z.string(),
+    totalUsd: z.number().min(0),
+    /** Machine-readable cause. 'budget': the SDK stopped at maxBudgetUsd (host throws BudgetExceeded). */
+    code: z.enum(['budget']).optional(),
+  }),
 ]);
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
