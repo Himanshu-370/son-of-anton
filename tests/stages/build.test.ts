@@ -16,9 +16,9 @@ const spec: SpecDoc = {
 const plan: Plan = {
   commands: { install: 'pip install -e .', test: 'pytest --junitxml="$ANTON_JUNIT"' },
   tasks: [
-    { id: 'T1', title: 'scaffold', acceptanceChecks: [], instructions: 'make scaffold' },
-    { id: 'T2', title: 'sum args', acceptanceChecks: ['AC-1'], instructions: 'implement sum' },
-    { id: 'T3', title: 'polish', acceptanceChecks: [], instructions: 'polish it' },
+    { id: 'T1', title: 'scaffold', acceptanceChecks: [], instructions: 'make scaffold', area: 'backend' },
+    { id: 'T2', title: 'sum args', acceptanceChecks: ['AC-1'], instructions: 'implement sum', area: 'backend' },
+    { id: 'T3', title: 'polish', acceptanceChecks: [], instructions: 'polish it', area: 'backend' },
   ],
 };
 

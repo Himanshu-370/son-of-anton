@@ -15,7 +15,7 @@ const spec: SpecDoc = {
 };
 const plan: Plan = {
   commands: { install: 'i', test: 't' },
-  tasks: [{ id: 'T1', title: 'x', acceptanceChecks: ['AC-1', 'AC-2'], instructions: 'y' }],
+  tasks: [{ id: 'T1', title: 'x', acceptanceChecks: ['AC-1', 'AC-2'], instructions: 'y', area: 'backend' }],
 };
 const pass = (id: string): CheckResult => ({ id, status: 'pass', tests: [`${id}: ok`] });
 const fail = (id: string, reason: CheckResult['reason'] = 'failing'): CheckResult => ({ id, status: 'fail', reason, tests: [] });

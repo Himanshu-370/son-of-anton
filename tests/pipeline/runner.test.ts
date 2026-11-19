@@ -19,7 +19,7 @@ const spec: SpecDoc = {
 };
 const plan: Plan = {
   commands: { install: 'i', test: 't' },
-  tasks: [{ id: 'T1', title: 'x', acceptanceChecks: ['AC-1'], instructions: 'y' }],
+  tasks: [{ id: 'T1', title: 'x', acceptanceChecks: ['AC-1'], instructions: 'y', area: 'backend' }],
 };
 const kit: Kit = { name: 'fake', dockerfile: '', detect: () => 1, verify: async () => ({ results: [], runOk: true, failureReport: '' }) };
 

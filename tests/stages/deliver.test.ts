@@ -15,7 +15,7 @@ const spec: SpecDoc = {
 };
 const plan: Plan = {
   commands: { install: 'pip install -e .', test: 'pytest --junitxml="$ANTON_JUNIT"', run: 'sumcli 1 2' },
-  tasks: [{ id: 'T1', title: 'x', acceptanceChecks: ['AC-1', 'AC-2'], instructions: 'y' }],
+  tasks: [{ id: 'T1', title: 'x', acceptanceChecks: ['AC-1', 'AC-2'], instructions: 'y', area: 'backend' }],
 };
 let ctx: StageCtx;
 beforeEach(async () => {
