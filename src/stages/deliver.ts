@@ -2,13 +2,16 @@ import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
 import { writeFileAtomic } from '../core/atomic.js';
-import { tag as defaultTag } from '../core/git.js';
+import { listTags as defaultListTags, tag as defaultTag } from '../core/git.js';
 import { saveState, transition, type JobState } from '../core/state.js';
 import type { CheckResult } from '../kits/types.js';
 import type { Plan } from './plan.js';
 import type { SpecDoc } from './spec.js';
 
-export type DeliverDeps = { tag?: (repo: string, name: string) => Promise<void> };
+export type DeliverDeps = {
+  tag?: (repo: string, name: string) => Promise<void>;
+  listTags?: (repo: string, pattern: string) => Promise<string[]>;
+};
 
 /** The outcome to report. When absent (e.g. after accept-as-is), the latest evidence/results.json is used. */
 export type DeliverInput = { results: CheckResult[]; runOk: boolean } | undefined;
@@ -73,7 +76,7 @@ function notDoneSection(spec: SpecDoc, results: CheckResult[], runOk: boolean): 
   return ['## Not done', '', ...(items.length ? items : ['Nothing: every acceptance check passed.'])];
 }
 
-/** Code-only stage: write REPORT.md, tag the delivery, and wait for final review. */
+/** Code-only stage: write REPORT.md, tag the delivery (`delivered-<n>`), and wait for final review. */
 export async function runDeliver(
   ctx: StageCtx,
   spec: SpecDoc,
@@ -113,7 +116,10 @@ export async function runDeliver(
   ].join('\n');
   await writeFileAtomic(join(ctx.jobDir, 'REPORT.md'), md);
 
-  await tagFn(ctx.repo, `anton/${ctx.state.jobId}/delivered`);
+  // R10: one numbered tag per delivery, so re-delivery after a reject never collides.
+  const prefix = `anton/${ctx.state.jobId}/delivered-`;
+  const existing = await (deps.listTags ?? defaultListTags)(ctx.repo, `${prefix}*`);
+  await tagFn(ctx.repo, `${prefix}${existing.length + 1}`);
   const state = transition(ctx.state, 'awaiting_final_review');
   await saveState(ctx.jobDir, state);
   return state;

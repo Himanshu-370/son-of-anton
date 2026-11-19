@@ -1,3 +1,4 @@
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
 import { writeFileAtomic } from '../core/atomic.js';
@@ -14,13 +15,16 @@ export type VerifyResult = {
   failureReport: string;
 };
 
-/** Sorted `id:reason` pairs of the failing checks, joined with `|`. */
-export function failureSignature(results: CheckResult[]): string {
-  return results
-    .filter((r) => r.status === 'fail')
-    .map((r) => `${r.id}:${r.reason ?? 'failing'}`)
-    .sort()
-    .join('|');
+/** Persisted failure report, so a crashed fix round can resume (R11). */
+export function failureReportPath(jobDir: string): string {
+  return join(jobDir, 'evidence', 'failure-report.md');
+}
+
+/** Sorted `id:reason` pairs of the failing checks, plus `run:failed` when the smoke run failed, joined with `|`. */
+export function failureSignature(results: CheckResult[], runOk: boolean): string {
+  const parts = results.filter((r) => r.status === 'fail').map((r) => `${r.id}:${r.reason ?? 'failing'}`);
+  if (!runOk) parts.push('run:failed');
+  return parts.sort().join('|');
 }
 
 /** Code-only stage: run the kit, record evidence, then decide deliver / build / pause (ruling R1). */
@@ -40,9 +44,11 @@ export async function runVerify(ctx: StageCtx, kit: Kit, spec: SpecDoc, plan: Pl
   const passed = runOk && results.every((r) => r.status === 'pass');
   let state: JobState;
   if (passed) {
+    await rm(failureReportPath(ctx.jobDir), { force: true });
     state = transition(s, 'deliver');
   } else {
-    const signature = failureSignature(results);
+    await writeFileAtomic(failureReportPath(ctx.jobDir), failureReport);
+    const signature = failureSignature(results, runOk);
     if (s.round >= s.maxRounds) state = pause(s, 'round_cap');
     else if (signature === s.lastFailureSignature) state = pause(s, 'no_progress');
     else state = transition(s, 'build', { round: s.round + 1, lastFailureSignature: signature });

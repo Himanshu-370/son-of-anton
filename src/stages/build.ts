@@ -1,3 +1,4 @@
+import * as fsp from 'node:fs/promises';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
 import { remainingUsd } from '../core/budget.js';
@@ -8,6 +9,7 @@ import { trimOutput } from '../core/trim.js';
 import { loadPrompt } from './prompts.js';
 import type { Plan } from './plan.js';
 import type { SpecDoc } from './spec.js';
+import { failureReportPath } from './verify.js';
 
 export type BuildDeps = {
   runAgent?: typeof defaultRunAgent;
@@ -68,9 +70,19 @@ function fixPrompt(ctx: StageCtx, spec: SpecDoc, plan: Plan, failureReport: stri
   ].join('\n');
 }
 
+async function readPersistedReport(jobDir: string): Promise<string | undefined> {
+  try {
+    return await fsp.readFile(failureReportPath(jobDir), 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw e;
+  }
+}
+
 /**
  * Normal mode: one fresh agent session per unfinished task, committing after each.
- * Fix mode (failureReport given): a single fix session. Ends by transitioning to verify.
+ * Fix mode (failureReport given, or every task done and evidence/failure-report.md present after a
+ * crash): a single fix session. Ends by transitioning to verify.
  */
 export async function runBuild(
   ctx: StageCtx,
@@ -89,6 +101,10 @@ export async function runBuild(
     const req: AgentRequest = { role, model, effort, systemPrompt, prompt, maxTurns: 60, budgetUsd: remainingUsd(state) };
     state = (await run({ ...ctx, state }, req)).state;
   };
+
+  if (failureReport === undefined && plan.tasks.every((t) => state.completedTasks.includes(t.id))) {
+    failureReport = await readPersistedReport(ctx.jobDir);
+  }
 
   if (failureReport !== undefined) {
     await session(fixPrompt({ ...ctx, state }, spec, plan, failureReport), 'build');

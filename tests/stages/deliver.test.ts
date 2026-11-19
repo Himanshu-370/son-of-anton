@@ -36,7 +36,7 @@ describe('runDeliver', () => {
     await writeFile(join(ctx.jobDir, 'cost.json'), JSON.stringify({ spec: 0.5, plan: 0.25, build: 0.75 }));
     await writeFile(join(ctx.jobDir, 'questions.md'), '- Assumed integers only.\n');
     const tag = vi.fn(async () => {});
-    const state = await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag });
+    const state = await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag, listTags: async () => [] });
     const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
 
     expect(md).toMatch(/^# Sum CLI\n/);
@@ -57,7 +57,7 @@ describe('runDeliver', () => {
       .map((h) => md.indexOf(h));
     expect(order.every((v, i) => v >= 0 && (i === 0 || v > order[i - 1]!))).toBe(true);
 
-    expect(tag).toHaveBeenCalledWith('/r', 'anton/j1/delivered');
+    expect(tag).toHaveBeenCalledWith('/r', 'anton/j1/delivered-1');
     expect(state.stage).toBe('awaiting_final_review');
     expect((await loadState(ctx.jobDir)).stage).toBe('awaiting_final_review');
   });
@@ -69,12 +69,20 @@ describe('runDeliver', () => {
       results: [results[0], { id: 'AC-2', status: 'fail', reason: 'no_test', tests: [] }],
     };
     await writeFile(join(ctx.jobDir, 'evidence', 'results.json'), JSON.stringify(latest));
-    const state = await runDeliver(ctx, spec, plan, undefined, { tag: async () => {} });
+    const state = await runDeliver(ctx, spec, plan, undefined, { tag: async () => {}, listTags: async () => [] });
     const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
     expect(md).toContain('| AC-2 | rejects \\| junk | fail (no_test) | — |');
     expect(md).toMatch(/## Not done\n\n- AC-2: rejects \| junk \(no_test\)\n- The smoke run command failed/);
     expect(md).toContain('No assumptions recorded');
     expect(md).toContain('No cost recorded');
     expect(state.stage).toBe('awaiting_final_review');
+  });
+
+  it('deliver numbers the tag after existing delivered-* tags', async () => {
+    const tag = vi.fn(async () => {});
+    const listTags = vi.fn(async () => ['anton/j1/delivered-1']);
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag, listTags });
+    expect(listTags).toHaveBeenCalledWith('/r', 'anton/j1/delivered-*');
+    expect(tag).toHaveBeenCalledWith('/r', 'anton/j1/delivered-2');
   });
 });

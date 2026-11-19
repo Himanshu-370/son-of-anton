@@ -1,8 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { StageCtx } from '../../src/agent/host-runner.js';
+import { BudgetExceeded, type StageCtx } from '../../src/agent/host-runner.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
 import { loadState, type JobState } from '../../src/core/state.js';
 import { runBuild } from '../../src/stages/build.js';
@@ -95,5 +95,37 @@ describe('runBuild', () => {
     expect(f.commitAll).toHaveBeenCalledTimes(1);
     expect(f.commitAll).toHaveBeenCalledWith('/r', 'fix: round 2');
     expect(state.stage).toBe('verify');
+  });
+
+  it('build resumes fix mode from evidence/failure-report.md when all tasks are done and no report is passed', async () => {
+    ctx.state = baseState({ round: 2, completedTasks: ['T1', 'T2', 'T3'] });
+    await mkdir(join(ctx.jobDir, 'evidence'), { recursive: true });
+    await writeFile(join(ctx.jobDir, 'evidence', 'failure-report.md'), '### AC-1 — persisted failure');
+    const f = fakes();
+    const state = await runBuild(ctx, spec, plan, undefined, f.deps);
+    expect(f.reqs).toHaveLength(1);
+    expect(f.reqs[0]!.prompt).toContain('### AC-1 — persisted failure');
+    expect(f.commitAll).toHaveBeenCalledWith('/r', 'fix: round 2');
+    expect(state.stage).toBe('verify');
+  });
+
+  it('build with all tasks done and no failure report file goes straight to verify', async () => {
+    ctx.state = baseState({ completedTasks: ['T1', 'T2', 'T3'] });
+    const f = fakes();
+    const state = await runBuild(ctx, spec, plan, undefined, f.deps);
+    expect(f.reqs).toHaveLength(0);
+    expect(state.stage).toBe('verify');
+  });
+
+  it('BudgetExceeded on T2: T1 committed and recorded, T2 not, error propagates', async () => {
+    const f = fakes();
+    let n = 0;
+    const runAgent = vi.fn(async (c: StageCtx, _req: AgentRequest) => {
+      if (++n === 2) throw new BudgetExceeded();
+      return { output: 'ok', sessionId: 's', state: { ...c.state, spentUsd: c.state.spentUsd + 1 } };
+    });
+    await expect(runBuild(ctx, spec, plan, undefined, { runAgent: runAgent as never, commitAll: f.commitAll })).rejects.toBeInstanceOf(BudgetExceeded);
+    expect(f.commitAll.mock.calls).toEqual([['/r', 'T1: scaffold']]);
+    expect(await loadState(ctx.jobDir)).toMatchObject({ stage: 'build', completedTasks: ['T1'] });
   });
 });

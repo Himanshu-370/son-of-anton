@@ -29,6 +29,12 @@ export async function tag(repo: string, name: string): Promise<void> {
   await git(repo, ['tag', name]);
 }
 
+/** Tags matching a `git tag -l` glob pattern. */
+export async function listTags(repo: string, pattern: string): Promise<string[]> {
+  const out = await git(repo, ['tag', '-l', pattern]);
+  return out.split('\n').map((t) => t.trim()).filter(Boolean);
+}
+
 export async function headSha(repo: string): Promise<string> {
   return (await git(repo, ['rev-parse', 'HEAD'])).trim();
 }

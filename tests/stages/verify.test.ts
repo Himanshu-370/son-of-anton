@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { StageCtx } from '../../src/agent/host-runner.js';
@@ -35,7 +35,11 @@ function kit(outcome: VerifyOutcome, seen: VerifyContext[] = []): Kit {
 
 describe('failureSignature', () => {
   it('sorts failing id:reason pairs and joins with |', () => {
-    expect(failureSignature([fail('AC-2', 'no_test'), pass('AC-3'), fail('AC-1')])).toBe('AC-1:failing|AC-2:no_test');
+    expect(failureSignature([fail('AC-2', 'no_test'), pass('AC-3'), fail('AC-1')], true)).toBe('AC-1:failing|AC-2:no_test');
+  });
+  it('includes run:failed when runOk is false', () => {
+    expect(failureSignature([fail('AC-1'), pass('AC-2')], false)).toBe('AC-1:failing|run:failed');
+    expect(failureSignature([pass('AC-1')], false)).toBe('run:failed');
   });
 });
 
@@ -54,7 +58,7 @@ describe('runVerify', () => {
   it('verify: all pass but runOk false → not passed, back to build', async () => {
     const r = await runVerify(ctx, kit({ results: [pass('AC-1'), pass('AC-2')], runOk: false, failureReport: 'run failed' }), spec, plan);
     expect(r.passed).toBe(false);
-    expect(r.state).toMatchObject({ stage: 'build', round: 2 });
+    expect(r.state).toMatchObject({ stage: 'build', round: 2, lastFailureSignature: 'run:failed' });
   });
 
   it('verify: first failure → build with round+1 and signature saved', async () => {
@@ -63,6 +67,22 @@ describe('runVerify', () => {
     expect(r.failureReport).toBe('rep');
     expect(r.state).toMatchObject({ stage: 'build', round: 2, lastFailureSignature: 'AC-1:failing' });
     expect(await loadState(ctx.jobDir)).toMatchObject({ stage: 'build', round: 2, lastFailureSignature: 'AC-1:failing' });
+  });
+
+  it('verify failure writes evidence/failure-report.md; a later pass removes it', async () => {
+    const file = join(ctx.jobDir, 'evidence', 'failure-report.md');
+    await runVerify(ctx, kit({ results: [fail('AC-1'), pass('AC-2')], runOk: true, failureReport: 'the report' }), spec, plan);
+    expect(await readFile(file, 'utf8')).toBe('the report');
+    ctx.state = st({ round: 2 });
+    await runVerify(ctx, kit({ results: [pass('AC-1'), pass('AC-2')], runOk: true, failureReport: '' }), spec, plan);
+    await expect(access(file)).rejects.toThrow();
+  });
+
+  it('verify pass with no failure-report.md present does not throw', async () => {
+    await mkdir(join(ctx.jobDir, 'evidence'), { recursive: true });
+    await writeFile(join(ctx.jobDir, 'evidence', 'other.txt'), 'x');
+    const r = await runVerify(ctx, kit({ results: [pass('AC-1'), pass('AC-2')], runOk: true, failureReport: '' }), spec, plan);
+    expect(r.passed).toBe(true);
   });
 
   it('verify: second identical failure signature → paused/no_progress', async () => {

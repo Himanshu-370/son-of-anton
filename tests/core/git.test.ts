@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
-import { commitAll, tag, headSha, ensureAntonIgnored } from '../../src/core/git.js';
+import { commitAll, tag, headSha, ensureAntonIgnored, listTags } from '../../src/core/git.js';
 
 const git = (repo: string, ...args: string[]) =>
   execa('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo });
@@ -38,6 +38,17 @@ describe('git helper', () => {
     await tag(repo, 'v1');
     const { stdout } = await git(repo, 'tag', '-l');
     expect(stdout.split('\n')).toContain('v1');
+  });
+
+  it('listTags returns tags matching a glob pattern', async () => {
+    await writeFile(join(repo, 'a.txt'), 'a');
+    await commitAll(repo, 'first');
+    expect(await listTags(repo, 'anton/j1/delivered-*')).toEqual([]);
+    await tag(repo, 'anton/j1/delivered-1');
+    await tag(repo, 'anton/j1/delivered-2');
+    await tag(repo, 'anton/j2/delivered-1');
+    await tag(repo, 'anton/j1/spec-approved');
+    expect((await listTags(repo, 'anton/j1/delivered-*')).sort()).toEqual(['anton/j1/delivered-1', 'anton/j1/delivered-2']);
   });
 
   it('authors commits as Son of Anton without touching repo config', async () => {
