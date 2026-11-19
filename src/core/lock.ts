@@ -1,4 +1,4 @@
-import { mkdir, link, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, link, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export class AlreadyRunning extends Error {
@@ -36,9 +36,11 @@ export async function isRunning(repo: string): Promise<{ running: boolean; pid?:
 export async function acquireLock(repo: string): Promise<() => Promise<void>> {
   const path = lockPath(repo);
   await mkdir(join(repo, '.anton'), { recursive: true });
-  const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}`;
-  await writeFile(tmp, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  const uniq = `${process.pid}.${Math.random().toString(36).slice(2)}`;
+  const tmp = `${path}.${uniq}`;
+  const stale = `${path}.stale.${uniq}`;
   try {
+    await writeFile(tmp, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
     for (let attempt = 0; ; attempt++) {
       try {
         // link() fails with EEXIST if the lock exists, and the lock appears with full content.
@@ -48,14 +50,29 @@ export async function acquireLock(repo: string): Promise<() => Promise<void>> {
         if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
         const pid = await readHolder(path);
         if (pid !== undefined && pidAlive(pid)) throw new AlreadyRunning(pid);
-        if (attempt >= 1) throw new AlreadyRunning(pid ?? 0);
-        await rm(path, { force: true });
+        if (attempt >= 5) throw new AlreadyRunning(pid ?? 0);
+        // Atomic takeover: only one renamer can move a given file.
+        try {
+          await rename(path, stale);
+        } catch (re) {
+          if ((re as NodeJS.ErrnoException).code === 'ENOENT') continue;
+          throw re;
+        }
+        const moved = await readHolder(stale);
+        if (moved !== undefined && pidAlive(moved)) {
+          // We grabbed a live lock someone else just created; put it back.
+          await link(stale, path).catch(() => {});
+          throw new AlreadyRunning(moved);
+        }
+        // genuinely stale: discarded in finally, then retry link
+        await rm(stale, { force: true });
       }
     }
   } finally {
     await rm(tmp, { force: true });
+    await rm(stale, { force: true });
   }
   return async () => {
-    await rm(path, { force: true });
+    if ((await readHolder(path)) === process.pid) await rm(path, { force: true });
   };
 }

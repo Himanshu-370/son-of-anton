@@ -44,4 +44,24 @@ describe('lock', () => {
     const results = await Promise.allSettled([acquireLock(repo), acquireLock(repo), acquireLock(repo)]);
     expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
   });
+
+  it('concurrent acquirers against a stale lock: exactly one wins, rest AlreadyRunning', async () => {
+    const repo = await tmp();
+    await mkdir(join(repo, '.anton'));
+    await writeFile(join(repo, '.anton', 'run.lock'), JSON.stringify({ pid: 999999, startedAt: 'x' }));
+    const results = await Promise.allSettled(Array.from({ length: 8 }, () => acquireLock(repo)));
+    const ok = results.filter((r) => r.status === 'fulfilled');
+    const bad = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
+    expect(ok).toHaveLength(1);
+    for (const b of bad) expect(b.reason).toBeInstanceOf(AlreadyRunning);
+  });
+
+  it('release does not remove a lock owned by another pid', async () => {
+    const repo = await tmp();
+    const release = await acquireLock(repo);
+    const p = join(repo, '.anton', 'run.lock');
+    await writeFile(p, JSON.stringify({ pid: 1, startedAt: 'x' }));
+    await release();
+    expect(await exists(p)).toBe(true);
+  });
 });
