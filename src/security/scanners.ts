@@ -48,12 +48,18 @@ async function gitleaks(container: string, run: RunIn): Promise<ScannerFinding[]
   // exit 1 = leaks found (not a failure)
   const r = await run(
     container,
-    `cd ${WORKSPACE} && ${TIMEOUT} gitleaks detect --no-banner --report-format json --report-path /tmp/gitleaks.json`,
+    `rm -f /tmp/gitleaks.json; cd ${WORKSPACE} && ${TIMEOUT} gitleaks detect --no-banner --report-format json --report-path /tmp/gitleaks.json`,
   );
   checkExit(r, [0, 1]);
   const rep = await run(container, 'cat /tmp/gitleaks.json');
-  checkExit(rep, [0]);
-  const data = parse(rep.stdout.trim() === '' ? '[]' : rep.stdout);
+  // gitleaks 8.30.1 writes `[]` on a clean scan, but a missing/empty report only means "clean"
+  // when it exited 0; exit 1 (leaks claimed) without a readable report is a real error.
+  const missing = rep.exitCode !== 0 || rep.stdout.trim() === '';
+  if (missing) {
+    if (r.exitCode === 0) return [];
+    throw new Unavailable('leaks reported but no report file');
+  }
+  const data = parse(rep.stdout);
   if (!Array.isArray(data)) throw new Unavailable('unexpected shape');
   return data.map((x) => {
     const o = rec(x);
@@ -81,7 +87,10 @@ async function osv(container: string, run: RunIn): Promise<ScannerFinding[]> {
   // exit 1 = vulnerabilities found; 128 = no packages found
   const r = await run(container, `cd ${WORKSPACE} && ${TIMEOUT} osv-scanner scan source -r --format json .`);
   checkExit(r, [0, 1, 128]);
-  if (r.exitCode === 128 && r.stdout.trim() === '') return [];
+  if (r.exitCode === 128) {
+    if (r.stdout.trim() === '' && /no package sources/i.test(r.stderr)) return [];
+    throw new Unavailable('osv-scanner exit 128');
+  }
   const root = rec(parse(r.stdout));
   if (!Array.isArray(root.results)) throw new Unavailable('unexpected shape');
   const out: ScannerFinding[] = [];
@@ -112,7 +121,7 @@ async function osv(container: string, run: RunIn): Promise<ScannerFinding[]> {
 
 const SEMGREP_SEVERITY: Record<string, Severity> = { ERROR: 'high', WARNING: 'medium', INFO: 'low' };
 
-async function semgrep(container: string, run: RunIn): Promise<ScannerFinding[]> {
+async function semgrep(container: string, run: RunIn, notes: string[]): Promise<ScannerFinding[]> {
   const r = await run(
     container,
     `cd ${WORKSPACE} && ${TIMEOUT} semgrep scan --config p/default --json --metrics=off .`,
@@ -120,6 +129,7 @@ async function semgrep(container: string, run: RunIn): Promise<ScannerFinding[]>
   checkExit(r, [0, 1]);
   const root = rec(parse(r.stdout));
   if (!Array.isArray(root.results)) throw new Unavailable('unexpected shape');
+  if (arr(root.errors).length > 0) notes.push('semgrep (partial)');
   return arr(root.results).map((x) => {
     const o = rec(x);
     const extra = rec(o.extra);
@@ -140,7 +150,7 @@ export async function runScanners(
   deps: { runIn?: RunIn } = {},
 ): Promise<{ findings: ScannerFinding[]; unavailable: string[] }> {
   const run: RunIn = deps.runIn ?? ((c, cmd) => defaultRunIn(c, cmd));
-  const scanners: [Tool, (c: string, r: RunIn) => Promise<ScannerFinding[]>][] = [
+  const scanners: [Tool, (c: string, r: RunIn, notes: string[]) => Promise<ScannerFinding[]>][] = [
     ['gitleaks', gitleaks],
     ['osv-scanner', osv],
     ['semgrep', semgrep],
@@ -149,7 +159,7 @@ export async function runScanners(
   const unavailable: string[] = [];
   for (const [name, fn] of scanners) {
     try {
-      findings.push(...(await fn(container, run)).filter((f) => !excluded(f.file)));
+      findings.push(...(await fn(container, run, unavailable)).filter((f) => !excluded(f.file)));
     } catch {
       unavailable.push(name);
     }

@@ -8,7 +8,7 @@ const fx = (n: string): string =>
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', n), 'utf8');
 
 type R = { exitCode: number; stdout: string; stderr: string };
-const r = (exitCode: number, stdout = ''): R => ({ exitCode, stdout, stderr: '' });
+const r = (exitCode: number, stdout = '', stderr = ''): R => ({ exitCode, stdout, stderr });
 
 type Outs = { gitleaks?: R; report?: R; osv?: R; semgrep?: R };
 function fake(o: Outs) {
@@ -85,6 +85,44 @@ describe('runScanners', () => {
     const out = await runScanners('c', { runIn: fake({ osv: r(127), semgrep: r(127), gitleaks: r(127) }).runIn });
     expect(out.unavailable.sort()).toEqual(['gitleaks', 'osv-scanner', 'semgrep']);
     expect(out.findings).toEqual([]);
+  });
+
+  it('gitleaks command removes any stale report first', async () => {
+    const f = fake({});
+    await runScanners('c', { runIn: f.runIn });
+    expect(f.cmds.find((c) => c.includes('gitleaks detect'))!.startsWith('rm -f /tmp/gitleaks.json;')).toBe(true);
+  });
+
+  it('gitleaks exit 0 with missing or empty report → no findings, not unavailable', async () => {
+    for (const rep of [r(1, '', 'cat: no such file'), r(0, '')]) {
+      const out = await runScanners('c', { runIn: fake({ gitleaks: r(0), report: rep }).runIn });
+      expect(out.unavailable).toEqual([]);
+      expect(out.findings).toEqual([]);
+    }
+  });
+
+  it('gitleaks exit 1 with missing/empty report → unavailable', async () => {
+    for (const rep of [r(1, '', 'cat: no such file'), r(0, '')]) {
+      const out = await runScanners('c', { runIn: fake({ gitleaks: r(1), report: rep }).runIn });
+      expect(out.unavailable).toEqual(['gitleaks']);
+    }
+  });
+
+  it('osv exit 128 is "no findings" only for empty stdout + "No package sources" stderr', async () => {
+    const ok = await runScanners('c', { runIn: fake({ osv: r(128, '', 'Error: No package sources found') }).runIn });
+    expect(ok.unavailable).toEqual([]);
+    const other = await runScanners('c', { runIn: fake({ osv: r(128, '', 'boom') }).runIn });
+    expect(other.unavailable).toEqual(['osv-scanner']);
+    const withOut = await runScanners('c', { runIn: fake({ osv: r(128, '{}', 'No package sources found') }).runIn });
+    expect(withOut.unavailable).toEqual(['osv-scanner']);
+  });
+
+  it('semgrep with non-empty errors keeps findings but flags partial', async () => {
+    const sg = JSON.parse(fx('semgrep.json'));
+    sg.errors = [{ code: 3, message: 'parse error' }];
+    const out = await runScanners('c', { runIn: fake({ semgrep: r(0, JSON.stringify(sg)) }).runIn });
+    expect(out.unavailable).toEqual(['semgrep (partial)']);
+    expect(out.findings.filter((x) => x.tool === 'semgrep')).toHaveLength(5);
   });
 
   it('timeout (exit 124) → unavailable', async () => {
