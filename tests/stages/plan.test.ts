@@ -33,7 +33,7 @@ describe('runPlan', () => {
     const r = await runPlan(ctx, spec, { runAgent: run(output, reqs) });
     expect(r.plan.tasks).toHaveLength(2);
     expect(r.state.spentUsd).toBe(2);
-    expect(reqs[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'medium', maxTurns: 30 });
+    expect(reqs[0]).toMatchObject({ role: 'tech_lead', model: 'claude-opus-5-5', effort: 'medium', maxTurns: 30 });
     expect(reqs[0]!.outputSchema!.type).toBe('object');
     expect(reqs[0]!.systemPrompt).toContain('$ANTON_JUNIT');
     expect(JSON.parse(await readFile(join(ctx.jobDir, 'plan.json'), 'utf8')).commands.install).toBe('npm i');

@@ -54,7 +54,7 @@ describe('runBuild', () => {
     expect(f.reqs[1]!.prompt).toContain('T3: polish');
     for (const r of f.reqs) {
       expect(r.resumeSessionId).toBeUndefined();
-      expect(r).toMatchObject({ model: 'claude-sonnet-5-5', effort: 'medium', maxTurns: 60, systemPromptMode: 'append' });
+      expect(r).toMatchObject({ role: 'backend', model: 'claude-sonnet-5-5', effort: 'medium', maxTurns: 60, systemPromptMode: 'append' });
     }
     expect(f.reqs[1]!.budgetUsd).toBe(9); // remaining after the first session's cost
     expect(state.completedTasks).toEqual(['T1', 'T2', 'T3']);

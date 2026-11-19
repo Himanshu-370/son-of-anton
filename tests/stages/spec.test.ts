@@ -41,7 +41,7 @@ describe('runSpec', () => {
     expect(reqs[1]!.resumeSessionId).toBe('s1');
     expect(reqs[2]!.prompt).toContain('A: yes');
     for (const r of reqs) expect(r.outputSchema!.type).toBe('object');
-    expect(reqs[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high', maxTurns: 30, budgetUsd: 9 });
+    expect(reqs[0]).toMatchObject({ role: 'pm', model: 'claude-opus-5-5', effort: 'high', maxTurns: 30, budgetUsd: 9 });
   });
 
   it('forces the spec on the 6th call and throws SpecNotProduced', async () => {

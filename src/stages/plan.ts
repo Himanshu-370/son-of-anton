@@ -5,7 +5,7 @@ import { runAgent as defaultRunAgent } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
 import { writeFileAtomic } from '../core/atomic.js';
 import { remainingUsd } from '../core/budget.js';
-import { DEFAULTS } from '../core/config.js';
+import { ROLE_MODELS } from '../core/config.js';
 import type { JobState } from '../core/state.js';
 import type { Commands } from '../kits/types.js';
 import { loadPrompt } from './prompts.js';
@@ -67,9 +67,9 @@ export async function runPlan(
   deps: PlanDeps = {},
 ): Promise<{ plan: Plan; state: JobState }> {
   const run = deps.runAgent ?? defaultRunAgent;
-  const { model, effort } = DEFAULTS.models.plan;
+  const { model, effort } = ROLE_MODELS.tech_lead;
   const req: AgentRequest = {
-    role: 'plan',
+    role: 'tech_lead',
     model,
     effort,
     systemPrompt: await loadPrompt('plan.md'),

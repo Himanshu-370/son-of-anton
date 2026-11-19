@@ -2,7 +2,7 @@ import * as fsp from 'node:fs/promises';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
 import { remainingUsd } from '../core/budget.js';
-import { DEFAULTS } from '../core/config.js';
+import { ROLE_MODELS } from '../core/config.js';
 import { commitAll as defaultCommitAll } from '../core/git.js';
 import { saveState, transition, type JobState } from '../core/state.js';
 import { trimOutput } from '../core/trim.js';
@@ -94,7 +94,7 @@ export async function runBuild(
   const run = deps.runAgent ?? defaultRunAgent;
   const commit = deps.commitAll ?? defaultCommitAll;
   const systemPrompt = await loadPrompt('build.md');
-  const { model, effort } = DEFAULTS.models.build;
+  const { model, effort } = ROLE_MODELS.backend;
   let state = ctx.state;
 
   const session = async (prompt: string, role: string): Promise<void> => {
@@ -117,12 +117,12 @@ export async function runBuild(
   }
 
   if (failureReport !== undefined) {
-    await session(fixPrompt({ ...ctx, state }, spec, plan, failureReport), 'build');
+    await session(fixPrompt({ ...ctx, state }, spec, plan, failureReport), 'backend');
     await commit(ctx.repo, `fix: round ${state.round}`);
   } else {
     for (const task of plan.tasks) {
       if (state.completedTasks.includes(task.id)) continue;
-      await session(taskPrompt({ ...ctx, state }, spec, plan, task), 'build');
+      await session(taskPrompt({ ...ctx, state }, spec, plan, task), 'backend');
       await commit(ctx.repo, `${task.id}: ${task.title}`);
       state = { ...state, completedTasks: [...state.completedTasks, task.id] };
       await saveState(ctx.jobDir, state);
