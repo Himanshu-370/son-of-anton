@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BudgetExceeded, type StageCtx } from '../../src/agent/host-runner.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
+import { ROLE_MODELS } from '../../src/core/config.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
 import { failuresPath, type FailureItem } from '../../src/stages/qa.js';
 import { runBuild } from '../../src/stages/build.js';
@@ -223,6 +224,12 @@ describe('runBuild', () => {
         expect(p).toContain('POST /api/sum returns {total}');
         expect(p).toContain('/workspace/.anton/jobs/j1/evidence/failure-report.md');
         expect(p).not.toContain('WHOLE REPORT MARKER');
+      }
+      const build = await loadPrompt('build.md');
+      for (const r of f.reqs) {
+        const area = r.role as 'backend' | 'frontend';
+        expect(r).toMatchObject({ model: ROLE_MODELS[area].model, effort: ROLE_MODELS[area].effort });
+        expect(r.systemPrompt).toBe(`${build}\n\n${await loadPrompt(`role-${area}.md`)}`);
       }
       expect(state.stage).toBe('verify');
     });

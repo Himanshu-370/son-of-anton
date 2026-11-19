@@ -110,6 +110,13 @@ describe('runVerify', () => {
     expect(await loadState(ctx.jobDir)).toMatchObject({ stage: 'build', round: 2, lastFailureSignature: 'check:AC-1:failing' });
   });
 
+  it('verify failure into a new build round resets stale completedFixAreas', async () => {
+    ctx.state = st({ round: 2, completedFixAreas: ['backend', 'frontend'], lastFailureSignature: 'other' });
+    const r = await runVerify(ctx, kit({ results: [fail('AC-1'), pass('AC-2')], runOk: true, failureReport: 'rep' }), spec, plan, fakeDeps());
+    expect(r.state).toMatchObject({ stage: 'build', round: 3, completedFixAreas: [] });
+    expect(await loadState(ctx.jobDir)).toMatchObject({ completedFixAreas: [] });
+  });
+
   it('verify failure writes failures.json and a grouped failure-report.md; a later pass removes both', async () => {
     const file = join(ctx.jobDir, 'evidence', 'failure-report.md');
     await runVerify(ctx, kit({ results: [fail('AC-1'), pass('AC-2')], runOk: true, failureReport: 'the report' }), spec, plan, fakeDeps());

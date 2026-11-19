@@ -11,7 +11,7 @@ import { orderTasks, readHandoffs } from './handoffs.js';
 import { loadPrompt } from './prompts.js';
 import type { Plan } from './plan.js';
 import type { SpecDoc } from './spec.js';
-import { failuresPath, renderFailureReport, type FailureItem } from './qa.js';
+import { FailureItemSchema, failuresPath, renderFailureReport, type FailureItem } from './qa.js';
 import { failureReportPath } from './verify.js';
 
 export type BuildDeps = {
@@ -114,18 +114,9 @@ function fixPrompt(
   ].join('\n');
 }
 
-const FailureItemsSchema = z.array(
-  z.object({
-    area: z.enum(['frontend', 'backend', 'infra']),
-    kind: z.enum(['check', 'run', 'review', 'security']),
-    id: z.string(),
-    text: z.string(),
-  }),
-);
-
 async function readFailureItems(jobDir: string): Promise<FailureItem[] | undefined> {
   try {
-    return FailureItemsSchema.parse(JSON.parse(await fsp.readFile(failuresPath(jobDir), 'utf8')));
+    return z.array(FailureItemSchema).parse(JSON.parse(await fsp.readFile(failuresPath(jobDir), 'utf8')));
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
     throw e;
@@ -143,8 +134,9 @@ async function readPersistedReport(jobDir: string): Promise<string | undefined> 
 
 /**
  * Normal mode: one fresh agent session per unfinished task, committing after each.
- * Fix mode (failureReport given, or every task done and evidence/failure-report.md present after a
- * crash): a single fix session. Ends by transitioning to verify.
+ * Fix mode (failureReport given, or every task done and evidence/failures.json or failure-report.md
+ * present): one session per area with failures, in AREA_ORDER, skipping areas in state.completedFixAreas.
+ * Ends by transitioning to verify.
  */
 export async function runBuild(
   ctx: StageCtx,

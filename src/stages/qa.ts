@@ -1,10 +1,17 @@
 import { join } from 'node:path';
+import { z } from 'zod';
 import { AREA_ORDER, type Area } from '../core/config.js';
 import type { CheckResult } from '../kits/types.js';
 import type { Plan } from './plan.js';
 
 /** One failure routed to one area's developer. `id` is stable across rounds (it feeds the R1 signature). */
-export type FailureItem = { area: Area; kind: 'check' | 'run' | 'review' | 'security'; id: string; text: string };
+export const FailureItemSchema = z.object({
+  area: z.enum(['frontend', 'backend', 'infra']),
+  kind: z.enum(['check', 'run', 'review', 'security']),
+  id: z.string(),
+  text: z.string(),
+});
+export type FailureItem = z.infer<typeof FailureItemSchema>;
 
 /** Structured failures of the last verify round, next to the markdown report (R11). */
 export function failuresPath(jobDir: string): string {

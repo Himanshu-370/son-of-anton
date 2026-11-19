@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { writeFileAtomic } from '../../core/atomic.js';
 import { saveState, transition } from '../../core/state.js';
 import { AREA_ORDER } from '../../core/config.js';
-import { PlanSchema } from '../../stages/plan.js';
+import { PlanSchema, type Plan } from '../../stages/plan.js';
 import { failuresPath, type FailureItem } from '../../stages/qa.js';
 import { failureReportPath } from '../../stages/verify.js';
 import { guard, resolveDeps, resolveJob, UsageError, type CliDeps } from '../deps.js';
@@ -40,7 +40,7 @@ export async function rejectCommand(project: string, opts: { notes: string }, de
     );
     // Fan the notes out to every area in the plan (one review item each); without a readable plan the
     // markdown report above is all there is, and build routes it to every area (P2-R1).
-    let plan: ReturnType<typeof PlanSchema.parse> | undefined;
+    let plan: Plan | undefined;
     try {
       plan = PlanSchema.parse(JSON.parse(await readFile(join(job.jobDir, 'plan.json'), 'utf8')));
     } catch {
