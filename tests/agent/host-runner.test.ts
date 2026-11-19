@@ -22,6 +22,11 @@ function fake(chunks: string[], exitCode = 0) {
 const L = (o: unknown) => JSON.stringify(o) + '\n';
 
 let ctx: StageCtx;
+async function setState(over: Partial<JobState>) {
+  ctx.state = { ...ctx.state, ...over };
+  await saveState(ctx.jobDir, ctx.state);
+}
+
 beforeEach(async () => {
   const jobDir = await mkdtemp(join(tmpdir(), 'anton-hr-'));
   const state: JobState = {
@@ -66,7 +71,7 @@ describe('runAgent', () => {
   });
 
   it('kills process and throws BudgetExceeded when cap crossed', async () => {
-    ctx.state = { ...ctx.state, budgetUsd: 1 };
+    await setState({ budgetUsd: 1 });
     const f = fake([L({ type: 'cost', totalUsd: 0.6 }), L({ type: 'cost', totalUsd: 1.1 })]);
     await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toBeInstanceOf(BudgetExceeded);
     expect(f.kill).toHaveBeenCalled();
@@ -97,11 +102,45 @@ describe('runAgent', () => {
   });
 
   it('notifies once at 80%', async () => {
-    ctx.state = { ...ctx.state, budgetUsd: 10 };
+    await setState({ budgetUsd: 10 });
     const notify = vi.fn();
     const f = fake([L({ type: 'cost', totalUsd: 8.5 }), L({ type: 'cost', totalUsd: 9 }), result(9.5)]);
     await runAgent(ctx, req, { spawn: () => f.child, notify });
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledWith('Son of Anton', 'proj: 80% of budget used');
+  });
+
+  it('result over cap returns output without killing', async () => {
+    await setState({ budgetUsd: 1 });
+    const f = fake([result(1.5, { z: 1 })]);
+    const r = await runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() });
+    expect(r.output).toEqual({ z: 1 });
+    expect(f.kill).not.toHaveBeenCalled();
+    expect((await loadState(ctx.jobDir)).spentUsd).toBeGreaterThan(1);
+  });
+
+  it('refuses to start with no budget remaining', async () => {
+    await setState({ budgetUsd: 1, spentUsd: 1 });
+    const spawn = vi.fn(() => fake([result(0)]).child);
+    await expect(runAgent(ctx, req, { spawn, notify: vi.fn() })).rejects.toBeInstanceOf(BudgetExceeded);
+    expect(spawn).not.toHaveBeenCalled();
+    await expect(readdir(join(ctx.jobDir, 'requests'))).rejects.toThrow();
+  });
+
+  it('single increment crossing warn and cap notifies once, kills, throws', async () => {
+    await setState({ budgetUsd: 1 });
+    const notify = vi.fn();
+    const f = fake([L({ type: 'cost', totalUsd: 1.2 })]);
+    await expect(runAgent(ctx, req, { spawn: () => f.child, notify })).rejects.toBeInstanceOf(BudgetExceeded);
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(f.kill).toHaveBeenCalledTimes(1);
+    expect((await loadState(ctx.jobDir)).warned80).toBe(true);
+  });
+
+  it('error event crossing cap throws AgentError', async () => {
+    await setState({ budgetUsd: 1 });
+    const f = fake([L({ type: 'error', message: 'boom', totalUsd: 1.5 })]);
+    await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toThrow(AgentError);
+    expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(1.5);
   });
 });

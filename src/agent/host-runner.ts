@@ -1,6 +1,6 @@
 import * as fsp from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { appendStageCost, recordCost } from '../core/budget.js';
+import { appendStageCost, recordCost, remainingUsd } from '../core/budget.js';
 import { execIn } from '../docker/container.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { saveState, type JobState } from '../core/state.js';
@@ -55,6 +55,7 @@ export async function runAgent(
   req: AgentRequest,
   deps: RunAgentDeps = {},
 ): Promise<{ output: unknown; sessionId: string; state: JobState }> {
+  if (remainingUsd(ctx.state) <= 0) throw new BudgetExceeded('no budget remaining');
   const spawn = deps.spawn ?? ((c, a) => execIn(c, a) as unknown as ChildLike);
   const notify = deps.notify ?? defaultNotify;
 
@@ -66,9 +67,10 @@ export async function runAgent(
 
   let state = ctx.state;
   let lastTotal = 0;
+  let killed = false;
 
   /** Apply the increment since the last seen total; persist; notify/throw as needed. */
-  const applyTotal = async (totalUsd: number, child: ChildLike): Promise<void> => {
+  const applyTotal = async (totalUsd: number, child: ChildLike, killOnCap: boolean): Promise<void> => {
     const inc = totalUsd - lastTotal;
     if (inc <= 0) return;
     lastTotal = totalUsd;
@@ -77,7 +79,8 @@ export async function runAgent(
     await appendStageCost(ctx.jobDir, ctx.stage, inc);
     await saveState(ctx.jobDir, state);
     if (r.crossedWarn) await notify('Son of Anton', `${ctx.project}: 80% of budget used`);
-    if (r.overCap) {
+    if (r.overCap && killOnCap) {
+      killed = true;
       child.kill('SIGTERM');
       throw new BudgetExceeded();
     }
@@ -101,13 +104,13 @@ export async function runAgent(
       case 'log':
         return undefined;
       case 'cost':
-        await applyTotal(ev.totalUsd, child);
+        await applyTotal(ev.totalUsd, child, true);
         return undefined;
       case 'result':
-        await applyTotal(ev.totalUsd, child);
+        await applyTotal(ev.totalUsd, child, false);
         return { output: ev.output, sessionId: ev.sessionId };
       case 'error':
-        await applyTotal(ev.totalUsd, child);
+        await applyTotal(ev.totalUsd, child, false);
         throw new AgentError(ev.message);
     }
   };
@@ -131,7 +134,10 @@ export async function runAgent(
     const exit = await (child as unknown as PromiseLike<{ exitCode?: number }>);
     throw new AgentError(`agent exited without a result (exit ${exit?.exitCode ?? 'unknown'})`);
   } catch (e) {
-    if (e instanceof AgentError) child.kill('SIGTERM');
+    if (!killed) {
+      killed = true;
+      child.kill('SIGTERM');
+    }
     throw e;
   }
 }
