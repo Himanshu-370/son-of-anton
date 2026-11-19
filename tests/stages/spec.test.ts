@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { StageCtx } from '../../src/agent/host-runner.js';
+import { runAgent, type ChildLike, type StageCtx } from '../../src/agent/host-runner.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
 import { runSpec, writeSpec, readApprovedSpec, SpecNotProduced, type SpecDoc } from '../../src/stages/spec.js';
 
@@ -60,6 +60,35 @@ describe('runSpec', () => {
       const { fn } = fakeRun([bad]);
       await expect(runSpec(ctx, 'x', async () => [], { runAgent: fn })).rejects.toThrow();
     }
+  });
+});
+
+describe('runSpec cost accounting across resumed turns', () => {
+  it('three resumed turns with SDK cumulative totals 0.5, 1.2, 2.0 record 2.0 spent, not 3.7', async () => {
+    ctx.state = { ...ctx.state, spentUsd: 0 };
+    const turns = [
+      { totalUsd: 0.5, output: { kind: 'questions', questions: ['a?'] } },
+      { totalUsd: 1.2, output: { kind: 'questions', questions: ['b?'] } },
+      { totalUsd: 2.0, output: { kind: 'spec', spec } },
+    ];
+    const reqs: AgentRequest[] = [];
+    let call = 0;
+    const spawn = (): ChildLike => {
+      const t = turns[call++]!;
+      const line = JSON.stringify({ type: 'result', ok: true, output: t.output, sessionId: 'sess', totalUsd: t.totalUsd }) + '\n';
+      return {
+        stdout: (async function* () { yield line; })(),
+        kill: () => undefined,
+        then: (ok: (v: { exitCode: number }) => unknown) => Promise.resolve({ exitCode: 0 }).then(ok),
+      } as unknown as ChildLike;
+    };
+    const run = (async (c: StageCtx, req: AgentRequest) => {
+      reqs.push(req);
+      return runAgent(c, req, { spawn, notify: async () => undefined });
+    }) as typeof runAgent;
+    const r = await runSpec(ctx, 'habit app', async (q) => q.map(() => 'yes'), { runAgent: run });
+    expect(r.state.spentUsd).toBeCloseTo(2.0, 10);
+    expect(reqs.map((q) => q.baseUsd ?? 0)).toEqual([0, 0.5, 1.2]);
   });
 });
 

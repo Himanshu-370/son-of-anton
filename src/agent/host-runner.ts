@@ -54,7 +54,7 @@ export async function runAgent(
   ctx: StageCtx,
   req: AgentRequest,
   deps: RunAgentDeps = {},
-): Promise<{ output: unknown; sessionId: string; state: JobState }> {
+): Promise<{ output: unknown; sessionId: string; state: JobState; totalUsd: number }> {
   if (remainingUsd(ctx.state) <= 0) throw new BudgetExceeded('no budget remaining');
   const spawn = deps.spawn ?? ((c, a) => execIn(c, a) as unknown as ChildLike);
   const notify = deps.notify ?? defaultNotify;
@@ -66,7 +66,8 @@ export async function runAgent(
   const logPath = join(ctx.jobDir, 'logs', `${ctx.stage}.log`);
 
   let state = ctx.state;
-  let lastTotal = 0;
+  /** Last seen cumulative total. A resumed session's SDK total starts from the transcript's (baseUsd). */
+  let lastTotal = req.baseUsd ?? 0;
   let killed = false;
 
   /** Apply the increment since the last seen total; persist; notify/throw as needed. */
@@ -125,12 +126,12 @@ export async function runAgent(
           const line = buf.slice(0, idx);
           buf = buf.slice(idx + 1);
           const res = await handleLine(line);
-          if (res) return { ...res, state };
+          if (res) return { ...res, state, totalUsd: lastTotal };
         }
       }
     }
     const res = await handleLine(buf);
-    if (res) return { ...res, state };
+    if (res) return { ...res, state, totalUsd: lastTotal };
     const exit = await (child as unknown as PromiseLike<{ exitCode?: number }>);
     throw new AgentError(`agent exited without a result (exit ${exit?.exitCode ?? 'unknown'})`);
   } catch (e) {

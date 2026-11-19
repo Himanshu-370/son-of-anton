@@ -73,6 +73,8 @@ export async function runSpec(
   const { model, effort } = DEFAULTS.models.spec;
   let cur: StageCtx = ctx;
   let sessionId: string | undefined;
+  /** The previous call's cumulative SDK total; a resumed session's total continues from it. */
+  let baseUsd = 0;
   let prompt = `Description of what to build:\n\n${description}`;
 
   for (let call = 0; call <= MAX_QUESTION_ROUNDS; call++) {
@@ -85,13 +87,14 @@ export async function runSpec(
       systemPrompt,
       prompt,
       outputSchema: final ? SPEC_ONLY_JSON_SCHEMA : SPEC_TURN_JSON_SCHEMA,
-      ...(sessionId ? { resumeSessionId: sessionId } : {}),
+      ...(sessionId ? { resumeSessionId: sessionId, baseUsd } : {}),
       maxTurns: 30,
       budgetUsd: remainingUsd(cur.state),
     };
     const res = await run(cur, req);
     cur = { ...cur, state: res.state };
     sessionId = res.sessionId;
+    baseUsd = res.totalUsd ?? 0;
     const turn = SpecTurnSchema.parse(res.output);
     if (turn.kind === 'spec') return { spec: turn.spec!, state: res.state };
     if (final) throw new SpecNotProduced();

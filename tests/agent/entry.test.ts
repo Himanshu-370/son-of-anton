@@ -85,6 +85,15 @@ describe('entry main', () => {
     expect(err.events.at(-1)).toMatchObject({ type: 'error', totalUsd: 3 });
   });
 
+  it('offsets interim estimates by baseUsd so they compare with the SDK cumulative total on resume', async () => {
+    const { events } = await run({ ...baseReq, baseUsd: 1 }, async function* () {
+      yield assistant('a', 'm1', { input_tokens: 1000, output_tokens: 500 }); // 0.014
+      yield success(1.02);
+    });
+    expect(costs(events)).toEqual([expect.closeTo(1.014, 10)]);
+    expect(events.at(-1)).toMatchObject({ type: 'result', totalUsd: 1.02 });
+  });
+
   it('prices interim cost by the model on the assistant message (haiku)', async () => {
     const { events } = await run({ ...baseReq, model: 'claude-haiku-5-5' }, async function* () {
       yield assistant('a', 'h1', { input_tokens: 1_000_000, output_tokens: 1_000_000 }, 'claude-haiku-5-5');

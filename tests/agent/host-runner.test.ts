@@ -128,6 +128,18 @@ describe('runAgent', () => {
     expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(1.4);
   });
 
+  it('baseUsd: a resumed call counts only the increment over the transcript total, and returns totalUsd', async () => {
+    const f = fake([L({ type: 'cost', totalUsd: 0.9 }), result(1.2)]);
+    const r = await runAgent(ctx, { ...req, baseUsd: 0.5 }, { spawn: () => f.child, notify: vi.fn() });
+    expect(r.state.spentUsd).toBeCloseTo(0.7, 10);
+    expect(r.totalUsd).toBeCloseTo(1.2, 10);
+  });
+
+  it('returns totalUsd = last cumulative total (default base 0)', async () => {
+    const r = await runAgent(ctx, req, { spawn: () => fake([result(0.3)]).child, notify: vi.fn() });
+    expect(r.totalUsd).toBeCloseTo(0.3, 10);
+  });
+
   it('refuses to start with no budget remaining', async () => {
     await setState({ budgetUsd: 1, spentUsd: 1 });
     const spawn = vi.fn(() => fake([result(0)]).child);

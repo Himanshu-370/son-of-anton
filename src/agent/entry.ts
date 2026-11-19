@@ -18,8 +18,10 @@
  * - Result message (`type: 'result'`): `subtype` is 'success' or 'error_during_execution' |
  *   'error_max_turns' | 'error_max_budget_usd' | 'error_max_structured_output_retries'. It carries
  *   `total_cost_usd` (the cumulative USD estimate for the call; a resumed session includes its earlier
- *   spend), `session_id`, `result` (the final text, on success), `structured_output` (when
- *   outputFormat is set) and `errors: string[]` (on errors).
+ *   spend, so the host passes the previous call's total as req.baseUsd and counts only the increment
+ *   over it, and interim estimates here are offset by baseUsd to match), `session_id`, `result` (the
+ *   final text, on success), `structured_output` (when outputFormat is set) and `errors: string[]`
+ *   (on errors).
  *   `is_error: true` can also appear with subtype success (seen for "Not logged in"); treated as error.
  *   A single-shot query() THROWS after yielding an error result, so that throw is ignored once a
  *   result has been seen.
@@ -123,8 +125,13 @@ export async function main(requestPath: string, deps: EntryDeps = {}): Promise<v
   }
 
   const query = deps.query ?? (await import('@anthropic-ai/claude-agent-sdk')).query;
-  /** Highest cumulative total emitted so far (estimate or authoritative). Never decreases. */
-  let emitted = 0;
+  /**
+   * On a resumed session the SDK's total_cost_usd continues from the transcript's saved total, so
+   * interim estimates are offset by req.baseUsd to stay comparable with it (and with the host's lastTotal).
+   */
+  const base = req.baseUsd ?? 0;
+  /** Highest cumulative interim total emitted so far (base + estimate). Never decreases. */
+  let emitted = base;
   const emitCost = (total: number) => {
     if (total > emitted) {
       emitted = total;
@@ -146,7 +153,7 @@ export async function main(requestPath: string, deps: EntryDeps = {}): Promise<v
           perMessageUsd.set(id, Math.max(perMessageUsd.get(id) ?? 0, usd));
           let sum = 0;
           for (const v of perMessageUsd.values()) sum += v;
-          emitCost(sum);
+          emitCost(base + sum);
         }
       } else if (msg.type === 'result') {
         // No `cost` event here: the result/error event carries the authoritative total, and a cost

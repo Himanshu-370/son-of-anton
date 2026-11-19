@@ -10,6 +10,12 @@ export const AgentRequestSchema = z.object({
   resumeSessionId: z.string().optional(),
   maxTurns: z.number().int().min(1),
   budgetUsd: z.number().min(0),
+  /**
+   * Cumulative USD the resumed session's transcript already carries (the previous call's total).
+   * The SDK's total_cost_usd on a resumed session continues from that saved total, so the host
+   * counts only the increment over it, and the entry offsets its interim estimates by it. Default 0.
+   */
+  baseUsd: z.number().min(0).optional(),
 });
 export type AgentRequest = z.infer<typeof AgentRequestSchema>;
 
