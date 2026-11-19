@@ -1,5 +1,5 @@
 import { join } from 'node:path';
-import { commitAll, ensureAntonIgnored } from '../../core/git.js';
+import { commitAll } from '../../core/git.js';
 import { createNewProject } from '../../core/job.js';
 import { loadState, saveState, transition } from '../../core/state.js';
 import { writeSpec } from '../../stages/spec.js';
@@ -17,7 +17,7 @@ export async function newCommand(description: string, opts: { budget?: string },
     const image = await d.ensureImage();
 
     const p = await createNewProject(description, budgetUsd === undefined ? {} : { budgetUsd });
-    await ensureAntonIgnored(p.repoPath);
+    // commitAll excludes .anton/ via .git/info/exclude before staging.
     await commitAll(p.repoPath, 'chore: initialize project');
     d.out(`Created project ${p.name} at ${p.repoPath}`);
 

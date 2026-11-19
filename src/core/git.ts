@@ -1,6 +1,7 @@
-import { readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { execa } from 'execa';
+import { writeFileAtomic } from './atomic.js';
 
 /**
  * Host git runs on the Mac, outside Docker, inside a repo the agent can write to. So every
@@ -47,8 +48,12 @@ async function git(repo: string, args: string[]): Promise<string> {
   return String(r.stdout);
 }
 
-/** Stage everything and commit as Son of Anton. Returns the sha, or null if nothing to commit. */
+/**
+ * Stage everything and commit as Son of Anton. Returns the sha, or null if nothing to commit.
+ * Re-asserts the `.anton/` exclusion first (cheap, idempotent), so job files never enter history.
+ */
 export async function commitAll(repo: string, message: string): Promise<string | null> {
+  await ensureAntonIgnored(repo);
   await git(repo, ['add', '-A']);
   const status = await git(repo, ['status', '--porcelain']);
   if (status.trim() === '') return null;
@@ -70,16 +75,20 @@ export async function headSha(repo: string): Promise<string> {
   return (await git(repo, ['rev-parse', 'HEAD'])).trim();
 }
 
-/** Ensure `.anton/` is listed in the repo's .gitignore (idempotent). */
+/**
+ * Ensure `.anton/` is excluded via the repo's `.git/info/exclude` (created if missing; idempotent;
+ * written atomically). Not `.gitignore`: the agent can rewrite that file, and the exclude file is
+ * outside the work tree, so it never shows up in the user's project history.
+ */
 export async function ensureAntonIgnored(repo: string): Promise<void> {
-  const file = join(repo, '.gitignore');
+  const file = resolve(repo, (await git(repo, ['rev-parse', '--git-path', 'info/exclude'])).trim());
   let current = '';
   try {
     current = await readFile(file, 'utf8');
-  } catch {
-    // missing: will be created
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
   }
-  if (current.split(/\r?\n/).some((l) => l.trim() === '.anton/')) return;
+  if (current.split(/\r?\n/).some((l) => l.trim() === '.anton/' || l.trim() === '/.anton/')) return;
   const sep = current === '' || current.endsWith('\n') ? '' : '\n';
-  await writeFile(file, `${current}${sep}.anton/\n`);
+  await writeFileAtomic(file, `${current}${sep}.anton/\n`);
 }

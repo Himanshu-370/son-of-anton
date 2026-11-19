@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { access, chmod, mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises';
+import { access, chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
@@ -111,26 +111,38 @@ describe('git helper', () => {
     });
   });
 
-  it('ensureAntonIgnored hides .anton/ and is idempotent', async () => {
+  it('ensureAntonIgnored writes .anton/ to .git/info/exclude (not .gitignore), idempotently', async () => {
+    await rm(join(repo, '.git', 'info'), { recursive: true, force: true }); // exclude file missing
     await ensureAntonIgnored(repo);
     await ensureAntonIgnored(repo);
     await mkdir(join(repo, '.anton'));
     await writeFile(join(repo, '.anton', 'x'), 'x');
     const { stdout } = await git(repo, 'status', '--porcelain');
     expect(stdout).not.toContain('.anton');
-    const { readFile } = await import('node:fs/promises');
-    const lines = (await readFile(join(repo, '.gitignore'), 'utf8')).split('\n');
+    const lines = (await readFile(join(repo, '.git', 'info', 'exclude'), 'utf8')).split('\n');
     expect(lines.filter((l) => l === '.anton/')).toHaveLength(1);
+    await expect(access(join(repo, '.gitignore'))).rejects.toThrow();
   });
 
-  it('ensureAntonIgnored appends on its own line to an existing file lacking a newline', async () => {
-    await writeFile(join(repo, '.gitignore'), 'node_modules');
+  it('ensureAntonIgnored appends on its own line to an exclude file lacking a newline', async () => {
+    await mkdir(join(repo, '.git', 'info'), { recursive: true });
+    await writeFile(join(repo, '.git', 'info', 'exclude'), '*.log');
     await ensureAntonIgnored(repo);
-    const { readFile } = await import('node:fs/promises');
-    expect((await readFile(join(repo, '.gitignore'), 'utf8')).split('\n')).toEqual([
-      'node_modules',
-      '.anton/',
-      '',
-    ]);
+    expect((await readFile(join(repo, '.git', 'info', 'exclude'), 'utf8')).split('\n')).toEqual(['*.log', '.anton/', '']);
+  });
+
+  it('commitAll never tracks .anton/, even after the agent rewrites .gitignore without it', async () => {
+    await writeFile(join(repo, '.gitignore'), '.anton/\n');
+    await writeFile(join(repo, 'a.txt'), 'a');
+    await commitAll(repo, 'first');
+    // the agent overwrites .gitignore and the pipeline writes job files
+    await writeFile(join(repo, '.gitignore'), 'node_modules/\n');
+    await mkdir(join(repo, '.anton', 'jobs', '1-init'), { recursive: true });
+    await writeFile(join(repo, '.anton', 'jobs', '1-init', 'state.json'), '{}');
+    await writeFile(join(repo, 'b.txt'), 'b');
+    await commitAll(repo, 'second');
+    const { stdout } = await git(repo, 'ls-files');
+    expect(stdout.split('\n')).toContain('b.txt');
+    expect(stdout).not.toContain('.anton');
   });
 });

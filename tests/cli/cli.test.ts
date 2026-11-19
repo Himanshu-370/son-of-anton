@@ -323,7 +323,8 @@ describe('anton new', () => {
     const dir = jobDirOf(repo, '1-init');
     expect(await loadState(dir)).toMatchObject({ stage: 'awaiting_spec_approval', budgetUsd: 5 });
     expect(await readFile(join(dir, 'spec.md'), 'utf8')).toContain('**AC-1**: tracks');
-    expect(await readFile(join(repo, '.gitignore'), 'utf8')).toContain('.anton/');
+    expect(await readFile(join(repo, '.git', 'info', 'exclude'), 'utf8')).toContain('.anton/');
+    expect((await execa('git', ['ls-files'], { cwd: repo })).stdout).not.toContain('.anton');
     expect(h.text()).toContain(join(dir, 'spec.md'));
     expect(h.text()).toContain('anton approve a-habit-tracker');
     expect(h.text()).toMatch(/acceptance checks/i);
