@@ -1,0 +1,48 @@
+import { describe, expect, it } from 'vitest';
+import { mapJUnit } from '../../src/verify/junit.js';
+
+const checks = [
+  { id: 'AC-1', text: 'one' },
+  { id: 'AC-2', text: 'two' },
+  { id: 'AC-3', text: 'three' },
+];
+
+describe('mapJUnit', () => {
+  it('passes a check when all its tests pass; fails with message when one fails; no_test when none', () => {
+    const xml = `<testsuite>
+      <testcase classname="a" name="AC-1 does x"/>
+      <testcase classname="a" name="AC-1 does y"/>
+      <testcase classname="a" name="AC-2 breaks"><failure message="expected 1 got 2">stack</failure></testcase>
+    </testsuite>`;
+    const [r1, r2, r3] = mapJUnit(xml, checks);
+    expect(r1).toMatchObject({ id: 'AC-1', status: 'pass', tests: ['AC-1 does x', 'AC-1 does y'] });
+    expect(r2).toMatchObject({ status: 'fail', reason: 'failing', error: 'expected 1 got 2' });
+    expect(r3).toMatchObject({ status: 'fail', reason: 'no_test', tests: [] });
+  });
+
+  it('does not match AC-10 for AC-1', () => {
+    const xml = `<testsuite><testcase name="AC-10 foo"/></testsuite>`;
+    const [r1] = mapJUnit(xml, checks);
+    expect(r1).toMatchObject({ status: 'fail', reason: 'no_test' });
+  });
+
+  it('matches on classname and handles a single testcase and testsuites root', () => {
+    const xml = `<testsuites><testsuite><testcase classname="AC-1.suite" name="t"/></testsuite><testsuite><testcase name="AC-2 e"><error>boom text</error></testcase></testsuite></testsuites>`;
+    const [r1, r2] = mapJUnit(xml, checks);
+    expect(r1.status).toBe('pass');
+    expect(r2).toMatchObject({ reason: 'failing', error: 'boom text' });
+  });
+
+  it('treats skipped as not passing', () => {
+    const xml = `<testsuite><testcase name="AC-1 s"><skipped/></testcase></testsuite>`;
+    expect(mapJUnit(xml, checks)[0]).toMatchObject({ status: 'fail', reason: 'failing' });
+  });
+
+  it('malformed or empty XML fails every check with no_test, no throw', () => {
+    for (const xml of ['<<<not xml', '', '<foo/>']) {
+      const rs = mapJUnit(xml, checks);
+      expect(rs).toHaveLength(3);
+      expect(rs.every((r) => r.status === 'fail' && r.reason === 'no_test')).toBe(true);
+    }
+  });
+});
