@@ -6,6 +6,7 @@ import { notify as defaultNotify } from '../core/notify.js';
 import { redact } from '../core/secrets.js';
 import { saveState, type JobState } from '../core/state.js';
 import { pluginsForSession } from '../plugins/session.js';
+import { loadPrompt } from '../stages/prompts.js';
 import { AgentEventSchema, PROTOCOL_VERSION, type AgentRequest } from './protocol.js';
 
 export type StageCtx = {
@@ -84,6 +85,12 @@ export async function runAgent(
   } else {
     const p = await (deps.plugins ?? ((c, r) => pluginsForSession(c, r)))(ctx, req.role);
     req = { ...req, plugins: p.plugins, skills: p.skills, mcpServers: p.mcpServers };
+  }
+
+  if (ctx.stage !== 'spec') {
+    // Unattended: the jobId is the only varying part and sits on the last line, keeping the rest cache-stable.
+    const rule = (await loadPrompt('unattended.md')).replace('{jobId}', ctx.state.jobId).trimEnd();
+    req = { ...req, systemPrompt: `${req.systemPrompt}\n\n${rule}` };
   }
 
   const file = await nextRequestFile(ctx.jobDir, ctx.stage);

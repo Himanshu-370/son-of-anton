@@ -53,7 +53,7 @@ describe('runDeliver', () => {
     expect(md).toContain('Assumed integers only.');
     expect(md).toMatch(/## Not done\n\nNothing/);
 
-    const order = ['# Sum CLI', '## Acceptance checks', '## How to run', '## Cost and time by stage', '## Assumptions', '## Not done']
+    const order = ['# Sum CLI', '## Acceptance checks', '## Questions and assumptions', '## Security', '## How to run', '## Cost and time by stage', '## Not done']
       .map((h) => md.indexOf(h));
     expect(order.every((v, i) => v >= 0 && (i === 0 || v > order[i - 1]!))).toBe(true);
 
@@ -105,7 +105,7 @@ describe('runDeliver', () => {
     const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
     expect(md).toContain('| AC-2 | rejects \\| junk | fail (no_test) | — |');
     expect(md).toMatch(/## Not done\n\n- AC-2: rejects \| junk \(no_test\)\n- The smoke run command failed/);
-    expect(md).toContain('No assumptions recorded');
+    expect(md).not.toContain('## Questions and assumptions');
     expect(md).toContain('No cost recorded');
     expect(state.stage).toBe('awaiting_final_review');
   });
@@ -271,6 +271,26 @@ describe('runDeliver change jobs', () => {
     expect(md.indexOf('SEC-old00001')).toBeGreaterThan(pre);
     expect(md.indexOf('SEC-new00001')).toBeLessThan(pre);
     expect(md.indexOf('SEC-missing1')).toBeLessThan(pre); // missing flag counts as new
+  });
+});
+
+describe('runDeliver questions section', () => {
+  const deps = { tag: vi.fn(async () => {}), listTags: async () => [] };
+  it('report includes questions and assumptions', async () => {
+    await writeFile(join(ctx.jobDir, 'questions.md'), '- Q: tabs? / Assumed: spaces.\n');
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, deps);
+    const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    expect(md).toMatch(/## Questions and assumptions\n\n- Q: tabs\? \/ Assumed: spaces\./);
+    expect(md.indexOf('## Questions and assumptions')).toBeLessThan(md.indexOf('## Security'));
+  });
+  it('no questions file: no section', async () => {
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, deps);
+    expect(await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8')).not.toContain('## Questions and assumptions');
+  });
+  it('empty questions file: no section', async () => {
+    await writeFile(join(ctx.jobDir, 'questions.md'), '\n  \n');
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, deps);
+    expect(await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8')).not.toContain('## Questions and assumptions');
   });
 });
 

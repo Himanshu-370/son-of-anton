@@ -224,6 +224,27 @@ describe('runAgent', () => {
   });
 });
 
+describe('runAgent unattended rule', () => {
+  const sent = async (c: StageCtx, r: AgentRequest) => {
+    await runAgent(c, r, { spawn: vi.fn(() => fake([result(0.1)]).child), notify: vi.fn() });
+    return JSON.parse(await readFile(join(c.jobDir, 'requests', `${c.stage}-1.json`), 'utf8')).systemPrompt as string;
+  };
+  it('unattended instruction appended outside spec', async () => {
+    const sp = await sent(ctx, req);
+    expect(sp.startsWith('s\n\n')).toBe(true);
+    expect(sp).toContain('no human is present');
+    expect(sp.trimEnd().split('\n').pop()).toContain('/workspace/.anton/jobs/j1/questions.md');
+    expect(sp).not.toContain('{jobId}');
+    // read-only reviewer sessions get it too
+    ctx.stage = 'verify';
+    expect(await sent(ctx, { ...req, tools: ['Read'] })).toContain('no human is present');
+  });
+  it('spec session has no unattended instruction', async () => {
+    ctx.stage = 'spec';
+    expect(await sent(ctx, req)).toBe('s');
+  });
+});
+
 describe('runAgent redaction', () => {
   it('agent log line containing the secret is saved redacted; request file too', async () => {
     ctx.secrets = { API_KEY: 'FAKE_SECRET_VALUE_123' };
