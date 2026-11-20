@@ -33,22 +33,32 @@ const fakeRun = (installExit: number) => async (_c: string, cmd: string) => {
 };
 // Real fallback kit with an injected runIn.
 const kit = (installExit: number): Kit => ({ ...fallbackKit, baseline: (c) => fallbackKit.baseline(c, { runIn: fakeRun(installExit) }) });
+const order: string[] = [];
+const reset = async () => { order.push('reset'); };
 const scanners = async () => ({ findings: [finding], unavailable: ['semgrep'] });
 
 describe('runBaseline', () => {
   it('baseline records passing test names and scanner refs', async () => {
     const c = await ctx();
-    const s = await runBaseline(c, kit(0), plan, { runScanners: scanners });
+    const s = await runBaseline(c, kit(0), plan, { runScanners: scanners, resetWorktree: reset });
     const out = JSON.parse(await readFile(join(c.jobDir, 'evidence', 'baseline.json'), 'utf8'));
-    expect(out).toEqual({ passingTests: ['adds'], ran: true, scannerRefs: [scannerRef(finding)], unavailable: ['semgrep'] });
+    expect(out).toEqual({ passingTests: ['a::adds'], ran: true, scannerRefs: [scannerRef(finding)], unavailable: ['semgrep'] });
+    expect(order).toEqual(['reset']);
     expect(s).toMatchObject({ stage: 'build', round: 1 });
     expect((await loadState(c.jobDir)).stage).toBe('build');
   });
   it('install failure → ran false, still transitions to build', async () => {
     const c = await ctx();
-    const s = await runBaseline(c, kit(1), plan, { runScanners: scanners });
+    const s = await runBaseline(c, kit(1), plan, { runScanners: scanners, resetWorktree: reset });
     const out = JSON.parse(await readFile(join(c.jobDir, 'evidence', 'baseline.json'), 'utf8'));
     expect(out).toMatchObject({ passingTests: [], ran: false });
+    expect(order).toEqual(['reset', 'reset']);
     expect(s.stage).toBe('build');
+  });
+  it('resets only after baseline.json is written', async () => {
+    const c = await ctx();
+    let existed = false;
+    await runBaseline(c, kit(0), plan, { runScanners: scanners, resetWorktree: async () => { existed = !!(await readFile(join(c.jobDir, 'evidence', 'baseline.json'), 'utf8')); } });
+    expect(existed).toBe(true);
   });
 });

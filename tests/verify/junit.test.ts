@@ -46,3 +46,11 @@ describe('mapJUnit', () => {
     }
   });
 });
+
+describe('passingTests', () => {
+  it('same-named tests in different classes get distinct labels; no classname falls back to name', async () => {
+    const { passingTests } = await import('../../src/verify/junit.js');
+    const xml = '<testsuite><testcase classname="A" name="works"/><testcase classname="B" name="works"/><testcase name="solo"/></testsuite>';
+    expect(passingTests(xml)).toEqual(['A::works', 'B::works', 'solo']);
+  });
+});

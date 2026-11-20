@@ -1,13 +1,14 @@
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
 import { writeFileAtomic } from '../core/atomic.js';
+import { resetWorktree as defaultResetWorktree } from '../core/git.js';
 import { saveState, transition, type JobState } from '../core/state.js';
 import type { Kit } from '../kits/types.js';
 import { scannerRef } from '../security/review.js';
 import { runScanners as defaultRunScanners } from '../security/scanners.js';
 import type { Plan } from './plan.js';
 
-export type BaselineDeps = { runScanners?: typeof defaultRunScanners };
+export type BaselineDeps = { runScanners?: typeof defaultRunScanners; resetWorktree?: (repo: string) => Promise<void> };
 
 /** Records the passing tests and scanner findings of the untouched repo, then moves to build (round 1). */
 export async function runBaseline(ctx: StageCtx, kit: Kit, plan: Plan, deps: BaselineDeps = {}): Promise<JobState> {
@@ -17,6 +18,8 @@ export async function runBaseline(ctx: StageCtx, kit: Kit, plan: Plan, deps: Bas
     join(ctx.jobDir, 'evidence', 'baseline.json'),
     JSON.stringify({ passingTests, ran, scannerRefs: findings.map(scannerRef), unavailable }, null, 2) + '\n',
   );
+  // Install and tests dirty the change branch; keep that out of T1's commit.
+  await (deps.resetWorktree ?? defaultResetWorktree)(ctx.repo);
   const state = transition(ctx.state, 'build', { round: 1 });
   await saveState(ctx.jobDir, state);
   return state;

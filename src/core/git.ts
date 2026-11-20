@@ -67,6 +67,16 @@ export async function isClean(repo: string): Promise<boolean> {
   return (await git(repo, ['status', '--porcelain'])).trim() === '';
 }
 
+/**
+ * Discards tracked edits and untracked files, back to HEAD. No `-x`: ignored files (node_modules,
+ * `.anton/`) survive.
+ */
+export async function resetWorktree(repo: string): Promise<void> {
+  await ensureAntonIgnored(repo);
+  await git(repo, ['checkout', '--', '.']);
+  await git(repo, ['clean', '-fd']);
+}
+
 /** Create and switch to a new branch; git's error surfaces if it already exists. */
 export async function createBranch(repo: string, name: string): Promise<void> {
   await git(repo, ['switch', '-c', name]);

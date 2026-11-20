@@ -3,7 +3,7 @@ import { access, chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
-import { commitAll, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse, changedFilesSince, isClean, createBranch } from '../../src/core/git.js';
+import { commitAll, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse, changedFilesSince, isClean, createBranch, resetWorktree } from '../../src/core/git.js';
 
 const git = (repo: string, ...args: string[]) =>
   execa('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo });
@@ -206,5 +206,22 @@ describe('isClean / createBranch', () => {
     await createBranch(repo, 'anton/1-x');
     expect((await git(repo, 'branch', '--show-current')).stdout).toBe('anton/1-x');
     await expect(createBranch(repo, 'anton/1-x')).rejects.toThrow(/already exists/);
+  });
+
+  it('resetWorktree reverts tracked edits and untracked files but keeps ignored files and .anton', async () => {
+    await writeFile(join(repo, '.gitignore'), 'node_modules\n');
+    await writeFile(join(repo, 'a.txt'), 'a');
+    await commitAll(repo, 'first');
+    await writeFile(join(repo, 'a.txt'), 'changed');
+    await writeFile(join(repo, 'new.txt'), 'n');
+    await mkdir(join(repo, 'node_modules'));
+    await writeFile(join(repo, 'node_modules', 'x'), 'x');
+    await mkdir(join(repo, '.anton'));
+    await writeFile(join(repo, '.anton', 'keep'), 'k');
+    await resetWorktree(repo);
+    expect(await readFile(join(repo, 'a.txt'), 'utf8')).toBe('a');
+    await expect(access(join(repo, 'new.txt'))).rejects.toThrow();
+    await access(join(repo, 'node_modules', 'x'));
+    await access(join(repo, '.anton', 'keep'));
   });
 });
