@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import type { StageCtx } from '../agent/host-runner.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
-import { listFiles as gitListFiles } from '../core/git.js';
+import { cloneShallow as gitCloneShallow, listFiles as gitListFiles } from '../core/git.js';
 import { currentJobId } from '../core/job.js';
 import { jobDir as jobDirOf } from '../core/paths.js';
 import { getProject } from '../core/registry.js';
@@ -47,6 +47,8 @@ export type CliDeps = {
   /** Install a SIGINT handler; returns a function that removes it. */
   onSigint?: (handler: () => Promise<void> | void) => () => void;
   exit?: (code: number) => void;
+  /** Shallow git clone (`anton plugins add`); returns the HEAD sha. */
+  cloneShallow?: (url: string, dest: string) => Promise<string>;
 };
 
 export type Resolved = Required<Omit<CliDeps, 'exec'>>;
@@ -122,6 +124,7 @@ export function resolveDeps(d: CliDeps = {}): Resolved {
     runUnattended: d.runUnattended ?? ((p) => defaultRunUnattended(p)),
     onSigint: d.onSigint ?? defaultOnSigint,
     exit: d.exit ?? ((code) => { process.exit(code); }),
+    cloneShallow: d.cloneShallow ?? gitCloneShallow,
   };
 }
 

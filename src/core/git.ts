@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { lstat, readFile, readlink, rm } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { lstat, mkdir, readFile, readlink, rm } from 'node:fs/promises';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { execa } from 'execa';
 import { writeFileAtomic } from './atomic.js';
 import { redact } from './secrets.js';
@@ -260,6 +260,16 @@ export async function changedFilesSince(repo: string, sha: string): Promise<stri
 export async function revParse(repo: string, ref: string): Promise<string> {
   if (ref === '' || ref.startsWith('-') || /\s/.test(ref)) throw new Error(`invalid ref for revParse: ${JSON.stringify(ref)}`);
   return (await git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).trim();
+}
+
+/**
+ * Clone `url` (untrusted) into `dest` at depth 1 and return its HEAD sha. Same hook/config blocking as
+ * every call; `ext::` (runs a command) is refused, and `--` keeps a URL starting with `-` from being an option.
+ */
+export async function cloneShallow(url: string, dest: string): Promise<string> {
+  await mkdir(dirname(dest), { recursive: true });
+  await git(dirname(dest), ['-c', 'protocol.ext.allow=never', 'clone', '-q', '--depth', '1', '--no-tags', '--', url, dest]);
+  return headSha(dest);
 }
 
 export async function headSha(repo: string): Promise<string> {
