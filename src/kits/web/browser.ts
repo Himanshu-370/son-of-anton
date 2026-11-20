@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { lstatSync } from 'node:fs';
 import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -111,7 +111,7 @@ export function mergeBrowser(
       ? { status: 'fail' as const, note: `The browser session (agent or app) changed project files: ${changed.join(', ')}. If the app writes these at runtime, add them to .gitignore.` }
       : verdicts.get(r.id) ?? { status: 'fail' as const, note: 'not exercised' };
     const shot = join(screensDir, `${r.id}.png`);
-    const browser: NonNullable<CheckResult['browser']> = { status: v.status, note: v.note, ...(existsSync(shot) ? { screenshot: shot } : {}) };
+    const browser: NonNullable<CheckResult['browser']> = { status: v.status, note: v.note, ...(lstatSync(shot, { throwIfNoEntry: false })?.isFile() ? { screenshot: shot } : {}) };
     if (v.status !== 'fail') return { ...r, browser };
     return { ...r, status: 'fail', reason: 'failing', error: `Browser check failed: ${v.note}`, browser };
   });

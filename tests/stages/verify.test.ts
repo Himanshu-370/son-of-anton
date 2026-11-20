@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { StageCtx } from '../../src/agent/host-runner.js';
@@ -31,8 +31,10 @@ const st = (over: Partial<JobState> = {}): JobState => ({
   warned80: false, completedTasks: ['T1'], updatedAt: 'x', ...over,
 });
 beforeEach(async () => {
-  const jobDir = await mkdtemp(join(tmpdir(), 'anton-verify-'));
-  ctx = { project: 'p', repo: '/r', container: 'c', jobDir, stage: 'verify', state: st() };
+  const repo = await mkdtemp(join(tmpdir(), 'anton-verify-'));
+  const jobDir = join(repo, '.anton', 'jobs', 'j1');
+  await mkdir(jobDir, { recursive: true });
+  ctx = { project: 'p', repo, container: 'c', jobDir, stage: 'verify', state: st() };
 });
 function kit(outcome: VerifyOutcome, seen: VerifyContext[] = []): Kit {
   return { name: 'fake', dockerfile: '', detect: () => 1, baseline: async () => ({ passingTests: [], ran: true }), verify: async (c) => { seen.push(c); return outcome; } };
@@ -376,5 +378,28 @@ describe('runVerify redaction', () => {
       if (f.endsWith('.json')) expect(() => JSON.parse(t)).not.toThrow();
     }
     expect((await readJson(join(ev, 'results.json'))).results[0].error).toBe('boom [REDACTED:TOKEN]');
+  });
+});
+
+describe('runVerify evidence guard', () => {
+  it('a planted evidence symlink fails closed and leaves the target untouched', async () => {
+    const target = await mkdtemp(join(tmpdir(), 'host-target-'));
+    await writeFile(join(target, 'keep.txt'), 'host file\n');
+    await symlink(target, join(ctx.jobDir, 'evidence'));
+    const seen: VerifyContext[] = [];
+    await expect(runVerify(ctx, kit({ results: [pass('AC-1'), pass('AC-2')], runOk: true, failureReport: '' }, seen), spec, plan))
+      .rejects.toThrow(/evidence.*symlink|not inside/);
+    expect(seen).toHaveLength(0);
+    expect(await readdir(target)).toEqual(['keep.txt']);
+  });
+  it('a symlinked job dir component fails closed too', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'anton-verify-'));
+    const elsewhere = await mkdtemp(join(tmpdir(), 'host-target-'));
+    await mkdir(join(repo, '.anton'), { recursive: true });
+    await symlink(elsewhere, join(repo, '.anton', 'jobs'));
+    await mkdir(join(elsewhere, 'j1'), { recursive: true });
+    const c = { ...ctx, repo, jobDir: join(repo, '.anton', 'jobs', 'j1') };
+    await expect(runVerify(c, kit({ results: [], runOk: true, failureReport: '' }), spec, plan)).rejects.toThrow(/symlink/);
+    expect(await readdir(join(elsewhere, 'j1'))).toEqual([]);
   });
 });

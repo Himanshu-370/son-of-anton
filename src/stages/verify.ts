@@ -1,5 +1,5 @@
-import { readdir, readFile, rm } from 'node:fs/promises';
-import { join } from 'node:path';
+import { lstat, mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises';
+import { basename, join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
 import { writeFileAtomic } from '../core/atomic.js';
 import { redact } from '../core/secrets.js';
@@ -120,6 +120,26 @@ async function reviewBase(ctx: StageCtx, state: JobState, revParse: typeof defau
  * the reviewers; otherwise run the code reviewer then the security reviewer over the diff since the last
  * reviewed sha. Record evidence, then decide deliver / build / pause (ruling R1).
  */
+/**
+ * The container can write the whole repo, `.anton/` included, so it could swap a job folder for a symlink
+ * to a host dir; the host then rm/mkdir/writes there. Refuse unless every component from `.anton` to
+ * `evidence` is a real folder and evidence resolves to `<repo>/.anton/jobs/<id>/evidence`.
+ */
+async function assertEvidenceDir(repo: string, jobDir: string): Promise<void> {
+  const root = await realpath(repo);
+  const want = join(root, '.anton', 'jobs', basename(jobDir), 'evidence');
+  let p = root;
+  for (const part of ['.anton', 'jobs', basename(jobDir), 'evidence']) {
+    p = join(p, part);
+    if ((await lstat(p).catch(() => undefined))?.isSymbolicLink()) {
+      throw new Error(`Refusing to verify: ${p} is a symlink (job folders must be real folders inside the project)`);
+    }
+  }
+  await mkdir(want, { recursive: true });
+  const got = await realpath(join(jobDir, 'evidence'));
+  if (got !== want) throw new Error(`Refusing to verify: evidence folder ${got} is not inside ${want}`);
+}
+
 export async function runVerify(
   ctx: StageCtx,
   kit: Kit,
@@ -127,6 +147,7 @@ export async function runVerify(
   plan: Plan,
   deps: VerifyDeps = {},
 ): Promise<VerifyResult> {
+  await assertEvidenceDir(ctx.repo, ctx.jobDir);
   const { results, runOk, failureReport: kitReport, tests, testsRan, state: kitState } = await kit.verify({
     container: ctx.container,
     jobDir: ctx.jobDir,

@@ -303,6 +303,29 @@ describe('webKit.verify', () => {
     expect(killed(s.calls)).toBe(true);
   });
 
+  it('a symlinked screens dir is refused before rm/mkdir; its target is untouched', async () => {
+    const s = setup();
+    const target = mkdtempSync(join(tmpdir(), 'host-'));
+    writeFileSync(join(target, 'keep.txt'), 'host\n');
+    mkdirSync(join(s.jobDir, 'evidence'), { recursive: true });
+    symlinkSync(target, join(s.jobDir, 'evidence', 'screens'));
+    await expect(webKit.verify(s.ctx, { runIn: s.runIn, runAgent: agent(allPass), ...noGit })).rejects.toThrow(/symlink/);
+    expect(readFileSync(join(target, 'keep.txt'), 'utf8')).toBe('host\n');
+  });
+
+  it('a symlinked screenshot is not recorded (only regular files count)', async () => {
+    const s = setup();
+    const out = await webKit.verify(s.ctx, {
+      runIn: s.runIn,
+      runAgent: agent(async () => {
+        symlinkSync('/etc/hosts', join(s.jobDir, 'evidence', 'screens', 'AC-1.png'));
+        return allPass;
+      }),
+      ...noGit,
+    });
+    expect(out.results.find((r) => r.id === 'AC-1')!.browser?.screenshot).toBeUndefined();
+  });
+
   it('screenshot path recorded only when the file exists', async () => {
     const s = setup();
     const out = await webKit.verify(s.ctx, {

@@ -1,4 +1,4 @@
-import { mkdir, rm } from 'node:fs/promises';
+import { lstat, mkdir, rm } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { runAgent as defaultRunAgent } from '../../agent/host-runner.js';
@@ -65,6 +65,8 @@ async function verify(ctx: VerifyContext, deps: WebVerifyDeps = {}): Promise<Ver
   const evidence = join(ctx.jobDir, 'evidence');
   const boxEvidence = `/workspace/.anton/jobs/${basename(ctx.jobDir)}/evidence`;
   const screens = join(evidence, 'screens');
+  // runVerify checked evidence itself; screens is container-writable too, so never rm/mkdir through a link.
+  if ((await lstat(screens).catch(() => undefined))?.isSymbolicLink()) throw new Error(`Refusing to verify: ${screens} is a symlink`);
   await rm(screens, { recursive: true, force: true }); // no stale screenshot from an earlier round
   await mkdir(screens, { recursive: true });
 
