@@ -1,7 +1,15 @@
 export type AcceptanceCheck = { id: string; text: string };
 
 /** `test` must write JUnit XML to `$ANTON_JUNIT`. */
-export type Commands = { install: string; test: string; run?: string };
+export type Commands = {
+  install: string;
+  test: string;
+  run?: string;
+  /** Starts the app in the foreground (web projects); set together with `url`. */
+  serve?: string;
+  /** Where `serve` listens (localhost or 127.0.0.1 with a port). */
+  url?: string;
+};
 
 export type CheckResult = {
   id: string;
