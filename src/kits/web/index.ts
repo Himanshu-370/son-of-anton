@@ -29,6 +29,25 @@ export type WebVerifyDeps = {
 };
 
 /**
+ * Restores every path whose status differs from `before`, re-snapshotting after each restore: restoring
+ * `.gitignore` can expose files it hid (or hide ones that showed). A restored path that is now clean
+ * (at HEAD) counts as settled. Bounded to 3 restores; whatever still differs after that is `unsettled`.
+ */
+async function restoreChanges(
+  repo: string, before: Map<string, string>, status: typeof defaultStatus, restore: typeof defaultRestore,
+): Promise<{ changed: string[]; unsettled: string[] }> {
+  const restored = new Set<string>();
+  for (let i = 0; ; i++) {
+    const now = await status(repo);
+    const todo = changedPaths(before, now).filter((p) => !restored.has(p) || now.has(p));
+    if (!todo.length) return { changed: [...restored].sort(), unsettled: [] };
+    if (i === 3) return { changed: [...new Set([...restored, ...todo])].sort(), unsettled: todo };
+    for (const p of todo) restored.add(p);
+    await restore(repo, todo);
+  }
+}
+
+/**
  * Fallback verify first; only when every check passes and runOk, start the app in the container, run one
  * browser_tester session over all checks, and merge its verdicts. The app is always stopped and any
  * project file the agent touched is restored (and fails every check).
@@ -52,6 +71,7 @@ async function verify(ctx: VerifyContext, deps: WebVerifyDeps = {}): Promise<Ver
   let ready = false;
   let agent: { checks: BrowserCheck[]; state: JobState } | undefined;
   let changed: string[] = [];
+  let unsettled: string[] = [];
   let tail: string;
   try {
     ready = await startApp(runIn, ctx.container, serve, url, `${boxEvidence}/app.log`, sleep);
@@ -60,8 +80,7 @@ async function verify(ctx: VerifyContext, deps: WebVerifyDeps = {}): Promise<Ver
       try {
         agent = await runBrowserAgent(stage, ctx.checks, url, `${boxEvidence}/screens`, deps.runAgent);
       } finally {
-        changed = changedPaths(before, await status(stage.repo));
-        if (changed.length) await (deps.restorePaths ?? defaultRestore)(stage.repo, changed);
+        ({ changed, unsettled } = await restoreChanges(stage.repo, before, status, deps.restorePaths ?? defaultRestore));
       }
     }
   } finally {
@@ -75,7 +94,7 @@ async function verify(ctx: VerifyContext, deps: WebVerifyDeps = {}): Promise<Ver
     const failureReport = `### App did not start\n\`${serve}\` did not answer at ${url} within ${READY_TRIES} s, or exited. Last lines of app.log:\n\`\`\`\n${tail}\n\`\`\``;
     return { ...base, results, runOk: false, failureReport };
   }
-  const results = mergeBrowser(base.results, agent!.checks, changed, screens);
+  const results = mergeBrowser(base.results, agent!.checks, changed, screens, unsettled);
   return { ...base, results, failureReport: browserReport(results), state: agent!.state };
 }
 

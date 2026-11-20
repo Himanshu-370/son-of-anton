@@ -96,13 +96,18 @@ export function changedPaths(before: Map<string, string>, after: Map<string, str
 /**
  * Folds the browser verdicts into passing test results. Only `fail` fails a check; a check the agent
  * left out fails as `not exercised`; ids that are not real checks are ignored. `changed` (project files
- * the agent touched) fails every check. `screensDir` is the host path.
+ * the agent touched) fails every check; so does `unsettled` (paths a restore could not settle).
+ * `screensDir` is the host path.
  */
-export function mergeBrowser(results: CheckResult[], agent: BrowserCheck[], changed: string[], screensDir: string): CheckResult[] {
+export function mergeBrowser(
+  results: CheckResult[], agent: BrowserCheck[], changed: string[], screensDir: string, unsettled: string[] = [],
+): CheckResult[] {
   const verdicts = new Map<string, BrowserCheck>();
   for (const c of agent) if (!verdicts.has(c.id) || c.status === 'fail') verdicts.set(c.id, c);
   return results.map((r) => {
-    const v = changed.length
+    const v = unsettled.length
+      ? { status: 'fail' as const, note: `Project files kept changing after 3 restores, so they may not be back to HEAD: ${unsettled.join(', ')}. Check them before the next build.` }
+      : changed.length
       ? { status: 'fail' as const, note: `The browser session (agent or app) changed project files: ${changed.join(', ')}. If the app writes these at runtime, add them to .gitignore.` }
       : verdicts.get(r.id) ?? { status: 'fail' as const, note: 'not exercised' };
     const shot = join(screensDir, `${r.id}.png`);

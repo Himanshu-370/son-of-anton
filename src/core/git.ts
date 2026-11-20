@@ -136,7 +136,7 @@ export async function porcelainStatus(repo: string): Promise<Map<string, string>
 
 /**
  * Puts repo-relative `paths` back to HEAD: tracked ones via `checkout HEAD --`, others are unstaged and
- * deleted. Refuses (throws, before touching anything) a path outside the repo, in `.git/` or in `.anton/`.
+ * deleted if they are then untracked and not ignored (an ignored file is left alone). Refuses (throws, before touching anything) a path outside the repo, in `.git/` or in `.anton/`.
  */
 export async function restorePaths(repo: string, paths: string[]): Promise<void> {
   for (const p of paths) {
@@ -148,6 +148,7 @@ export async function restorePaths(repo: string, paths: string[]): Promise<void>
   }
   // Literal pathspecs: a file named `*.js` must not match every .js file.
   const lit = ['--literal-pathspecs'];
+  const notInHead: string[] = [];
   for (const p of paths) {
     let inHead = true;
     try {
@@ -158,9 +159,15 @@ export async function restorePaths(repo: string, paths: string[]): Promise<void>
     if (inHead) await git(repo, [...lit, 'checkout', '-q', 'HEAD', '--', p]);
     else {
       await git(repo, [...lit, 'rm', '-q', '--cached', '--ignore-unmatch', '--', p]);
-      await rm(resolve(repo, p), { force: true, recursive: true });
+      notInHead.push(p);
     }
   }
+  if (!notInHead.length) return;
+  // Tracked files (a restored .gitignore among them) are back first, so this status sees HEAD's ignore
+  // rules: only paths still untracked and not ignored are deleted. Ignored files (.env, node_modules) never are.
+  const untracked = new Set((await git(repo, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])).split('\0')
+    .filter((e) => e.startsWith('?? ')).map((e) => e.slice(3)));
+  for (const p of notInHead) if (untracked.has(p)) await rm(resolve(repo, p), { force: true, recursive: true });
 }
 
 /** Create and switch to a new branch; git's error surfaces if it already exists. */

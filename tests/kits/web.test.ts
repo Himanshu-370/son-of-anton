@@ -181,6 +181,75 @@ describe('webKit.verify', () => {
     expect((await porcelainStatus(repo)).size).toBe(0);
   });
 
+  it('a file hidden by a new ignore rule is removed, not left for the next commit', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'web-repo-'));
+    const g = (...a: string[]) => execFileSync('git', a, { cwd: repo });
+    g('init', '-q');
+    writeFileSync(join(repo, '.gitignore'), 'node_modules/\n');
+    writeFileSync(join(repo, 'a.txt'), 'original\n');
+    g('add', '.');
+    g('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'init');
+    const jobDir = join(repo, '.anton', 'jobs', 'j1');
+    mkdirSync(jobDir, { recursive: true });
+    const s = setup({ repo, jobDir });
+    const out = await webKit.verify(s.ctx, {
+      runIn: s.runIn,
+      runAgent: agent(async () => {
+        writeFileSync(join(repo, 'evil.js'), 'bad()\n');
+        writeFileSync(join(repo, '.gitignore'), 'node_modules/\nevil.js\n');
+        return allPass;
+      }),
+      sleep: async () => {},
+    });
+    expect(readFileSync(join(repo, '.gitignore'), 'utf8')).toBe('node_modules/\n');
+    expect(existsSync(join(repo, 'evil.js'))).toBe(false);
+    expect((await porcelainStatus(repo)).size).toBe(0);
+    for (const r of out.results) expect(r.browser?.note).toContain('.gitignore, evil.js');
+  });
+
+  it('a rewritten .gitignore never deletes formerly ignored files', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'web-repo-'));
+    const g = (...a: string[]) => execFileSync('git', a, { cwd: repo });
+    g('init', '-q');
+    writeFileSync(join(repo, '.gitignore'), '.env\nnode_modules/\n');
+    g('add', '.');
+    g('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'init');
+    writeFileSync(join(repo, '.env'), 'FAKE_LOCAL=not-a-real-value\n');
+    mkdirSync(join(repo, 'node_modules', 'x'), { recursive: true });
+    writeFileSync(join(repo, 'node_modules', 'x', 'index.js'), 'x\n');
+    const jobDir = join(repo, '.anton', 'jobs', 'j1');
+    mkdirSync(jobDir, { recursive: true });
+    const s = setup({ repo, jobDir });
+    const out = await webKit.verify(s.ctx, {
+      runIn: s.runIn,
+      runAgent: agent(async () => {
+        writeFileSync(join(repo, '.gitignore'), '');
+        return allPass;
+      }),
+      sleep: async () => {},
+    });
+    expect(readFileSync(join(repo, '.gitignore'), 'utf8')).toBe('.env\nnode_modules/\n');
+    expect(readFileSync(join(repo, '.env'), 'utf8')).toBe('FAKE_LOCAL=not-a-real-value\n');
+    expect(existsSync(join(repo, 'node_modules', 'x', 'index.js'))).toBe(true);
+    expect(out.results.every((r) => r.status === 'fail')).toBe(true);
+  });
+
+  it('files that keep changing after 3 restores fail every check (fail closed)', async () => {
+    const s = setup();
+    let n = 0;
+    const out = await webKit.verify(s.ctx, {
+      runIn: s.runIn,
+      runAgent: agent(allPass),
+      porcelainStatus: async () => (n++ === 0 ? new Map() : new Map([['w.txt', `?? ${n}`]])),
+      restorePaths: async () => {},
+      sleep: async () => {},
+    });
+    for (const r of out.results) {
+      expect(r.status).toBe('fail');
+      expect(r.browser?.note).toMatch(/kept changing.*w\.txt/);
+    }
+  });
+
   it('an edit to an already-dirty file is caught and reported', async () => {
     const repo = mkdtempSync(join(tmpdir(), 'web-repo-'));
     const g = (...a: string[]) => execFileSync('git', a, { cwd: repo });
