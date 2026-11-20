@@ -166,7 +166,7 @@ export async function runSecurityReview(
     prompt: renderPrompt(spec, plan, withRefs, unavailable, diff, prior),
     outputSchema: OUTPUT_JSON_SCHEMA,
     tools: ['Read', 'Grep', 'Glob'],
-    maxTurns: 30,
+    maxTurns: 60,
     budgetUsd: remainingUsd(ctx.state),
   };
   const res = await run(ctx, req);
