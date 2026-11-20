@@ -170,6 +170,16 @@ export async function restorePaths(repo: string, paths: string[]): Promise<void>
   for (const p of notInHead) if (untracked.has(p)) await rm(resolve(repo, p), { force: true, recursive: true });
 }
 
+/** The subset of repo-relative `paths` that git ignores under the current ignore rules. */
+export async function ignoredPaths(repo: string, paths: string[]): Promise<Set<string>> {
+  if (!paths.length) return new Set();
+  const r = await execa('git', [...SAFE, 'check-ignore', '-z', '--stdin'], {
+    cwd: repo, env: gitEnv(), extendEnv: false, input: paths.join('\0') + '\0', reject: false,
+  });
+  if (r.exitCode !== 0 && r.exitCode !== 1) throw new Error(`git check-ignore failed: ${String(r.stderr)}`);
+  return new Set(String(r.stdout).split('\0').filter(Boolean));
+}
+
 /** Create and switch to a new branch; git's error surfaces if it already exists. */
 export async function createBranch(repo: string, name: string): Promise<void> {
   await git(repo, ['switch', '-c', name]);

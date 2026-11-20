@@ -162,7 +162,7 @@ export async function readApprovedSpec(jobDir: string): Promise<SpecDoc> {
   // An older spec.md has no Kit line: spec.json's value (default fallback) stands. Only the header
   // (before the first `## `) counts, so a "Kit:" line in the body is plain text.
   const header = md.split(/^## /m)[0]!;
-  const kit = /^Kit:[ \t]*(.*?)[ \t]*$/m.exec(header)?.[1];
+  const kit = /^Kit:[ \t]*(.*?)[ \t]*$/m.exec(header)?.[1]?.trim();
   if (kit !== undefined && !(KIT_NAMES as readonly string[]).includes(kit)) {
     throw new Error(`Unknown kit "${kit}" in spec.md (use fallback or web)`);
   }

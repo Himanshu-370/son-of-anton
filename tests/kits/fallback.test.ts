@@ -54,6 +54,15 @@ describe('fallbackKit', () => {
     expect(out.failureReport).not.toContain('AC-1');
   });
 
+  it('fallback verify kills container processes before host evidence writes', async () => {
+    const d = fake(0);
+    await fallbackKit.verify(mk({ install: 'npm i', test: 'npm test', run: 'npm start' }), d);
+    const kill = d.calls.indexOf('kill -s KILL -- -1 2>/dev/null; true');
+    expect(kill).toBeGreaterThan(d.calls.findIndex((c) => c.includes('npm test')));
+    expect(kill).toBeGreaterThan(d.calls.findIndex((c) => c.includes('npm start')));
+    expect(kill).toBeLessThan(d.calls.findIndex((c) => c.startsWith('cat ')));
+  });
+
   it('install failure fails every check with run_failed and skips tests', async () => {
     const d = fake(0, 2);
     const out = await fallbackKit.verify(mk({ install: 'npm i', test: 'npm test' }), d);

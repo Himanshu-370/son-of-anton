@@ -125,7 +125,7 @@ async function reviewBase(ctx: StageCtx, state: JobState, revParse: typeof defau
  * to a host dir; the host then rm/mkdir/writes there. Refuse unless every component from `.anton` to
  * `evidence` is a real folder and evidence resolves to `<repo>/.anton/jobs/<id>/evidence`.
  */
-async function assertEvidenceDir(repo: string, jobDir: string): Promise<void> {
+export async function assertEvidenceDir(repo: string, jobDir: string): Promise<void> {
   const root = await realpath(repo);
   const want = join(root, '.anton', 'jobs', basename(jobDir), 'evidence');
   let p = root;

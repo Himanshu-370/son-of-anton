@@ -179,6 +179,13 @@ describe('writeSpec / readApprovedSpec', () => {
     await expect(readApprovedSpec(ctx.jobDir)).rejects.toThrow('Unknown kit ""');
   });
 
+  it('Kit line with CRLF reads as web', async () => {
+    await writeSpec(ctx.jobDir, { ...spec, kit: 'fallback' });
+    const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');
+    await writeFile(join(ctx.jobDir, 'spec.md'), md.replace('Kit: fallback\n', 'Kit: web\r\n'));
+    expect((await readApprovedSpec(ctx.jobDir)).kit).toBe('web');
+  });
+
   it('unknown kit in spec.md throws', async () => {
     await writeSpec(ctx.jobDir, spec);
     const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');

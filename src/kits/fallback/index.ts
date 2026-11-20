@@ -10,6 +10,9 @@ import type { BaselineContext, CheckResult, Kit, VerifyContext } from '../types.
 
 type RunIn = (name: string, cmd: string) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
 
+/** Nothing may still run in the container when the host starts writing evidence: a symlink swapped in after the guard would escape. */
+const KILL_ALL = 'kill -s KILL -- -1 2>/dev/null; true';
+
 const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 /** Wraps runIn so everything the kit reads, saves or reports is already redacted. */
@@ -63,6 +66,7 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
   const install = await runIn(ctx.container, ctx.commands.install);
   if (install.exitCode !== 0) {
     const output = `${install.stdout}\n${install.stderr}`.trim();
+    await rawRunIn(ctx.container, KILL_ALL);
     await writeFileAtomic(outPath, output);
     const error = trimOutput(output, { fullPath: outPath });
     const results: CheckResult[] = ctx.checks.map((c) => ({
@@ -74,6 +78,14 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
   await runIn(ctx.container, `rm -f ${shq(junit)}`);
   const test = await runIn(ctx.container, `export ANTON_JUNIT=${shq(junit)}; ${ctx.commands.test}`);
   const testOutput = `${test.stdout}\n${test.stderr}`;
+  let runOk = true;
+  let runFailure: RunFailure | undefined;
+  if (ctx.commands.run) {
+    const r = await runIn(ctx.container, `timeout 10 sh -c ${shq(ctx.commands.run)}`);
+    runOk = r.exitCode === 0 || r.exitCode === 124;
+    if (!runOk) runFailure = { exitCode: r.exitCode, output: `${r.stdout}\n${r.stderr}`.trim() };
+  }
+  await rawRunIn(ctx.container, KILL_ALL);
   await writeFileAtomic(outPath, testOutput);
   const xml = await rawRunIn(ctx.container, `cat ${shq(junit)}`);
   const xmlText = xml.exitCode === 0 ? redact(xml.stdout, ctx.secrets) : '';
@@ -87,13 +99,6 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
     testNote = `Test command exited ${test.exitCode} and produced no valid JUnit XML.`;
   }
 
-  let runOk = true;
-  let runFailure: RunFailure | undefined;
-  if (ctx.commands.run) {
-    const r = await runIn(ctx.container, `timeout 10 sh -c ${shq(ctx.commands.run)}`);
-    runOk = r.exitCode === 0 || r.exitCode === 124;
-    if (!runOk) runFailure = { exitCode: r.exitCode, output: `${r.stdout}\n${r.stderr}`.trim() };
-  }
   return { results, runOk, failureReport: buildReport(results, outPath, { testNote, runFailure }), tests: allTests(xmlText), testsRan };
 }
 
@@ -106,6 +111,7 @@ async function baseline(ctx: BaselineContext, deps: { runIn?: RunIn } = {}) {
   if ((await runIn(ctx.container, ctx.commands.install)).exitCode !== 0) return { passingTests: [], ran: false };
   await runIn(ctx.container, `rm -f ${shq(junit)}`);
   await runIn(ctx.container, `export ANTON_JUNIT=${shq(junit)}; ${ctx.commands.test}`);
+  await rawRunIn(ctx.container, KILL_ALL);
   const raw = await rawRunIn(ctx.container, `cat ${shq(junit)}`);
   const xml = { exitCode: raw.exitCode, stdout: redact(raw.stdout, ctx.secrets) };
   await redactJUnitFile(join(ctx.jobDir, 'evidence', 'baseline-junit.xml'), xml.exitCode === 0 ? xml.stdout : '', raw.stdout);
