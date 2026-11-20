@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import type { StageCtx } from '../../src/agent/host-runner.js';
 import { porcelainStatus, restorePaths } from '../../src/core/git.js';
 import type { JobState } from '../../src/core/state.js';
-import { STOP_APP } from '../../src/kits/web/browser.js';
+import { KILL_ALL, STOP_APP } from '../../src/kits/web/browser.js';
 import { webKit } from '../../src/kits/web/index.js';
 
 const checks = [
@@ -37,7 +37,7 @@ function setup(opts: { xml?: string; ready?: boolean; alive?: boolean; repo?: st
       return existsSync(f) ? { ...ok, stdout: readFileSync(f, 'utf8').trimEnd().split('\n').slice(-40).join('\n') } : { ...ok, exitCode: 1 };
     }
     if (cmd.startsWith('curl ')) return { ...ok, exitCode: opts.ready === false ? 7 : 0 };
-    if (cmd.startsWith('kill -0')) return { ...ok, exitCode: opts.alive === false ? 1 : 0 };
+    if (cmd.includes('/proc/')) return { ...ok, exitCode: opts.alive === false ? 1 : 0 }; // zombie-aware liveness check
     return ok;
   };
   const ctx = { container: 'c', jobDir, checks, commands, stage };
@@ -324,6 +324,22 @@ describe('webKit.verify', () => {
       ...noGit,
     });
     expect(out.results.find((r) => r.id === 'AC-1')!.browser?.screenshot).toBeUndefined();
+  });
+
+  it('every container process is killed before the after-snapshot', async () => {
+    const s = setup();
+    await webKit.verify(s.ctx, {
+      runIn: s.runIn,
+      runAgent: agent(allPass),
+      ...noGit,
+      porcelainStatus: async () => { s.calls.push('<status>'); return new Map(); },
+    });
+    const statuses = s.calls.flatMap((c, i) => (c === '<status>' ? [i] : []));
+    const kill = s.calls.indexOf(KILL_ALL);
+    expect(statuses.length).toBe(2);
+    expect(kill).toBeGreaterThan(statuses[0]!);
+    expect(kill).toBeLessThan(statuses[1]!);
+    expect(killed(s.calls)).toBe(true); // the outer stop stays for error paths
   });
 
   it('screenshot path recorded only when the file exists', async () => {

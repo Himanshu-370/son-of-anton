@@ -7,7 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { execa } from 'execa';
 import { startContainer, runIn, stopContainer, ensureImage } from '../../src/docker/container.js';
 import { webKit } from '../../src/kits/web/index.js';
-import { startApp, STOP_APP } from '../../src/kits/web/browser.js';
+import { KILL_ALL, startApp } from '../../src/kits/web/browser.js';
 
 const IMAGE = 'alpine:3.20';
 const slug = `e2e-test-${randomBytes(4).toString('hex')}`;
@@ -105,9 +105,22 @@ describe.skipIf(!process.env.ANTON_E2E)('docker e2e', () => {
       expect(shot.exitCode, shot.stderr).toBe(0);
       expect((await runIn(webName, 'test -s /tmp/shot.png')).exitCode).toBe(0);
 
-      await runIn(webName, STOP_APP);
+      // A stray background writer in its own session (outside the app's group) must die too.
+      await runIn(webName, 'setsid sh -c "while :; do sleep 1; done" >/dev/null 2>&1 &');
+      expect((await runIn(webName, 'command -v pgrep')).exitCode, 'pgrep missing: the assertions below would pass vacuously').toBe(0);
+      expect((await runIn(webName, "pgrep -f '[w]hile :'")).exitCode).toBe(0);
+      await runIn(webName, KILL_ALL);
       expect((await runIn(webName, `curl -fsS --max-time 2 -o /dev/null ${url}`)).exitCode).not.toBe(0);
       expect((await runIn(webName, "pgrep -f '[h]ttp.server'")).exitCode).not.toBe(0);
+      expect((await runIn(webName, "pgrep -f '[w]hile :'")).exitCode).not.toBe(0);
+      // Only PID 1 (sleep infinity) and this exec's own processes are left; zombies don't count.
+      const ps = await runIn(webName, "ps -eo pid=,stat=,args= | awk '$1 != 1 && $2 !~ /^Z/'");
+      expect(ps.stdout.trim().split('\n').filter((l) => !/ps -eo|awk|sh -lc/.test(l))).toEqual([]);
+
+      // serve that exits at once fails fast, even though its exited process lingers as a zombie.
+      const t0 = Date.now();
+      expect(await startApp(runIn, webName, 'false', url, '/tmp/app2.log', (ms) => new Promise((r) => setTimeout(r, ms)))).toBe(false);
+      expect(Date.now() - t0).toBeLessThan(15_000);
     } finally {
       await stopContainer(webName);
       await rm(webRepo, { recursive: true, force: true });

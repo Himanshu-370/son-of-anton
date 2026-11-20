@@ -8,7 +8,7 @@ import { runIn as dockerRunIn } from '../../docker/container.js';
 import { fallbackKit } from '../fallback/index.js';
 import type { CheckResult, Kit, VerifyContext, VerifyOutcome } from '../types.js';
 import {
-  appLogTail, browserReport, changedPaths, mergeBrowser, READY_TRIES, runBrowserAgent, startApp, STOP_APP,
+  appLogTail, browserReport, changedPaths, KILL_ALL, mergeBrowser, READY_TRIES, runBrowserAgent, startApp, STOP_APP,
   type BrowserCheck, type RunIn,
 } from './browser.js';
 
@@ -82,6 +82,8 @@ async function verify(ctx: VerifyContext, deps: WebVerifyDeps = {}): Promise<Ver
       try {
         agent = await runBrowserAgent(stage, ctx.checks, url, `${boxEvidence}/screens`, deps.runAgent);
       } finally {
+        // Nothing may keep writing between the snapshot and the next stage: stop the app and any leftover process.
+        await runIn(ctx.container, KILL_ALL);
         ({ changed, unsettled } = await restoreChanges(stage.repo, before, status, deps.restorePaths ?? defaultRestore));
       }
     }

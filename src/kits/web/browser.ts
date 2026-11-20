@@ -19,6 +19,13 @@ const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 const PID = '/tmp/anton-app.pid';
 /** Kills the app's whole process group (TERM, then KILL after 1 s); a no-op when no app runs. */
 export const STOP_APP = `if [ -f ${PID} ]; then P=$(cat ${PID}); kill -s TERM -- -$P 2>/dev/null; sleep 1; kill -s KILL -- -$P 2>/dev/null; rm -f ${PID}; fi; true`;
+/**
+ * STOP_APP, then KILL to every process in the container except PID 1 and this exec shell (`kill -- -1`
+ * skips both): a writer the agent left in the background, or an app that daemonized out of its group.
+ */
+export const KILL_ALL = `${STOP_APP}; kill -s KILL -- -1 2>/dev/null; true`;
+/** Exit 0 while the app runs. A zombie counts as exited: the container has no init to reap it, so `kill -0` would still succeed. */
+const APP_ALIVE = `grep -q '^State:[[:space:]]*[^Z[:space:]]' /proc/$(cat ${PID})/status`;
 export const READY_TRIES = 60;
 
 /** Starts `serve` in its own process group (log to `logPath`, a container path) and polls `url` once a second. */
@@ -30,7 +37,7 @@ export async function startApp(
   for (let i = 0; i < READY_TRIES; i++) {
     if ((await runIn(container, `curl -fsS --max-time 5 -o /dev/null ${shq(url)}`)).exitCode === 0) return true;
     // serve exited at once: no point waiting out the minute.
-    if ((await runIn(container, `kill -0 $(cat ${PID})`)).exitCode !== 0) return false;
+    if ((await runIn(container, APP_ALIVE)).exitCode !== 0) return false;
     await sleep(1000);
   }
   return false;
