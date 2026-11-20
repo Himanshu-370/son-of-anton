@@ -12,6 +12,7 @@ import { logsCommand } from './commands/logs.js';
 import { newCommand } from './commands/new.js';
 import { rejectCommand } from './commands/reject.js';
 import { resumeCommand } from './commands/resume.js';
+import { secretsEditCommand } from './commands/secrets.js';
 import { runCommand } from './commands/run.js';
 import { statusCommand } from './commands/status.js';
 import { stopCommand } from './commands/stop.js';
@@ -87,6 +88,13 @@ export function buildProgram(deps: CliDeps = {}): Command {
     .argument('<project>')
     .option('-f, --follow', 'keep following the log')
     .action(async (p: string, o: { follow?: boolean }) => exit(await logsCommand(p, o, deps)));
+  program
+    .command('secrets')
+    .description("Manage a project's secrets (passed to the job container as env vars only)")
+    .command('edit')
+    .description("Create and open a project's secrets file")
+    .argument('<project>')
+    .action(async (p: string) => exit(await secretsEditCommand(p, deps)));
   program
     .command('_run', { hidden: true })
     .argument('<project>')

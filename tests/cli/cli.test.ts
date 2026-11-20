@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { access, mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,6 +17,9 @@ import { statusCommand } from '../../src/cli/commands/status.js';
 import { stopCommand } from '../../src/cli/commands/stop.js';
 import { changeCommand } from '../../src/cli/commands/change.js';
 import { adoptCommand } from '../../src/cli/commands/adopt.js';
+import { secretsEditCommand } from '../../src/cli/commands/secrets.js';
+import { runSpecSession } from '../../src/cli/spec-session.js';
+import { resolveDeps } from '../../src/cli/deps.js';
 import { abandonCommand } from '../../src/cli/commands/abandon.js';
 import { acceptRiskCommand } from '../../src/cli/commands/accept-risk.js';
 import { loadAcceptedRisks } from '../../src/security/risks.js';
@@ -477,6 +480,50 @@ describe('anton new', () => {
     const h = harness();
     expect(await newCommand('x', { budget: 'lots' }, h.deps)).toBe(1);
     expect(h.errText()).toContain('--budget');
+  });
+});
+
+describe('secrets', () => {
+  it('secrets edit creates 0600 file and calls openEditor', async () => {
+    const opened: string[] = [];
+    const h = harness({ openEditor: async (p) => { opened.push(p); } });
+    expect(await secretsEditCommand('app', h.deps)).toBe(0);
+    const p = join(home, 'secrets', 'app.env');
+    expect(opened).toEqual([p]);
+    expect((await stat(p)).mode & 0o777).toBe(0o600);
+    expect((await stat(join(home, 'secrets'))).mode & 0o777).toBe(0o700);
+    expect(await readFile(p, 'utf8')).toMatch(/^# /);
+  });
+
+  it('secrets edit rejects a traversal name', async () => {
+    const h = harness({ openEditor: async () => { throw new Error('should not open'); } });
+    expect(await secretsEditCommand('../x', h.deps)).toBe(1);
+    expect(h.errText()).toContain('Project names may only use a-z, 0-9 and -');
+  });
+
+  it('spec session prints secret names, never values; passes env file', async () => {
+    const repo = join(home, 'r');
+    await mkdir(repo, { recursive: true });
+    await execa('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+    await mkdir(join(home, 'secrets'), { recursive: true });
+    await writeFile(join(home, 'secrets', 'app.env'), 'ALPHA=FAKE_VALUE_1\nBETA=not-a-secret\n', { mode: 0o600 });
+    const jobDir = jobDirOf(repo, '1-x');
+    await mkdir(jobDir, { recursive: true });
+    await saveState(jobDir, {
+      jobId: '1-x', project: 'app', stage: 'spec', round: 0, maxRounds: 3, budgetUsd: 10, spentUsd: 0,
+      warned80: false, completedTasks: [], updatedAt: '',
+    });
+    const opts: unknown[] = [];
+    const spec: SpecDoc = { title: 'T', summary: 's', outOfScope: [], kit: 'fallback', tech: [], acceptanceChecks: [{ id: 'AC-1', text: 't' }] };
+    const h = harness({
+      startContainer: async (_s, _r, _i, o) => { opts.push(o); return 'c'; },
+      runSpec: async (ctx) => ({ spec, state: ctx.state }) as never,
+      onSigint: () => () => undefined,
+    });
+    expect(await runSpecSession(resolveDeps(h.deps), { name: 'app', repoPath: repo, jobDir, description: 'd', image: 'img', jobId: '1-x' }, 'new')).toBe(0);
+    expect(h.text()).toContain('Secrets this job will receive: ALPHA, BETA');
+    expect(h.text() + h.errText()).not.toMatch(/FAKE_VALUE_1|not-a-secret/);
+    expect(opts).toEqual([{ envFile: join(home, 'secrets', 'app.env') }]);
   });
 });
 

@@ -22,6 +22,11 @@ function registryFile(): string {
   return join(antonHome(), 'registry.json');
 }
 
+/** Project names become file paths (secrets), so only slug-shaped names are allowed. */
+export function assertProjectName(name: string): void {
+  if (slugify(name) !== name) throw new Error('Project names may only use a-z, 0-9 and -');
+}
+
 export function slugify(text: string): string {
   const slug = text
     .toLowerCase()

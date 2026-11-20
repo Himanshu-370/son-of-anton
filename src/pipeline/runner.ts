@@ -7,6 +7,7 @@ import { acquireLock as defaultAcquireLock } from '../core/lock.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { jobDir as jobDirOf } from '../core/paths.js';
 import { getProject } from '../core/registry.js';
+import { secretsEnvFile } from '../core/secrets.js';
 import { loadState, pause, saveState, transition, type JobState, type PauseReason } from '../core/state.js';
 import {
   ensureImage,
@@ -51,7 +52,7 @@ export async function startOrReuseContainer(slug: string, repo: string, exec: Ex
   const r = await exec('docker', ['inspect', '-f', '{{.State.Running}}', name]);
   if (r.exitCode === 0 && r.stdout.trim() === 'true') return name;
   const image = await ensureImage(fallbackKit, exec);
-  return dockerStartContainer(slug, repo, image, exec);
+  return dockerStartContainer(slug, repo, image, exec, { envFile: secretsEnvFile(slug) });
 }
 
 async function readJson(path: string): Promise<unknown> {

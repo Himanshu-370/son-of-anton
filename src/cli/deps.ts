@@ -28,7 +28,9 @@ export type CliDeps = {
   exec?: ExecFn;
   preflight?: () => Promise<void>;
   ensureImage?: () => Promise<string>;
-  startContainer?: (slug: string, repo: string, image: string) => Promise<string>;
+  startContainer?: (slug: string, repo: string, image: string, opts?: { envFile?: string }) => Promise<string>;
+  /** Opens the secrets file for editing (`$EDITOR`, or `open -t` on macOS). */
+  openEditor?: (path: string) => Promise<void>;
   stopContainer?: (name: string) => Promise<void>;
   runSpec?: typeof defaultRunSpec;
   /** Builds or refreshes the repo map before a change's spec. */
@@ -68,6 +70,14 @@ export function defaultOnSigint(handler: () => Promise<void> | void): () => void
   };
 }
 
+export async function defaultOpenEditor(path: string): Promise<void> {
+  const editor = process.env.EDITOR;
+  const [cmd, args] = editor ? [editor, [path]] : process.platform === 'darwin' ? ['open', ['-t', path]] : [undefined, []];
+  if (!cmd) throw new Error(`Set $EDITOR, or edit ${path} yourself.`);
+  // shortcut: $EDITOR is run without a shell, so "code --wait" style values with args won't work; wrap in a script if needed.
+  await new Promise<void>((res, rej) => spawn(cmd, args, { stdio: 'inherit' }).on('error', rej).on('exit', () => res()));
+}
+
 /** Interactive question loop on the terminal. */
 export async function readlineAsk(questions: string[]): Promise<string[]> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -92,7 +102,8 @@ export function resolveDeps(d: CliDeps = {}): Resolved {
     err: d.err ?? ((l) => console.error(l)),
     preflight: d.preflight ?? (() => dockerPreflight(exec)),
     ensureImage: d.ensureImage ?? (() => dockerEnsureImage(fallbackKit, exec)),
-    startContainer: d.startContainer ?? ((s, r, i) => dockerStartContainer(s, r, i, exec)),
+    startContainer: d.startContainer ?? ((s, r, i, o) => dockerStartContainer(s, r, i, exec, o)),
+    openEditor: d.openEditor ?? defaultOpenEditor,
     stopContainer: d.stopContainer ?? ((n) => dockerStopContainer(n, exec)),
     runSpec: d.runSpec ?? defaultRunSpec,
     ensureRepoMap: d.ensureRepoMap ?? ((ctx) => defaultEnsureRepoMap(ctx)),

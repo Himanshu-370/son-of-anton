@@ -149,6 +149,17 @@ describe('startContainer', () => {
     ]);
   });
 
+  it('startContainer adds --env-file only when given; values never appear in argv', async () => {
+    const { exec, calls } = fake();
+    await startContainer('s1', '/repo', 'img:1', exec);
+    expect(calls.flatMap((c) => c.args)).not.toContain('--env-file');
+    const f = fake();
+    await startContainer('s1', '/repo', 'img:1', f.exec, { envFile: '/h/secrets/p.env' });
+    const run = f.calls.find((c) => c.args[0] === 'run')!;
+    expect(run.args[run.args.indexOf('--env-file') + 1]).toBe('/h/secrets/p.env');
+    expect(run.args.indexOf('--env-file')).toBeLessThan(run.args.indexOf('img:1'));
+  });
+
   it('removes a pre-existing container before run', async () => {
     const { exec, calls } = fake();
     await startContainer('s1', '/repo', 'img:1', exec);

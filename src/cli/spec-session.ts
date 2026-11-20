@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
+import { loadSecrets, secretsEnvFile } from '../core/secrets.js';
 import { loadState, saveState, transition } from '../core/state.js';
 import { writeSpec } from '../stages/spec.js';
 import type { Resolved } from './deps.js';
@@ -10,7 +11,7 @@ export async function runSpecSession(
   p: { name: string; repoPath: string; jobDir: string; description: string; image: string; jobId: string },
   mode: 'new' | 'change',
 ): Promise<number> {
-  const container = await d.startContainer(p.name, p.repoPath, p.image);
+  const container = await d.startContainer(p.name, p.repoPath, p.image, { envFile: secretsEnvFile(p.name) });
   const hint = `anton abandon ${p.name}, then run anton ${mode} again.`;
   // Ctrl-C during the interactive spec stage would otherwise leave the container running.
   let interrupted = false;
@@ -44,6 +45,8 @@ export async function runSpecSession(
 
   const spec = join(p.jobDir, 'spec.md');
   d.out('');
+  const names = Object.keys(await loadSecrets(p.name));
+  d.out(`Secrets this job will receive: ${names.length ? names.join(', ') : 'none'}`);
   if (mode === 'change') {
     d.out(`Spec ready: ${spec}. Edit the acceptance checks if you like, then run: anton approve ${p.name}. Work happens on branch anton/${p.jobId}.`);
   } else {

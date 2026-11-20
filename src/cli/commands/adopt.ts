@@ -1,7 +1,7 @@
 import { realpath } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { ensureAntonIgnored, repoRoot } from '../../core/git.js';
-import { listProjects, registerProject, slugify, uniqueName } from '../../core/registry.js';
+import { assertProjectName, listProjects, registerProject, slugify, uniqueName } from '../../core/registry.js';
 import { guard, resolveDeps, UsageError, type CliDeps } from '../deps.js';
 
 /** `anton adopt <path> [--name <name>]`: register an existing git repo (its root) as a project. No job is created. */
@@ -15,7 +15,7 @@ export async function adoptCommand(path: string, opts: { name?: string }, deps: 
     let name: string;
     if (opts.name !== undefined) {
       name = opts.name;
-      if (slugify(name) !== name) throw new UsageError('Project names may only use a-z, 0-9 and -');
+      assertProjectName(name);
       if ((await listProjects()).some((p) => p.name === name)) throw new UsageError(`A project named ${name} already exists`);
     } else {
       name = await uniqueName(slugify(basename(real)));
