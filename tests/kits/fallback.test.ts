@@ -114,3 +114,21 @@ describe('fallbackKit', () => {
     expect((await fallbackKit.baseline({ container: 'c', jobDir: mk(cmds).jobDir, commands: cmds }, none)).ran).toBe(false);
   });
 });
+
+describe('fallbackKit redaction', () => {
+  const S = { TOKEN: 'FAKE_SECRET_VALUE_123' };
+  it('test-output.txt, failure report and junit are redacted', async () => {
+    const leaky = `<testsuite><testcase name="AC-1 ok"/><testcase name="AC-2 bad"><failure message="saw FAKE_SECRET_VALUE_123"/></testcase></testsuite>`;
+    const d = fake(0, 0, leaky);
+    const ctx = { ...mk({ install: 'npm i', test: 'npm test' }), secrets: S };
+    const run = async (c: string, cmd: string) => {
+      const r = await d.runIn(c, cmd);
+      return cmd === 'npm test' || cmd.includes('npm test') ? { ...r, stdout: 'out FAKE_SECRET_VALUE_123' } : r;
+    };
+    const out = await fallbackKit.verify(ctx, { runIn: run });
+    const text = readFileSync(join(ctx.jobDir, 'evidence', 'test-output.txt'), 'utf8');
+    expect(text).not.toContain('FAKE_SECRET_VALUE_123');
+    expect(text).toContain('[REDACTED:TOKEN]');
+    expect(JSON.stringify(out)).not.toContain('FAKE_SECRET_VALUE_123');
+  });
+});

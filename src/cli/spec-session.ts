@@ -13,6 +13,7 @@ export async function runSpecSession(
 ): Promise<number> {
   // Validates the secrets file first: a bad one fails here, before any container or API spend.
   const envFile = await secretsEnvFile(p.name);
+  const secrets = await loadSecrets(p.name);
   const container = await d.startContainer(p.name, p.repoPath, p.image, { envFile });
   const hint = `anton abandon ${p.name}, then run anton ${mode} again.`;
   // Ctrl-C during the interactive spec stage would otherwise leave the container running.
@@ -30,10 +31,10 @@ export async function runSpecSession(
   });
   try {
     const state = await loadState(p.jobDir);
-    const ctx: StageCtx = { project: p.name, repo: p.repoPath, container, jobDir: p.jobDir, state, stage: 'spec' };
+    const ctx: StageCtx = { project: p.name, repo: p.repoPath, container, jobDir: p.jobDir, state, stage: 'spec', secrets };
     if (mode === 'change') ctx.state = await d.ensureRepoMap(ctx);
     const r = await d.runSpec(ctx, p.description, d.ask, {}, mode);
-    await writeSpec(p.jobDir, r.spec);
+    await writeSpec(p.jobDir, r.spec, secrets);
     await saveState(p.jobDir, transition(r.state, 'awaiting_spec_approval'));
   } catch (e) {
     // `spec` has no paused edge, so the job can't be resumed: point at abandon + a fresh run.
@@ -47,7 +48,7 @@ export async function runSpecSession(
 
   const spec = join(p.jobDir, 'spec.md');
   d.out('');
-  const names = Object.keys(await loadSecrets(p.name));
+  const names = Object.keys(secrets);
   d.out(`Secrets this job will receive: ${names.length ? names.join(', ') : 'none'}`);
   if (mode === 'change') {
     d.out(`Spec ready: ${spec}. Edit the acceptance checks if you like, then run: anton approve ${p.name}. Work happens on branch anton/${p.jobId}.`);

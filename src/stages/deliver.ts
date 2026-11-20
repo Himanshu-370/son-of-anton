@@ -2,6 +2,7 @@ import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
 import { writeFileAtomic } from '../core/atomic.js';
+import { redact } from '../core/secrets.js';
 import { listTags as defaultListTags, tag as defaultTag } from '../core/git.js';
 import type { ReviewFinding } from '../review/code-review.js';
 import { loadAcceptedRisks } from '../security/risks.js';
@@ -196,7 +197,7 @@ export async function runDeliver(
     ...notDoneSection(spec, outcome.results, outcome.runOk),
     '',
   ].join('\n');
-  await writeFileAtomic(join(ctx.jobDir, 'REPORT.md'), md);
+  await writeFileAtomic(join(ctx.jobDir, 'REPORT.md'), redact(md, ctx.secrets));
 
   // R10: one numbered tag per delivery, so re-delivery after a reject never collides.
   const prefix = `anton/${ctx.state.jobId}/delivered-`;

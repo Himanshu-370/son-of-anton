@@ -19,6 +19,24 @@ export async function secretsEnvFile(project: string): Promise<string | undefine
 }
 
 /**
+ * Hides every secret value (>= 8 chars; shorter ones would mangle ordinary text) as `[REDACTED:<KEY>]`.
+ * Longest first, so a value that contains another is fully hidden. The JSON-escaped form is hidden too,
+ * so redacting serialized JSON works and the result still parses. shortcut: exact-match only, so a value
+ * split across lines or re-encoded (base64, URL) is not caught; upgrade if agents start echoing those.
+ */
+export function redact(text: string, secrets: Record<string, string> | undefined): string {
+  const entries = Object.entries(secrets ?? {}).filter(([, v]) => v.length >= 8).sort((a, b) => b[1].length - a[1].length);
+  let out = text;
+  for (const [k, v] of entries) {
+    const tag = `[REDACTED:${k}]`;
+    out = out.split(v).join(tag);
+    const esc = JSON.stringify(v).slice(1, -1);
+    if (esc !== v) out = out.split(esc).join(tag);
+  }
+  return out;
+}
+
+/**
  * Parses KEY=value lines exactly as `docker --env-file` does (values verbatim, no quote stripping), so the
  * names we show are the names Docker passes. `{}` if the file is missing. Throws unless the file is private,
  * and on any line Docker would read differently than it looks (errors name the line, never the value).

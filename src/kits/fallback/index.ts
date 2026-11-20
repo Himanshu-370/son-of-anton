@@ -2,6 +2,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runIn as dockerRunIn } from '../../docker/container.js';
+import { redact } from '../../core/secrets.js';
 import { trimOutput } from '../../core/trim.js';
 import { allTests, isValidJUnit, mapJUnit, passingTests } from '../../verify/junit.js';
 import type { BaselineContext, CheckResult, Kit, VerifyContext } from '../types.js';
@@ -9,6 +10,19 @@ import type { BaselineContext, CheckResult, Kit, VerifyContext } from '../types.
 type RunIn = (name: string, cmd: string) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
 
 const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
+
+/** Wraps runIn so everything the kit reads, saves or reports is already redacted. */
+function redactingRunIn(runIn: RunIn, secrets: Record<string, string> | undefined): RunIn {
+  return async (n, c) => {
+    const r = await runIn(n, c);
+    return { ...r, stdout: redact(r.stdout, secrets), stderr: redact(r.stderr, secrets) };
+  };
+}
+
+/** The container writes the JUnit file; if it holds a secret, replace it on disk with the redacted text. */
+async function redactJUnitFile(path: string, redacted: string, original: string): Promise<void> {
+  if (redacted && redacted !== original) await writeFile(path, redacted);
+}
 
 type RunFailure = { exitCode: number; output: string };
 
@@ -38,7 +52,8 @@ function buildReport(
 }
 
 async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
-  const runIn: RunIn = deps.runIn ?? ((n, c) => dockerRunIn(n, c));
+  const rawRunIn: RunIn = deps.runIn ?? ((n, c) => dockerRunIn(n, c));
+  const runIn = redactingRunIn(rawRunIn, ctx.secrets);
   const evidenceDir = join(ctx.jobDir, 'evidence');
   await mkdir(evidenceDir, { recursive: true });
   const outPath = join(evidenceDir, 'test-output.txt');
@@ -59,8 +74,9 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
   const test = await runIn(ctx.container, `export ANTON_JUNIT=${shq(junit)}; ${ctx.commands.test}`);
   const testOutput = `${test.stdout}\n${test.stderr}`;
   await writeFile(outPath, testOutput);
-  const xml = await runIn(ctx.container, `cat ${shq(junit)}`);
-  const xmlText = xml.exitCode === 0 ? xml.stdout : '';
+  const xml = await rawRunIn(ctx.container, `cat ${shq(junit)}`);
+  const xmlText = xml.exitCode === 0 ? redact(xml.stdout, ctx.secrets) : '';
+  await redactJUnitFile(join(evidenceDir, 'junit.xml'), xmlText, xml.stdout);
   let results = mapJUnit(xmlText, ctx.checks);
   let testNote: string | undefined;
   if (!xmlText.trim() || !isValidJUnit(xmlText)) {
@@ -80,14 +96,17 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
 }
 
 async function baseline(ctx: BaselineContext, deps: { runIn?: RunIn } = {}) {
-  const runIn: RunIn = deps.runIn ?? ((n, c) => dockerRunIn(n, c));
+  const rawRunIn: RunIn = deps.runIn ?? ((n, c) => dockerRunIn(n, c));
+  const runIn = redactingRunIn(rawRunIn, ctx.secrets);
   // Separate file so the baseline never collides with verify's junit.xml.
   const junit = `/workspace/.anton/jobs/${basename(ctx.jobDir)}/evidence/baseline-junit.xml`;
   await mkdir(join(ctx.jobDir, 'evidence'), { recursive: true });
   if ((await runIn(ctx.container, ctx.commands.install)).exitCode !== 0) return { passingTests: [], ran: false };
   await runIn(ctx.container, `rm -f ${shq(junit)}`);
   await runIn(ctx.container, `export ANTON_JUNIT=${shq(junit)}; ${ctx.commands.test}`);
-  const xml = await runIn(ctx.container, `cat ${shq(junit)}`);
+  const raw = await rawRunIn(ctx.container, `cat ${shq(junit)}`);
+  const xml = { exitCode: raw.exitCode, stdout: redact(raw.stdout, ctx.secrets) };
+  await redactJUnitFile(join(ctx.jobDir, 'evidence', 'baseline-junit.xml'), xml.exitCode === 0 ? xml.stdout : '', raw.stdout);
   if (xml.exitCode !== 0 || !isValidJUnit(xml.stdout)) return { passingTests: [], ran: false };
   return { passingTests: passingTests(xml.stdout), ran: true };
 }

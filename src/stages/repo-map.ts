@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
 import { writeFileAtomic } from '../core/atomic.js';
+import { redact } from '../core/secrets.js';
 import { remainingUsd } from '../core/budget.js';
 import { ROLE_MODELS } from '../core/config.js';
 import { diffSince as defaultDiffSince, headSha as defaultHeadSha } from '../core/git.js';
@@ -69,7 +70,7 @@ export async function ensureRepoMap(ctx: StageCtx, deps: RepoMapDeps = {}): Prom
   const res = await run(ctx, req);
   const out = OutputSchema.parse(res.output);
   // Map first: a crash between the writes leaves a stale sha, so the next run just refreshes.
-  await writeFileAtomic(join(dir, 'repo-map.md'), out.markdown);
+  await writeFileAtomic(join(dir, 'repo-map.md'), redact(out.markdown, ctx.secrets));
   await writeFileAtomic(join(dir, 'repo-map.json'), JSON.stringify({ mapSha: head }));
   return res.state;
 }

@@ -192,3 +192,17 @@ describe('runAgent', () => {
     expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(1.5);
   });
 });
+
+describe('runAgent redaction', () => {
+  it('agent log line containing the secret is saved redacted; request file too', async () => {
+    ctx.secrets = { API_KEY: 'FAKE_SECRET_VALUE_123' };
+    const f = fake([L({ type: 'log', text: 'saw FAKE_SECRET_VALUE_123' }), result(0)]);
+    await runAgent(ctx, { ...req, prompt: 'use FAKE_SECRET_VALUE_123' }, { spawn: () => f.child, notify: vi.fn() });
+    const log = await readFile(join(ctx.jobDir, 'logs', 'build.log'), 'utf8');
+    expect(log).not.toContain('FAKE_SECRET_VALUE_123');
+    expect(log).toContain('[REDACTED:API_KEY]');
+    const reqText = await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8');
+    expect(reqText).not.toContain('FAKE_SECRET_VALUE_123');
+    expect(JSON.parse(reqText).prompt).toBe('use [REDACTED:API_KEY]');
+  });
+});

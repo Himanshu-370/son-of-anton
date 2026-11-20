@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import type { StageCtx } from '../agent/host-runner.js';
 import { writeFileAtomic } from '../core/atomic.js';
+import { redact } from '../core/secrets.js';
 import { resetWorktree as defaultResetWorktree } from '../core/git.js';
 import { saveState, transition, type JobState } from '../core/state.js';
 import type { Kit } from '../kits/types.js';
@@ -14,11 +15,11 @@ export type BaselineDeps = { runScanners?: typeof defaultRunScanners; resetWorkt
 
 /** Records the passing tests and scanner findings of the untouched repo, then moves to build (round 1). */
 export async function runBaseline(ctx: StageCtx, kit: Kit, plan: Plan, deps: BaselineDeps = {}): Promise<JobState> {
-  const { passingTests, ran } = await kit.baseline({ container: ctx.container, jobDir: ctx.jobDir, commands: plan.commands });
+  const { passingTests, ran } = await kit.baseline({ container: ctx.container, jobDir: ctx.jobDir, commands: plan.commands, secrets: ctx.secrets });
   const { findings, unavailable } = await (deps.runScanners ?? defaultRunScanners)(ctx.container);
   await writeFileAtomic(
     join(ctx.jobDir, 'evidence', 'baseline.json'),
-    JSON.stringify({ passingTests, ran, scannerRefs: findings.map(scannerRef), unavailable }, null, 2) + '\n',
+    redact(JSON.stringify({ passingTests, ran, scannerRefs: findings.map(scannerRef), unavailable }, null, 2) + '\n', ctx.secrets),
   );
   // Install and tests dirty the change branch; keep that out of T1's commit.
   await (deps.resetWorktree ?? defaultResetWorktree)(ctx.repo);

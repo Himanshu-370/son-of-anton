@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
 import { writeFileAtomic } from '../core/atomic.js';
+import { redact } from '../core/secrets.js';
 import { remainingUsd } from '../core/budget.js';
 import { ROLE_MODELS } from '../core/config.js';
 import type { JobState } from '../core/state.js';
@@ -133,9 +134,9 @@ function renderSpec(s: SpecDoc): string {
   ].join('\n');
 }
 
-export async function writeSpec(jobDir: string, spec: SpecDoc): Promise<void> {
-  const md = renderSpec(spec);
-  await writeFileAtomic(join(jobDir, 'spec.json'), JSON.stringify(spec, null, 2) + '\n');
+export async function writeSpec(jobDir: string, spec: SpecDoc, secrets?: Record<string, string>): Promise<void> {
+  const md = redact(renderSpec(spec), secrets);
+  await writeFileAtomic(join(jobDir, 'spec.json'), redact(JSON.stringify(spec, null, 2) + '\n', secrets));
   await writeFileAtomic(join(jobDir, 'spec.generated.md'), md);
   await writeFileAtomic(join(jobDir, 'spec.md'), md);
 }

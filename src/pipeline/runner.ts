@@ -7,7 +7,7 @@ import { acquireLock as defaultAcquireLock } from '../core/lock.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { jobDir as jobDirOf } from '../core/paths.js';
 import { getProject } from '../core/registry.js';
-import { secretsEnvFile } from '../core/secrets.js';
+import { loadSecrets, redact, secretsEnvFile } from '../core/secrets.js';
 import { loadState, pause, saveState, transition, type JobState, type PauseReason } from '../core/state.js';
 import {
   ensureImage,
@@ -127,6 +127,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
   const jobDir = jobDirOf(repo, await currentJobId(repo));
   const release = await (deps.acquireLock ?? defaultAcquireLock)(repo);
   let startedContainer = false;
+  let secrets: Record<string, string> = {};
   /**
    * The end-of-run notification is sent only after the container is stopped and the lock released,
    * so a user acting on it (reject/resume) doesn't race this runner's shutdown.
@@ -141,11 +142,12 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
     try {
       startedContainer = true;
       const container = await startContainer(project, repo);
+      secrets = await loadSecrets(project);
       let spec: SpecDoc | undefined;
       let plan: Plan | undefined;
       const getSpec = async () => (spec ??= SpecDocBaseSchema.parse(await readJson(join(jobDir, 'spec.approved.json'))));
       const getPlan = async () => (plan ??= PlanSchema.parse(await readJson(join(jobDir, 'plan.json'))));
-      const ctx = (stage: string): StageCtx => ({ project, repo, container, jobDir, state, stage });
+      const ctx = (stage: string): StageCtx => ({ project, repo, container, jobDir, state, stage, secrets });
       let lastVerify: DeliverInput;
 
       while (ACTIVE_STAGES.includes(state.stage)) {
@@ -187,7 +189,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       log(`${reason}: ${e instanceof Error ? e.message : String(e)}`);
       if (reason === 'error') {
         await fsp.mkdir(join(jobDir, 'logs'), { recursive: true });
-        await fsp.appendFile(join(jobDir, 'logs', 'error.log'), `[${new Date().toISOString()}] ${msg}\n`);
+        await fsp.appendFile(join(jobDir, 'logs', 'error.log'), redact(`[${new Date().toISOString()}] ${msg}\n`, secrets));
       }
       // Stages persist cost as they go; pause from the latest saved state.
       const latest = await loadState(jobDir);

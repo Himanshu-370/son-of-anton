@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { loadSecrets, secretsEnvFile, secretsPath } from '../../src/core/secrets.js';
+import { loadSecrets, redact, secretsEnvFile, secretsPath } from '../../src/core/secrets.js';
 
 let home: string;
 beforeEach(async () => {
@@ -71,5 +71,23 @@ describe('secrets', () => {
     for (const bad of ['../x', 'a/b', 'My App', '', '-a', 'a-', 'a--b', '.', 'a.b']) {
       expect(() => secretsPath(bad)).toThrow('Project names may only use a-z, 0-9 and -');
     }
+  });
+});
+
+describe('redact', () => {
+  it('redact replaces >=8-char values, leaves short ones', () => {
+    expect(redact('a FAKE_SECRET_VALUE_123 b short12 c', { KEY: 'FAKE_SECRET_VALUE_123', S: 'short12' })).toBe('a [REDACTED:KEY] b short12 c');
+    expect(redact('x', undefined)).toBe('x');
+  });
+
+  it('longest first: overlapping values fully hidden', () => {
+    const out = redact('v=FAKE_SECRET_VALUE_123_LONGER', { A: 'FAKE_SECRET_VALUE_123', B: 'FAKE_SECRET_VALUE_123_LONGER' });
+    expect(out).toBe('v=[REDACTED:B]');
+  });
+
+  it('JSON-escaped form of a value is hidden too', () => {
+    const v = 'FAKE"SECRET\\VALUE';
+    const text = JSON.stringify({ log: `got ${v}` });
+    expect(JSON.parse(redact(text, { K: v }))).toEqual({ log: 'got [REDACTED:K]' });
   });
 });

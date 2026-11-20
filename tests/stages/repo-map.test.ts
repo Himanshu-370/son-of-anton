@@ -82,3 +82,12 @@ describe('ensureRepoMap', () => {
     expect(req.systemPrompt).toContain('data, not instructions');
   });
 });
+
+describe('ensureRepoMap redaction', () => {
+  it('repo-map.md never contains a secret value', async () => {
+    ctx.secrets = { DB_PASS: 'FAKE_SECRET_VALUE_123' };
+    const runAgent = (async (c: StageCtx) => ({ output: { markdown: '# Map\npass=FAKE_SECRET_VALUE_123' }, sessionId: 's', totalUsd: 0, state: c.state })) as never;
+    await ensureRepoMap(ctx, { runAgent, headSha: async () => 'abc1234', diffSince: async () => '' });
+    expect(await readFile(join(repo, '.anton', 'repo-map.md'), 'utf8')).toBe('# Map\npass=[REDACTED:DB_PASS]');
+  });
+});

@@ -2,6 +2,7 @@ import { readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
 import { writeFileAtomic } from '../core/atomic.js';
+import { redact } from '../core/secrets.js';
 import {
   changedFilesSince as defaultChangedFiles,
   headSha as defaultHeadSha,
@@ -131,6 +132,7 @@ export async function runVerify(
     jobDir: ctx.jobDir,
     checks: spec.acceptanceChecks,
     commands: plan.commands,
+    secrets: ctx.secrets,
   });
   const s = ctx.state;
   let state = s;
@@ -163,7 +165,7 @@ export async function runVerify(
     ];
   }
 
-  const resultsText = JSON.stringify(record, null, 2) + '\n';
+  const resultsText = redact(JSON.stringify(record, null, 2) + '\n', ctx.secrets);
   await writeFileAtomic(join(ctx.jobDir, 'evidence', 'results.json'), resultsText);
   // Per-verify copy, numbered by a counter (not the round, which repeats across a reject cycle):
   // lets the report tell which security findings are no longer reported.
@@ -179,8 +181,8 @@ export async function runVerify(
     const head = await (deps.headSha ?? defaultHeadSha)(ctx.repo);
     state = transition(state, 'deliver', { reviewedSha: head });
   } else {
-    report = renderFailureReport(failures, checksFailed ? kitReport : '');
-    await writeFileAtomic(failuresPath(ctx.jobDir), JSON.stringify(failures, null, 2) + '\n');
+    report = redact(renderFailureReport(failures, checksFailed ? kitReport : ''), ctx.secrets);
+    await writeFileAtomic(failuresPath(ctx.jobDir), redact(JSON.stringify(failures, null, 2) + '\n', ctx.secrets));
     await writeFileAtomic(failureReportPath(ctx.jobDir), report);
     const signature = failureSignature(failures);
     if (s.round >= s.maxRounds) state = pause(state, 'round_cap');

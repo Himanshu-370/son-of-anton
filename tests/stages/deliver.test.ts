@@ -190,3 +190,14 @@ describe('runDeliver', () => {
     });
   });
 });
+
+describe('runDeliver redaction', () => {
+  it('REPORT.md never contains the raw value', async () => {
+    ctx.secrets = { TOKEN: 'FAKE_SECRET_VALUE_123' };
+    await writeFile(join(ctx.jobDir, 'questions.md'), '- Assumed FAKE_SECRET_VALUE_123 works.\n');
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag: vi.fn(async () => {}), listTags: async () => [] });
+    const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    expect(md).not.toContain('FAKE_SECRET_VALUE_123');
+    expect(md).toContain('[REDACTED:TOKEN]');
+  });
+});

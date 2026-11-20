@@ -351,3 +351,19 @@ describe('runVerify: baseline regressions', () => {
     expect(calls.find((c) => c.name === 'security')?.prior).toMatchObject({ baselineRefs: ['SCN-1'] });
   });
 });
+
+describe('runVerify redaction', () => {
+  it('results*.json, failures.json and failure report are redacted and still parse', async () => {
+    ctx.secrets = { TOKEN: 'FAKE_SECRET_VALUE_123' };
+    const bad: CheckResult = { id: 'AC-1', status: 'fail', reason: 'failing', tests: [], error: 'boom FAKE_SECRET_VALUE_123' };
+    const k = kit({ results: [bad, pass('AC-2')], runOk: true, failureReport: '### AC-1\nboom FAKE_SECRET_VALUE_123' });
+    await runVerify(ctx, k, spec, plan, fakeDeps());
+    const ev = join(ctx.jobDir, 'evidence');
+    for (const f of [join(ev, 'results.json'), join(ev, 'results-verify-1.json'), failuresPath(ctx.jobDir), join(ctx.jobDir, 'failure-report.md')]) {
+      const t = await readFile(f, 'utf8').catch(() => '');
+      expect(t, f).not.toContain('FAKE_SECRET_VALUE_123');
+      if (f.endsWith('.json')) expect(() => JSON.parse(t)).not.toThrow();
+    }
+    expect((await readJson(join(ev, 'results.json'))).results[0].error).toBe('boom [REDACTED:TOKEN]');
+  });
+});

@@ -62,3 +62,18 @@ describe('runBaseline', () => {
     expect(existed).toBe(true);
   });
 });
+
+describe('runBaseline redaction', () => {
+  it('baseline.json is redacted and still parses', async () => {
+    const c = await ctx();
+    c.secrets = { TOKEN: 'FAKE_SECRET_VALUE_123' };
+    const leaky = `<testsuite><testcase name="t FAKE_SECRET_VALUE_123"/></testsuite>`;
+    const run = async (_c: string, cmd: string) =>
+      cmd.startsWith('cat ') ? { exitCode: 0, stdout: leaky, stderr: '' } : { exitCode: 0, stdout: '', stderr: '' };
+    const k: Kit = { ...fallbackKit, baseline: (x) => fallbackKit.baseline(x, { runIn: run }) };
+    await runBaseline(c, k, plan, { runScanners: scanners, resetWorktree: reset });
+    const t = await readFile(join(c.jobDir, 'evidence', 'baseline.json'), 'utf8');
+    expect(t).not.toContain('FAKE_SECRET_VALUE_123');
+    expect(JSON.parse(t).passingTests).toEqual(['t [REDACTED:TOKEN]']);
+  });
+});

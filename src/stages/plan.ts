@@ -4,6 +4,7 @@ import type { StageCtx } from '../agent/host-runner.js';
 import { runAgent as defaultRunAgent } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
 import { writeFileAtomic } from '../core/atomic.js';
+import { redact } from '../core/secrets.js';
 import { remainingUsd } from '../core/budget.js';
 import { ROLE_MODELS } from '../core/config.js';
 import type { JobState } from '../core/state.js';
@@ -91,7 +92,7 @@ export async function runPlan(
   const plan = PlanSchema.parse(res.output);
   validatePlanCoverage(plan, spec.acceptanceChecks.map((c) => c.id));
   validatePlanAreas(plan);
-  await writeFileAtomic(join(ctx.jobDir, 'plan.json'), JSON.stringify(plan, null, 2) + '\n');
-  await writeFileAtomic(join(ctx.jobDir, 'plan.md'), renderPlan(plan));
+  await writeFileAtomic(join(ctx.jobDir, 'plan.json'), redact(JSON.stringify(plan, null, 2) + '\n', ctx.secrets));
+  await writeFileAtomic(join(ctx.jobDir, 'plan.md'), redact(renderPlan(plan), ctx.secrets));
   return { plan, state: res.state };
 }
