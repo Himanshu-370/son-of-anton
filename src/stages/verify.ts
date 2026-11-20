@@ -1,12 +1,21 @@
-import { rm } from 'node:fs/promises';
+import { readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
 import { writeFileAtomic } from '../core/atomic.js';
-import { headSha as defaultHeadSha, revParse as defaultRevParse } from '../core/git.js';
+import {
+  changedFilesSince as defaultChangedFiles,
+  headSha as defaultHeadSha,
+  revParse as defaultRevParse,
+} from '../core/git.js';
 import { pause, saveState, transition, type JobState } from '../core/state.js';
 import type { CheckResult, Kit } from '../kits/types.js';
 import { runCodeReview as defaultRunCodeReview, type ReviewFinding } from '../review/code-review.js';
-import { blocking, runSecurityReview as defaultRunSecurityReview, type SecurityFinding } from '../security/review.js';
+import {
+  blocking,
+  runSecurityReview as defaultRunSecurityReview,
+  type PriorFinding,
+  type SecurityFinding,
+} from '../security/review.js';
 import { loadAcceptedRisks } from '../security/risks.js';
 import type { Plan } from './plan.js';
 import { attributeFailures, failuresPath, renderFailureReport, type FailureItem } from './qa.js';
@@ -27,7 +36,37 @@ export type VerifyDeps = {
   runSecurityReview?: typeof defaultRunSecurityReview;
   headSha?: typeof defaultHeadSha;
   revParse?: typeof defaultRevParse;
+  changedFiles?: typeof defaultChangedFiles;
 };
+
+const VERIFY_COPY = /^results-verify-(\d+)\.json$/;
+
+/** Per-verify copies (`results-verify-<n>.json`), sorted by n ascending. */
+export async function listVerifyCopies(jobDir: string): Promise<{ n: number; name: string }[]> {
+  let names: string[] = [];
+  try {
+    names = await readdir(join(jobDir, 'evidence'));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+  }
+  return names
+    .map((name) => ({ name, m: VERIFY_COPY.exec(name) }))
+    .filter((x): x is { name: string; m: RegExpExecArray } => x.m !== null)
+    .map(({ name, m }) => ({ n: Number(m[1]), name }))
+    .sort((a, b) => a.n - b.n);
+}
+
+/** The security findings of the most recent verify in which the security reviewer ran. */
+async function previousSecurity(jobDir: string): Promise<PriorFinding[]> {
+  const copies = await listVerifyCopies(jobDir);
+  for (const { name } of copies.reverse()) {
+    const rec = JSON.parse(await readFile(join(jobDir, 'evidence', name), 'utf8')) as {
+      security?: { findings?: SecurityFinding[] };
+    };
+    if (rec.security) return (rec.security.findings ?? []).map((f) => ({ id: f.id, title: f.title, file: f.file }));
+  }
+  return [];
+}
 
 /** Persisted failure report, so a crashed fix round can resume (R11). */
 export function failureReportPath(jobDir: string): string {
@@ -97,13 +136,20 @@ export async function runVerify(
   const checksFailed = failures.length > 0;
   if (!checksFailed) {
     const baseSha = await reviewBase(ctx, state, deps.revParse ?? defaultRevParse);
+    const acceptedIds = (await loadAcceptedRisks(ctx.jobDir)).map((r) => r.id);
+    const prior = { previous: await previousSecurity(ctx.jobDir), accepted: acceptedIds };
     const code = await (deps.runCodeReview ?? defaultRunCodeReview)({ ...ctx, state }, spec, plan, baseSha);
     state = code.state;
-    const security = await (deps.runSecurityReview ?? defaultRunSecurityReview)({ ...ctx, state }, spec, plan, baseSha);
+    const security = await (deps.runSecurityReview ?? defaultRunSecurityReview)(
+      { ...ctx, state }, spec, plan, baseSha, undefined, prior,
+    );
     state = security.state;
+    // Files in the reviewed diff: lets the report tell a review finding that went away after its
+    // file changed from one the reviewer merely stopped mentioning.
+    record.reviewedFiles = await (deps.changedFiles ?? defaultChangedFiles)(ctx.repo, baseSha);
     record.review = { findings: code.findings };
     record.security = { findings: security.findings, unavailable: security.unavailable };
-    const accepted = new Set((await loadAcceptedRisks(ctx.jobDir)).map((r) => r.id));
+    const accepted = new Set(acceptedIds);
     failures = [
       ...code.findings.filter((f) => f.severity === 'blocking').map(reviewItem),
       ...blocking(security.findings, accepted).map(securityItem),
@@ -112,8 +158,11 @@ export async function runVerify(
 
   const resultsText = JSON.stringify(record, null, 2) + '\n';
   await writeFileAtomic(join(ctx.jobDir, 'evidence', 'results.json'), resultsText);
-  // Per-round copy: lets the report tell which security findings were fixed in a later round.
-  await writeFileAtomic(join(ctx.jobDir, 'evidence', `results-round-${s.round}.json`), resultsText);
+  // Per-verify copy, numbered by a counter (not the round, which repeats across a reject cycle):
+  // lets the report tell which security findings are no longer reported.
+  const copies = await listVerifyCopies(ctx.jobDir);
+  const n = (copies.at(-1)?.n ?? 0) + 1;
+  await writeFileAtomic(join(ctx.jobDir, 'evidence', `results-verify-${n}.json`), resultsText);
 
   const passed = failures.length === 0;
   let report = '';

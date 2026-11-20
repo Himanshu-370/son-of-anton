@@ -77,6 +77,13 @@ export async function diffSince(repo: string, sha: string): Promise<string> {
   return git(repo, ['diff', '--no-color', '--no-ext-diff', `${sha}..HEAD`, '--']);
 }
 
+/** Paths changed after `sha` up to HEAD (`git diff --name-only <sha>..HEAD`). */
+export async function changedFilesSince(repo: string, sha: string): Promise<string[]> {
+  if (!/^[0-9a-f]{7,40}$/.test(sha)) throw new Error(`invalid sha for changedFilesSince: ${JSON.stringify(sha)}`);
+  const out = await git(repo, ['diff', '--no-color', '--no-ext-diff', '--name-only', `${sha}..HEAD`, '--']);
+  return out.split('\n').map((l) => l.trim()).filter(Boolean);
+}
+
 /** The commit sha a ref (tag, branch, sha) points to. Throws if it does not resolve to a commit. */
 export async function revParse(repo: string, ref: string): Promise<string> {
   if (ref === '' || ref.startsWith('-') || /\s/.test(ref)) throw new Error(`invalid ref for revParse: ${JSON.stringify(ref)}`);

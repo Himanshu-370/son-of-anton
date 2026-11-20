@@ -51,9 +51,9 @@ describe('failureSignature', () => {
   });
 });
 
-type Calls = { name: string; baseSha: string }[];
+type Calls = { name: string; baseSha: string; prior?: unknown }[];
 function fakeDeps(
-  opts: { review?: ReviewFinding[]; security?: SecurityFinding[]; unavailable?: string[]; head?: string } = {},
+  opts: { review?: ReviewFinding[]; security?: SecurityFinding[]; unavailable?: string[]; head?: string; files?: string[] } = {},
   calls: Calls = [],
 ): VerifyDeps {
   return {
@@ -61,11 +61,12 @@ function fakeDeps(
       calls.push({ name: 'code', baseSha });
       return { findings: opts.review ?? [], state: { ...c.state, spentUsd: c.state.spentUsd + 1 } };
     },
-    runSecurityReview: async (c, _spec, _plan, baseSha) => {
-      calls.push({ name: 'security', baseSha });
+    runSecurityReview: async (c, _spec, _plan, baseSha, _deps, prior) => {
+      calls.push(prior === undefined ? { name: 'security', baseSha } : { name: 'security', baseSha, prior });
       return { findings: opts.security ?? [], unavailable: opts.unavailable ?? [], state: { ...c.state, spentUsd: c.state.spentUsd + 2 } };
     },
     headSha: async () => opts.head ?? 'f'.repeat(40),
+    changedFiles: async () => opts.files ?? [],
     revParse: async (_repo, ref) => {
       if (ref !== 'anton/j1/spec-approved') throw new Error(`unexpected ref ${ref}`);
       return 'a'.repeat(40);
@@ -92,7 +93,7 @@ describe('runVerify', () => {
     const saved = await readJson(join(ctx.jobDir, 'evidence', 'results.json'));
     expect(saved).toEqual({
       round: 1, results: [pass('AC-1'), pass('AC-2')], runOk: true,
-      review: { findings: [] }, security: { findings: [], unavailable: [] },
+      reviewedFiles: [], review: { findings: [] }, security: { findings: [], unavailable: [] },
     });
   });
 
@@ -169,7 +170,7 @@ describe('runVerify', () => {
   it('all pass → code then security reviewer called with baseSha = spec-approved sha on first round and reviewedSha afterwards', async () => {
     const calls: Calls = [];
     const r = await runVerify(ctx, allPass(), spec, plan, fakeDeps({}, calls));
-    expect(calls).toEqual([{ name: 'code', baseSha: 'a'.repeat(40) }, { name: 'security', baseSha: 'a'.repeat(40) }]);
+    expect(calls).toMatchObject([{ name: 'code', baseSha: 'a'.repeat(40) }, { name: 'security', baseSha: 'a'.repeat(40) }]);
     // reviewers' state is carried forward (cost recorded)
     expect(r.state.spentUsd).toBe(3);
     expect((await loadState(ctx.jobDir)).spentUsd).toBe(3);
@@ -177,7 +178,7 @@ describe('runVerify', () => {
     const calls2: Calls = [];
     ctx.state = st({ round: 2, reviewedSha: 'b'.repeat(40) });
     await runVerify(ctx, allPass(), spec, plan, fakeDeps({}, calls2));
-    expect(calls2).toEqual([{ name: 'code', baseSha: 'b'.repeat(40) }, { name: 'security', baseSha: 'b'.repeat(40) }]);
+    expect(calls2).toMatchObject([{ name: 'code', baseSha: 'b'.repeat(40) }, { name: 'security', baseSha: 'b'.repeat(40) }]);
   });
 
   it('missing spec-approved tag and no reviewedSha → clear error', async () => {
@@ -252,10 +253,41 @@ describe('runVerify', () => {
     expect(saved.security).toEqual({ findings: security, unavailable: ['semgrep'] });
   });
 
-  it('writes evidence/results-round-<round>.json identical to results.json', async () => {
+  it('writes evidence/results-verify-<n>.json identical to results.json, n counting verifies (not rounds)', async () => {
     await runVerify(ctx, allPass(), spec, plan, fakeDeps({ review: [], security: [sec('SEC-l', 'low')] }));
+    // A reject cycle re-verifies at the same round number: it must not overwrite the first copy.
+    ctx.state = st({ round: 1 });
+    await runVerify(ctx, allPass(), spec, plan, fakeDeps({ review: [], security: [] }));
     const main = await readFile(join(ctx.jobDir, 'evidence', 'results.json'), 'utf8');
-    const copy = await readFile(join(ctx.jobDir, 'evidence', `results-round-${ctx.state.round}.json`), 'utf8');
-    expect(copy).toBe(main);
+    const first = await readJson(join(ctx.jobDir, 'evidence', 'results-verify-1.json'));
+    const second = await readFile(join(ctx.jobDir, 'evidence', 'results-verify-2.json'), 'utf8');
+    expect(first.security.findings).toEqual([sec('SEC-l', 'low')]);
+    expect(second).toBe(main);
+    await expect(access(join(ctx.jobDir, 'evidence', 'results-round-1.json'))).rejects.toThrow();
+  });
+
+  it('records the files in the reviewed diff when the reviewers run', async () => {
+    await runVerify(ctx, allPass(), spec, plan, fakeDeps({ files: ['src/db.ts'] }));
+    expect((await readJson(join(ctx.jobDir, 'evidence', 'results.json'))).reviewedFiles).toEqual(['src/db.ts']);
+  });
+
+  it('passes the previous security findings (id, title, file) and accepted ids to the security reviewer', async () => {
+    const calls: Calls = [];
+    await runVerify(ctx, allPass(), spec, plan, fakeDeps({ security: [sec('SEC-1', 'high'), sec('SEC-2', 'low')] }, calls));
+    expect(calls[1]!.prior).toEqual({ previous: [], accepted: [] });
+    await acceptRisk(ctx.jobDir, 'SEC-1', 'ok');
+    // A verify whose checks fail skips the reviewers; the next review still sees the last review's findings.
+    ctx.state = st({ round: 2 });
+    await runVerify(ctx, kit({ results: [fail('AC-1'), pass('AC-2')], runOk: true, failureReport: 'r' }), spec, plan, fakeDeps());
+    ctx.state = st({ round: 3 });
+    const calls2: Calls = [];
+    await runVerify(ctx, allPass(), spec, plan, fakeDeps({}, calls2));
+    expect(calls2[1]!.prior).toEqual({
+      previous: [
+        { id: 'SEC-1', title: 'title SEC-1', file: 'src/db.ts' },
+        { id: 'SEC-2', title: 'title SEC-2', file: 'src/db.ts' },
+      ],
+      accepted: ['SEC-1'],
+    });
   });
 });

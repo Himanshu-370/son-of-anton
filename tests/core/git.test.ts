@@ -3,7 +3,7 @@ import { access, chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
-import { commitAll, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse } from '../../src/core/git.js';
+import { commitAll, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse, changedFilesSince } from '../../src/core/git.js';
 
 const git = (repo: string, ...args: string[]) =>
   execa('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo });
@@ -165,6 +165,16 @@ describe('git helper', () => {
   it('diffSince rejects a malformed sha', async () => {
     await expect(diffSince(repo, '--output=/tmp/x')).rejects.toThrow(/invalid sha/);
     await expect(diffSince(repo, 'HEAD~1')).rejects.toThrow(/invalid sha/);
+  });
+
+  it('changedFilesSince lists only paths changed after the given sha, and rejects a malformed sha', async () => {
+    await writeFile(join(repo, 'a.txt'), 'one\n');
+    const base = (await commitAll(repo, 'first'))!;
+    await mkdir(join(repo, 'src'), { recursive: true });
+    await writeFile(join(repo, 'src', 'b.ts'), 'two\n');
+    await commitAll(repo, 'second');
+    expect(await changedFilesSince(repo, base)).toEqual(['src/b.ts']);
+    await expect(changedFilesSince(repo, '--output=/tmp/x')).rejects.toThrow(/invalid sha/);
   });
 
   it('revParse resolves a tag to its commit sha and rejects bad refs', async () => {

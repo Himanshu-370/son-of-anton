@@ -8,6 +8,7 @@ import { loadAcceptedRisks } from '../security/risks.js';
 import type { SecurityFinding } from '../security/review.js';
 import { saveState, transition, type JobState } from '../core/state.js';
 import type { CheckResult } from '../kits/types.js';
+import { listVerifyCopies } from './verify.js';
 import type { Plan } from './plan.js';
 import type { SpecDoc } from './spec.js';
 
@@ -51,6 +52,7 @@ function checksSection(spec: SpecDoc, results: CheckResult[]): string[] {
 }
 
 type ReviewSections = {
+  reviewedFiles?: string[];
   review?: { findings?: ReviewFinding[] };
   security?: { findings?: SecurityFinding[]; unavailable?: string[] };
 };
@@ -93,23 +95,28 @@ async function securitySection(jobDir: string, sections: ReviewSections): Promis
     if (group.length) lines.push(`### ${sev}`, '', ...group.map(line), '');
   }
 
-  // Fixed: reported in an earlier round's results, gone from the latest.
+  // No longer reported: in an earlier verify's findings, gone from the latest. Listed only when the
+  // absence means something: scanners cover the whole repo every verify, and a review finding counts
+  // only if its file was in a later verify's reviewed diff (else the reviewer just did not look again).
   const current = new Set(findings.map((f) => f.id));
-  const fixed = new Map<string, SecurityFinding>();
-  let names: string[] = [];
-  try {
-    names = (await fsp.readdir(join(jobDir, 'evidence'))).filter((n) => /^results-round-\d+\.json$/.test(n));
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-  }
-  names.sort((a, b) => Number(a.match(/\d+/)![0]) - Number(b.match(/\d+/)![0]));
-  for (const n of names) {
-    for (const f of (await readSections(join(jobDir, 'evidence', n))).security?.findings ?? []) {
-      if (!current.has(f.id)) fixed.set(f.id, f);
+  const gone = new Map<string, SecurityFinding>();
+  const copies = await Promise.all(
+    (await listVerifyCopies(jobDir)).map(async ({ name }) => readSections(join(jobDir, 'evidence', name))),
+  );
+  copies.forEach((rec, i) => {
+    const laterFiles = new Set(copies.slice(i + 1).flatMap((c) => c.reviewedFiles ?? []));
+    for (const f of rec.security?.findings ?? []) {
+      if (current.has(f.id)) continue;
+      if (f.source === 'scanner' || laterFiles.has(f.file)) gone.set(f.id, f);
     }
-  }
-  if (fixed.size) {
-    lines.push('### Fixed in earlier rounds', '', ...[...fixed.values()].map((f) => `- ${f.id} (${f.severity}): ${cell(f.title)} — fixed`), '');
+  });
+  if (gone.size) {
+    lines.push(
+      '### No longer reported',
+      '',
+      ...[...gone.values()].map((f) => `- ${f.id} (${f.severity}, ${cell(f.file)}): ${cell(f.title)} — not reported in the latest review`),
+      '',
+    );
   }
   const unavailable = sec.unavailable ?? [];
   if (unavailable.length) lines.push(`Scanners unavailable: ${unavailable.join(', ')}.`, '');

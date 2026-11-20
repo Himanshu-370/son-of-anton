@@ -140,12 +140,46 @@ describe('runDeliver', () => {
       expect(low.split('\n')[0]).not.toContain('accepted');
     });
 
-    it('finding present in round 1, absent in round 2 is listed as fixed', async () => {
-      await put('results-round-1.json', { round: 1, security: { findings: [sec('SEC-11111111', 'critical', 'SQL injection')], unavailable: [] } });
-      await put('results-round-2.json', { round: 2, security: { findings: [], unavailable: [] } });
+    const scn = (id: string, file: string, title: string) => ({ ...sec(id, 'high', title), file, source: 'scanner', tool: 'gitleaks' });
+
+    it('a scanner finding gone from the latest verify is listed under "No longer reported"', async () => {
+      await put('results-verify-1.json', { round: 1, security: { findings: [scn('SEC-11111111', 'src/x.ts', 'Leaked key')], unavailable: [] } });
+      await put('results-verify-2.json', { round: 2, reviewedFiles: [], security: { findings: [], unavailable: [] } });
       await put('results.json', { round: 2, results, runOk: true, review: { findings: [] }, security: { findings: [], unavailable: [] } });
       const md = await deliver();
-      expect(md).toMatch(/fixed[^\n]*SEC-11111111[^\n]*SQL injection|SEC-11111111[^\n]*SQL injection[^\n]*fixed/);
+      expect(md).toContain('### No longer reported');
+      expect(md).not.toContain('Fixed in earlier rounds');
+      expect(md).toMatch(/SEC-11111111[^\n]*Leaked key/);
+    });
+
+    it('a review finding is listed only when its file appears in a later verify\'s diff', async () => {
+      await put('results-verify-1.json', {
+        round: 1,
+        security: { findings: [sec('SEC-11111111', 'critical', 'SQL injection'), { ...sec('SEC-22222222', 'high', 'Open redirect'), file: 'src/r.ts' }], unavailable: [] },
+      });
+      await put('results-verify-2.json', { round: 2, reviewedFiles: ['src/a.ts'], security: { findings: [], unavailable: [] } });
+      await put('results.json', { round: 2, results, runOk: true, review: { findings: [] }, security: { findings: [], unavailable: [] } });
+      const md = await deliver();
+      expect(md).toMatch(/SEC-11111111[^\n]*SQL injection/);
+      expect(md).not.toContain('SEC-22222222');
+    });
+
+    it('a review finding whose file only changed in its own verify is not listed', async () => {
+      await put('results-verify-1.json', { round: 1, reviewedFiles: ['src/a.ts'], security: { findings: [sec('SEC-11111111', 'critical', 'SQL injection')], unavailable: [] } });
+      await put('results-verify-2.json', { round: 2, reviewedFiles: [], security: { findings: [], unavailable: [] } });
+      await put('results.json', { round: 2, results, runOk: true, review: { findings: [] }, security: { findings: [], unavailable: [] } });
+      const md = await deliver();
+      expect(md).not.toContain('SEC-11111111');
+      expect(md).not.toContain('No longer reported');
+    });
+
+    it('verify copies are ordered numerically (10 after 9)', async () => {
+      for (let n = 1; n <= 9; n++) await put(`results-verify-${n}.json`, { round: 1, security: { findings: [], unavailable: [] } });
+      await put('results-verify-9.json', { round: 1, security: { findings: [sec('SEC-33333333', 'high', 'XSS')], unavailable: [] } });
+      await put('results-verify-10.json', { round: 2, reviewedFiles: ['src/a.ts'], security: { findings: [], unavailable: [] } });
+      await put('results.json', { round: 2, results, runOk: true, security: { findings: [], unavailable: [] } });
+      const md = await deliver();
+      expect(md).toMatch(/SEC-33333333[^\n]*XSS/);
     });
 
     it('unavailable scanner noted', async () => {
