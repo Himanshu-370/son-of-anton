@@ -347,6 +347,14 @@ describe('anton abandon', () => {
       expect(await cur()).toBe('anton/1-init');
       expect((await loadState(dir)).stage).toBe('abandoned');
     });
+    it('HEAD on another branch with a clean tree: no switch, nothing printed about switching', async () => {
+      const { g, cur } = await changeRepo();
+      await g('switch', '-qc', 'feature-x');
+      const h = harness();
+      expect(await abandonCommand('p', h.deps)).toBe(0);
+      expect(await cur()).toBe('feature-x');
+      expect(h.text()).not.toMatch(/switch/i);
+    });
     it('job without fromBranch: no git touched', async () => {
       const { cur } = await changeRepo({ fromBranch: undefined });
       expect(await abandonCommand('p', harness().deps)).toBe(0);

@@ -148,6 +148,7 @@ async function securitySection(jobDir: string, sections: ReviewSections): Promis
 
 /** Regressions still open at delivery (only an accept-as-is delivery can have any). */
 async function regressionsSection(jobDir: string): Promise<string[]> {
+  // As of the last verify: failures.json is removed when a verify passes.
   const raw = await readOptional(failuresPath(jobDir));
   const items = raw ? FailureItemSchema.array().parse(JSON.parse(raw)).filter((i) => i.kind === 'regression') : [];
   return ['## Regressions', '', ...(items.length ? items.map((i) => `- ${i.id}: ${cell(i.text)}`) : ['None.'])];

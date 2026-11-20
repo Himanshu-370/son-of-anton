@@ -90,7 +90,7 @@ Each acceptance check shows what it was proven against. A service is `real` only
 
 ## Secrets and redaction
 
-`anton secrets edit <project>` opens a private file (mode 0600) of `KEY=value` lines, for example `STRIPE_SECRET_KEY=your-key-here`. The values reach the job container as environment variables only. Every file anton writes (logs, evidence, `REPORT.md`) has those values replaced with a placeholder before it is saved.
+`anton secrets edit <project>` opens a private file (`~/anton/secrets/<project>.env`, mode 0600) of `KEY=value` lines, for example `STRIPE_SECRET_KEY=your-key-here`. Values follow Docker env-file rules: `KEY=value`, no quotes, no spaces around `=`, no `export`. The values reach the job container as environment variables only. Every file anton writes (logs, evidence, `REPORT.md`) has those values replaced with a placeholder before it is saved.
 
 ## Where things live
 
