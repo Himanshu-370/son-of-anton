@@ -5,7 +5,7 @@ Local software factory: `anton` CLI runs AI agents in Docker. Design: docs/specs
 ## Commands
 - Test all: `npm test` · one file: `npx vitest run tests/<path>.test.ts`
 - Type check: `npx tsc --noEmit` · build: `npm run build`
-- Kit image: `npm run build:image` (required after changing src/agent/* or src/kits/fallback/Dockerfile)
+- Kit images: `npm run build:image` builds both the fallback and web images (required after changing src/agent/* or either kit's Dockerfile)
 - Docker e2e: `ANTON_E2E=1 npx vitest run tests/e2e/docker.e2e.test.ts`
 - Paid API e2e (~$3): same with ANTHROPIC_API_KEY set, `npm run test:e2e`
 

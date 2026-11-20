@@ -35,22 +35,31 @@ const cell = (s: string) => s.replace(/\s+/g, ' ').trim().replace(/\|/g, '\\|');
 const usd = (n: number) => `$${n.toFixed(2)}`;
 
 function checksSection(spec: SpecDoc, results: CheckResult[]): string[] {
+  const web = spec.kit === 'web';
   const byId = new Map(results.map((r) => [r.id, r]));
   const rows = spec.acceptanceChecks.map((c) => {
     const r = byId.get(c.id);
     const status = !r ? 'not verified' : r.status === 'pass' ? 'pass' : `fail (${r.reason ?? 'failing'})`;
     const tests = r?.tests.length ? r.tests.map(cell).join('<br>') : '—';
-    return `| ${c.id} | ${cell(c.text)} | ${status} | ${r?.evidence ?? '—'} | ${tests} | evidence/test-output.txt |`;
+    const browserCell = web ? ` ${r?.browser?.status ?? '-'} |` : '';
+    return `| ${c.id} | ${cell(c.text)} | ${status} |${browserCell} ${r?.evidence ?? '—'} | ${tests} | evidence/test-output.txt |`;
   });
   return [
     '## Acceptance checks',
     '',
     'Evidence paths are relative to this job folder; `evidence/results.json` holds the raw results.',
     '',
-    '| ID | Check | Status | Proven against | Tests | Evidence |',
-    '|---|---|---|---|---|---|',
+    web ? '| ID | Check | Status | Browser | Proven against | Tests | Evidence |' : '| ID | Check | Status | Proven against | Tests | Evidence |',
+    web ? '|---|---|---|---|---|---|---|' : '|---|---|---|---|---|---|',
     ...rows,
   ];
+}
+
+/** Web jobs only: paths (relative to the job folder) of the screenshots the browser agent saved. */
+function screenshotsSection(spec: SpecDoc, results: CheckResult[]): string[] {
+  const shots = spec.kit === 'web' ? results.filter((r) => r.browser?.screenshot) : [];
+  if (shots.length === 0) return [];
+  return ['', '## Screenshots', '', 'Not redacted: check them before sharing.', '', ...shots.map((r) => `- ${r.id}: evidence/screens/${r.id}.png`)];
 }
 
 // shortcut: whole-name word-boundary match on test labels; a builder that omits the exact service name shows "stand-in only", upgrade by recording service per test.
@@ -209,9 +218,11 @@ export async function runDeliver(
     spec.summary,
     '',
     `Job \`${ctx.state.jobId}\`, delivered after ${ctx.state.round} round(s).`,
+    ...(spec.kit === 'web' ? ['', 'Kit: web'] : []),
     ...(change ? ['', `Branch to merge: ${ctx.state.branch}`] : []),
     '',
     ...checksSection(spec, outcome.results),
+    ...screenshotsSection(spec, outcome.results),
     ...servicesSection(spec, outcome.results),
     '',
     ...codeReviewSection(sections),

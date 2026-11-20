@@ -18,7 +18,7 @@ const shq = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`;
 
 const PID = '/tmp/anton-app.pid';
 /** Kills the app's whole process group (TERM, then KILL after 1 s); a no-op when no app runs. */
-export const STOP_APP = `if [ -f ${PID} ]; then P=$(cat ${PID}); kill -TERM -- -$P 2>/dev/null; sleep 1; kill -KILL -- -$P 2>/dev/null; rm -f ${PID}; fi; true`;
+export const STOP_APP = `if [ -f ${PID} ]; then P=$(cat ${PID}); kill -s TERM -- -$P 2>/dev/null; sleep 1; kill -s KILL -- -$P 2>/dev/null; rm -f ${PID}; fi; true`;
 export const READY_TRIES = 60;
 
 /** Starts `serve` in its own process group (log to `logPath`, a container path) and polls `url` once a second. */

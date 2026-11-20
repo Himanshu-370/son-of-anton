@@ -79,6 +79,16 @@ The scanners (gitleaks, osv-scanner and semgrep) are installed in the Docker ima
 
 The image also holds the agent code itself (the in-container entry the reviewers and builders run through). After pulling an update, re-run `npm run build:image`: a stale image means old agent code, not just missing scanners, and old agent code would ignore the reviewers' read-only tool restriction. Anton fails closed on this: it refuses to start with `Kit image files are out of date — run: npm run build:image` when the staged files differ from `dist/agent/`, and stops an agent call with `agent entry is out of date (protocol …)` when the image's entry does not speak the current protocol.
 
+## Web apps (the web kit)
+
+Anton has two kits: `fallback` (any project, no browser) and `web` (adds Chromium and Playwright so an agent can open your app and look at it). During the spec session Anton detects which one fits and writes a `Kit:` line in `spec.md`. You can change it to `fallback` or `web` while you review the spec, before `anton approve` (checkpoint 1).
+
+A web plan sets two extra commands: `serve` (starts the app, for example `python3 -m http.server 8080`) and `url` (where it listens, always `localhost` or `127.0.0.1` with a port). Anton starts `serve` in the container, waits for `url` to answer, then runs the browser checks.
+
+Browser checks run only when all tests pass. The browser agent must not change project files: if it does, Anton reverts them and the round fails. Each check gets a `Browser` result in `REPORT.md` (`pass`, `fail`, `n/a`, or `-` when the browser step was never reached).
+
+Screenshots are saved at `evidence/screens/<AC-id>.png` in the job folder and listed under `## Screenshots` in `REPORT.md`. They are not redacted: a page that shows a secret will have it in the picture, so look before you share them.
+
 ## Changing existing code
 
 `anton change` needs a clean repo with at least one commit and no active job. It creates the branch `anton/<jobId>` and works only there; your original branch is never touched, and merging is up to you. `REPORT.md` says `Branch to merge: anton/<jobId>` and has a `## Regressions` section.
@@ -111,10 +121,11 @@ npm test                                   # unit tests, no Docker or API needed
 ANTON_E2E=1 npm run test:e2e               # also runs Docker-only e2e tests
 ANTON_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/new-project.e2e.test.ts
 ANTON_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/change-job.e2e.test.ts   # adopts a tiny repo, runs a change
+ANTON_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/web-job.e2e.test.ts      # builds a static web page, checks Kit: web and a screenshot in REPORT.md
 ```
 
 The last one builds a real project end to end with the API and costs up to about $3, and checks that REPORT.md has the `## Code review` and `## Security` sections. It runs only when BOTH `ANTON_E2E=1` and `ANTHROPIC_API_KEY` are set; with `ANTON_E2E=1` alone (no key), only the Docker-only e2e tests run and it is skipped.
 
 ## Limits
 
-Fallback kit only, CLI only, no Slack yet. See the [roadmap](docs/superpowers/plans/2026-11-19-son-of-anton-roadmap.md).
+Two kits (fallback and web), CLI only, no Slack yet. See the [roadmap](docs/superpowers/plans/2026-11-19-son-of-anton-roadmap.md).
