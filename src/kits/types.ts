@@ -8,6 +8,8 @@ export type CheckResult = {
   status: 'pass' | 'fail';
   reason?: 'no_test' | 'failing' | 'run_failed';
   tests: string[];
+  /** real: a passing `[real]` test covers it; stand-in: tests exist but none is a passing `[real]` one. */
+  evidence?: 'real' | 'stand-in';
   error?: string;
 };
 

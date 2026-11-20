@@ -65,6 +65,12 @@ function mentions(haystack: string, id: string): boolean {
   return new RegExp(`(?<![\\w-])${esc}(?![\\w-])`).test(haystack);
 }
 
+/** Evidence label from a check's tests: real only when a passing test has `[real]` in its name. */
+export function evidenceFor(tests: { label: string; name?: string; ok: boolean }[]): 'real' | 'stand-in' | undefined {
+  if (tests.length === 0) return undefined;
+  return tests.some((t) => t.ok && (t.label.includes('[real]') || t.name?.includes('[real]'))) ? 'real' : 'stand-in';
+}
+
 export function mapJUnit(xml: string, checks: AcceptanceCheck[]): CheckResult[] {
   const cases = parseCases(xml) ?? [];
   return checks.map((c) => {
@@ -72,8 +78,9 @@ export function mapJUnit(xml: string, checks: AcceptanceCheck[]): CheckResult[] 
     if (mine.length === 0) return { id: c.id, status: 'fail', reason: 'no_test', tests: [] };
     const tests = mine.map((t) => t.label);
     const bad = mine.find((t) => !t.ok);
-    if (bad) return { id: c.id, status: 'fail', reason: 'failing', tests, error: bad.error };
-    return { id: c.id, status: 'pass', tests };
+    const evidence = evidenceFor(mine);
+    if (bad) return { id: c.id, status: 'fail', reason: 'failing', tests, evidence, error: bad.error };
+    return { id: c.id, status: 'pass', tests, evidence };
   });
 }
 

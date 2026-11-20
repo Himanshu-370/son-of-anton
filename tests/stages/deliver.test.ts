@@ -41,9 +41,9 @@ describe('runDeliver', () => {
 
     expect(md).toMatch(/^# Sum CLI\n/);
     expect(md).toContain('Prints the sum of its arguments.');
-    expect(md).toContain('| ID | Check | Status | Tests | Evidence |');
-    expect(md).toMatch(/\| AC-1 \| sums two numbers \| pass \| AC-1: sums \| evidence\/test-output.txt \|/);
-    expect(md).toContain('| AC-2 | rejects \\| junk | pass | AC-2: junk<br>AC-2: more |');
+    expect(md).toContain('| ID | Check | Status | Proven against | Tests | Evidence |');
+    expect(md).toMatch(/\| AC-1 \| sums two numbers \| pass \| — \| AC-1: sums \| evidence\/test-output.txt \|/);
+    expect(md).toContain('| AC-2 | rejects \\| junk | pass | — | AC-2: junk<br>AC-2: more |');
     expect(md).toContain('## How to run');
     expect(md).toContain('pip install -e .');
     expect(md).toContain('sumcli 1 2');
@@ -199,5 +199,19 @@ describe('runDeliver redaction', () => {
     const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
     expect(md).not.toContain('FAKE_SECRET_VALUE_123');
     expect(md).toContain('[REDACTED:TOKEN]');
+  });
+
+  it('REPORT shows labels and services', async () => {
+    const withSvc: SpecDoc = { ...spec, services: [{ name: 'Stripe', envVars: ['STRIPE_KEY'] }, { name: 'Mailgun', envVars: ['MAILGUN_KEY'] }] };
+    const res: CheckResult[] = [
+      { id: 'AC-1', status: 'pass', tests: ['AC-1 [real] stripe charge'], evidence: 'real' },
+      { id: 'AC-2', status: 'pass', tests: ['AC-2 mailgun stub'], evidence: 'stand-in' },
+    ];
+    await runDeliver(ctx, withSvc, plan, { results: res, runOk: true }, { tag: vi.fn(async () => {}), listTags: async () => [] });
+    const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    expect(md).toContain('| pass | real | AC-1 [real] stripe charge |');
+    expect(md).toContain('| pass | stand-in | AC-2 mailgun stub |');
+    expect(md).toContain('- Stripe: real');
+    expect(md).toContain('- Mailgun: stand-in only');
   });
 });

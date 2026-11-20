@@ -22,6 +22,8 @@ const specShape = {
   kit: z.literal('fallback'),
   tech: z.array(z.string()),
   acceptanceChecks: z.array(AcceptanceCheckSchema).min(1),
+  /** Outside services the project calls, with the env var names each needs. Default [] keeps older spec.json files parsing. */
+  services: z.array(z.object({ name: z.string().min(1), envVars: z.array(z.string()) })).default([]),
 };
 
 /** Structure without the id-sequence rule; used when reading human-edited specs. */
@@ -130,6 +132,10 @@ function renderSpec(s: SpecDoc): string {
     '## Acceptance checks',
     '',
     s.acceptanceChecks.map((c) => `- **${c.id}**: ${c.text.replace(/\s+/g, ' ').trim()}`).join('\n'),
+    '',
+    '## Outside services',
+    '',
+    list((s.services ?? []).map((x) => `${x.name} (env: ${x.envVars.join(', ') || 'none'})`)),
     '',
   ].join('\n');
 }

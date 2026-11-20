@@ -514,7 +514,7 @@ describe('secrets', () => {
       warned80: false, completedTasks: [], updatedAt: '',
     });
     const opts: unknown[] = [];
-    const spec: SpecDoc = { title: 'T', summary: 's', outOfScope: [], kit: 'fallback', tech: [], acceptanceChecks: [{ id: 'AC-1', text: 't' }] };
+    const spec: SpecDoc = { title: 'T', summary: 's', outOfScope: [], kit: 'fallback', tech: [], acceptanceChecks: [{ id: 'AC-1', text: 't' }], services: [{ name: 'Stripe', envVars: ['ALPHA', 'STRIPE_KEY'] }] };
     const h = harness({
       startContainer: async (_s, _r, _i, o) => { opts.push(o); return 'c'; },
       runSpec: async (ctx) => ({ spec, state: ctx.state }) as never,
@@ -522,6 +522,7 @@ describe('secrets', () => {
     });
     expect(await runSpecSession(resolveDeps(h.deps), { name: 'app', repoPath: repo, jobDir, description: 'd', image: 'img', jobId: '1-x' }, 'new')).toBe(0);
     expect(h.text()).toContain('Secrets this job will receive: ALPHA, BETA');
+    expect(h.text()).toContain('Service Stripe: missing from the secrets file: STRIPE_KEY');
     expect(h.text() + h.errText()).not.toMatch(/FAKE_VALUE_1|not-a-secret/);
     expect(opts).toEqual([{ envFile: join(home, 'secrets', 'app.env') }]);
   });

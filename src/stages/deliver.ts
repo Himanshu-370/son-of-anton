@@ -39,17 +39,25 @@ function checksSection(spec: SpecDoc, results: CheckResult[]): string[] {
     const r = byId.get(c.id);
     const status = !r ? 'not verified' : r.status === 'pass' ? 'pass' : `fail (${r.reason ?? 'failing'})`;
     const tests = r?.tests.length ? r.tests.map(cell).join('<br>') : '—';
-    return `| ${c.id} | ${cell(c.text)} | ${status} | ${tests} | evidence/test-output.txt |`;
+    return `| ${c.id} | ${cell(c.text)} | ${status} | ${r?.evidence ?? '—'} | ${tests} | evidence/test-output.txt |`;
   });
   return [
     '## Acceptance checks',
     '',
     'Evidence paths are relative to this job folder; `evidence/results.json` holds the raw results.',
     '',
-    '| ID | Check | Status | Tests | Evidence |',
-    '|---|---|---|---|---|',
+    '| ID | Check | Status | Proven against | Tests | Evidence |',
+    '|---|---|---|---|---|---|',
     ...rows,
   ];
+}
+
+/** A service is real when a passing `[real]` test names it (case-insensitive); the build prompt asks for that. */
+function servicesSection(spec: SpecDoc, results: CheckResult[]): string[] {
+  const services = spec.services ?? [];
+  if (services.length === 0) return [];
+  const real = results.filter((r) => r.evidence === 'real').flatMap((r) => r.tests).filter((t) => t.includes('[real]')).map((t) => t.toLowerCase());
+  return ['', '## Outside services', '', ...services.map((s) => `- ${cell(s.name)}: ${real.some((t) => t.includes(s.name.toLowerCase())) ? 'real' : 'stand-in only'}`)];
 }
 
 type ReviewSections = {
@@ -181,6 +189,7 @@ export async function runDeliver(
     `Job \`${ctx.state.jobId}\`, delivered after ${ctx.state.round} round(s).`,
     '',
     ...checksSection(spec, outcome.results),
+    ...servicesSection(spec, outcome.results),
     '',
     ...codeReviewSection(sections),
     '',

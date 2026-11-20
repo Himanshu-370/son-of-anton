@@ -26,8 +26,9 @@ Fields:
 - `kit`: always `"fallback"`.
 - `tech`: list of chosen technologies (language, framework, libraries). Pick boring, widely supported choices that run in a Linux container.
 - `acceptanceChecks`: a list of `{id, text}`. Ids are `AC-1`, `AC-2`, ... sequential with no gaps. At least one.
+- `services`: a list of `{name, envVars}` for EVERY outside service the project calls (payment, email, third-party APIs and so on); `envVars` are the environment variable names it needs, names only, never values. Use `[]` when there are none. Make a stand-in (a fake or local stub of the service) the default for every check; the real service is only an optional extra test.
 
-Acceptance checks MUST be concrete and testable by an automated test: state an observable behaviour with specific inputs and expected outputs (for example "Adding a habit named 'Run' makes it appear in the list with a streak of 0"). Avoid vague wording such as "works well", "is user friendly" or "looks good". One behaviour per check. Each check must be verifiable without a human, a real network, or paid services.
+Acceptance checks MUST be concrete and testable by an automated test: state an observable behaviour with specific inputs and expected outputs (for example "Adding a habit named 'Run' makes it appear in the list with a streak of 0"). Avoid vague wording such as "works well", "is user friendly" or "looks good". One behaviour per check. Each check must be verifiable without a human, a real network, or paid services, so for outside services the check is proven against a stand-in.
 
 ## Security acceptance checks
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mapJUnit } from '../../src/verify/junit.js';
+import { evidenceFor, mapJUnit } from '../../src/verify/junit.js';
 
 const checks = [
   { id: 'AC-1', text: 'one' },
@@ -63,5 +63,24 @@ describe('allTests', () => {
       { name: 'A::ok', passed: true }, { name: 'A::bad', passed: false }, { name: 'solo', passed: true }, { name: 'B::sk', passed: false },
     ]);
     expect(passingTests(xml)).toEqual(['A::ok', 'solo']);
+  });
+
+  it('check with a passing [real] test → evidence real; otherwise stand-in', () => {
+    const xml = `<testsuite>
+      <testcase classname="a" name="AC-1 [real] charges"/>
+      <testcase classname="a" name="AC-1 stub charges"/>
+      <testcase classname="a" name="AC-2 [real] sends"><skipped/></testcase>
+      <testcase classname="a" name="AC-2 stub sends"/>
+    </testsuite>`;
+    const [r1, r2] = mapJUnit(xml, checks);
+    expect(r1!.evidence).toBe('real');
+    expect(r2!.evidence).toBe('stand-in'); // the [real] test was skipped, so not passing
+    expect(r2!.status).toBe('fail');
+    expect(mapJUnit(xml, [{ id: 'AC-9', text: 'x' }])[0]!.evidence).toBeUndefined();
+  });
+
+  it('evidenceFor is pure: no tests → undefined', () => {
+    expect(evidenceFor([])).toBeUndefined();
+    expect(evidenceFor([{ label: 'x [real]', ok: false }])).toBe('stand-in');
   });
 });

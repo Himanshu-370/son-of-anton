@@ -9,7 +9,7 @@ import { runSpec, writeSpec, readApprovedSpec, SpecNotProduced, type SpecDoc } f
 
 const spec: SpecDoc = {
   title: 'Habit Tracker', summary: 'Track habits.', outOfScope: ['accounts'], kit: 'fallback', tech: ['node'],
-  acceptanceChecks: [{ id: 'AC-1', text: 'adds a habit' }, { id: 'AC-2', text: 'lists habits' }],
+  acceptanceChecks: [{ id: 'AC-1', text: 'adds a habit' }, { id: 'AC-2', text: 'lists habits' }], services: [],
 };
 let ctx: StageCtx;
 beforeEach(async () => {
@@ -90,6 +90,39 @@ describe('runSpec cost accounting across resumed turns', () => {
     const r = await runSpec(ctx, 'habit app', async (q) => q.map(() => 'yes'), { runAgent: run });
     expect(r.state.spentUsd).toBeCloseTo(2.0, 10);
     expect(reqs.map((q) => q.baseUsd ?? 0)).toEqual([0, 0.5, 1.2]);
+  });
+});
+
+describe('services', () => {
+  const withSvc: SpecDoc = { ...spec, services: [{ name: 'Stripe', envVars: ['STRIPE_KEY', 'STRIPE_WEBHOOK'] }] };
+
+  it('spec.md renders Outside services', async () => {
+    await writeSpec(ctx.jobDir, withSvc);
+    const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');
+    expect(md).toContain('## Outside services\n\n- Stripe (env: STRIPE_KEY, STRIPE_WEBHOOK)');
+    expect((await readApprovedSpec(ctx.jobDir)).services).toEqual(withSvc.services);
+  });
+
+  it('older spec.json without services still parses with services []', async () => {
+    await writeSpec(ctx.jobDir, spec);
+    const old = JSON.parse(await readFile(join(ctx.jobDir, 'spec.json'), 'utf8'));
+    delete old.services;
+    await writeFile(join(ctx.jobDir, 'spec.json'), JSON.stringify(old));
+    expect((await readApprovedSpec(ctx.jobDir)).services).toEqual([]);
+  });
+
+  it('PM prompt requires services and stand-in default', async () => {
+    const p = await loadPrompt('spec.md');
+    expect(p).toMatch(/`services`.*EVERY outside service/);
+    expect(p).toMatch(/stand-in.*default/);
+  });
+
+  it('build and infra prompts state the [real] rule and .env.example', async () => {
+    const b = await loadPrompt('build.md');
+    expect(b).toContain('`[real]`');
+    expect(b).toMatch(/skip unless ALL/);
+    expect(b).toMatch(/environment variables only/);
+    expect(await loadPrompt('role-infra.md')).toMatch(/\.env\.example.*no values/s);
   });
 });
 

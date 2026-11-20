@@ -29,11 +29,13 @@ export async function runSpecSession(
     d.err(`\nInterrupted. Clean up with: ${hint}`);
     d.exit(130);
   });
+  let services: { name: string; envVars: string[] }[] = [];
   try {
     const state = await loadState(p.jobDir);
     const ctx: StageCtx = { project: p.name, repo: p.repoPath, container, jobDir: p.jobDir, state, stage: 'spec', secrets };
     if (mode === 'change') ctx.state = await d.ensureRepoMap(ctx);
     const r = await d.runSpec(ctx, p.description, d.ask, {}, mode);
+    services = r.spec.services ?? [];
     await writeSpec(p.jobDir, r.spec, secrets);
     await saveState(p.jobDir, transition(r.state, 'awaiting_spec_approval'));
   } catch (e) {
@@ -50,6 +52,10 @@ export async function runSpecSession(
   d.out('');
   const names = Object.keys(secrets);
   d.out(`Secrets this job will receive: ${names.length ? names.join(', ') : 'none'}`);
+  for (const svc of services) {
+    const missing = svc.envVars.filter((v) => !(v in secrets));
+    if (missing.length) d.out(`Service ${svc.name}: missing from the secrets file: ${missing.join(', ')} (its [real] tests will skip)`);
+  }
   if (mode === 'change') {
     d.out(`Spec ready: ${spec}. Edit the acceptance checks if you like, then run: anton approve ${p.name}. Work happens on branch anton/${p.jobId}.`);
   } else {
