@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { execa } from 'execa';
 import { startContainer, runIn, stopContainer, ensureImage } from '../../src/docker/container.js';
+import { webKit } from '../../src/kits/web/index.js';
 
 const IMAGE = 'alpine:3.20';
 const slug = `e2e-test-${randomBytes(4).toString('hex')}`;
@@ -66,6 +67,21 @@ describe.skipIf(!process.env.ANTON_E2E)('docker e2e', () => {
     } finally {
       await stopContainer(kitName);
       await rm(kitRepo, { recursive: true, force: true });
+    }
+  }, 300_000);
+
+  it('web image can launch chromium', async () => {
+    const image = await ensureImage(webKit);
+    const webSlug = `e2e-web-${randomBytes(4).toString('hex')}`;
+    const webName = `anton-${webSlug}`;
+    const webRepo = await mkdtemp(join(tmpdir(), 'anton-e2e-web-'));
+    try {
+      await startContainer(webSlug, webRepo, image);
+      const r = await runIn(webName, `node -e "require('playwright').chromium.launch().then(b=>b.close())"`);
+      expect(r.exitCode, r.stderr).toBe(0);
+    } finally {
+      await stopContainer(webName);
+      await rm(webRepo, { recursive: true, force: true });
     }
   }, 300_000);
 });

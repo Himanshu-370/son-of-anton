@@ -34,6 +34,8 @@ export type BaselineOutcome = { passingTests: string[]; ran: boolean };
 export interface Kit {
   name: string;
   dockerfile: string;
+  /** Kit whose image this one builds on (FROM); ensured first. */
+  base?: Kit;
   /** 0..1 confidence that this kit suits the job description. */
   detect(description: string): number;
   verify(ctx: VerifyContext): Promise<VerifyOutcome>;

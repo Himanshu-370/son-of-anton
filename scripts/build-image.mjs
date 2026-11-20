@@ -1,4 +1,4 @@
-// Stages the compiled agent entry into the fallback kit's build context, then builds the image.
+// Stages the compiled agent entry into the fallback kit's build context, then builds the image, then the web kit image on top of it.
 // Run via `npm run build:image` (which runs `npm run build` first).
 // Dependencies are pinned: the repo's own package.json + package-lock.json are staged, so the image's
 // `npm ci --omit=dev` installs exactly the locked versions (including the linux SDK binary).
@@ -17,5 +17,6 @@ mkdirSync(stage, { recursive: true });
 for (const f of ['entry.js', 'pricing.js', 'protocol.js']) cpSync(join(root, 'dist', 'agent', f), join(stage, f));
 for (const f of ['package.json', 'package-lock.json']) cpSync(join(root, f), join(stage, f));
 
-const tag = await ensureImage({ name: 'fallback', dockerfile: join(kitDir, 'Dockerfile') });
-console.log(tag);
+const fallback = { name: 'fallback', dockerfile: join(kitDir, 'Dockerfile') };
+console.log(await ensureImage(fallback));
+console.log(await ensureImage({ name: 'web', dockerfile: join(root, 'src', 'kits', 'web', 'Dockerfile'), base: fallback }));

@@ -81,22 +81,33 @@ async function assertStageCurrent(stageDir: string, agentDir: string): Promise<v
 
 /**
  * Tag: `anton/kit-<name>:<version>-<hash>`. The content hash means a changed entry or Dockerfile
- * gets a new tag, so a stale image is never reused.
+ * gets a new tag, so a stale image is never reused. A kit with a `base` builds on the base kit's
+ * image (ensured first, passed as `--build-arg BASE`); its hash covers its Dockerfile plus the base
+ * tag, and it has no `.stage/` of its own.
  */
 export async function ensureImage(
-  kit: { name: string; dockerfile: string },
+  kit: { name: string; dockerfile: string; base?: { name: string; dockerfile: string } },
   exec: ExecFn = defaultExec,
   opts: { agentDir?: string } = {},
 ): Promise<string> {
   const context = dirname(kit.dockerfile);
-  const stageDir = join(context, '.stage');
-  const staged = await stat(stageDir).then((s) => s.isDirectory(), () => false);
-  if (!staged) throw new Error('Kit image files not staged — run: npm run build:image');
-  await assertStageCurrent(stageDir, opts.agentDir ?? DEFAULT_AGENT_DIR);
-  const tag = `anton/kit-${kit.name}:${packageVersion()}-${await kitContentHash(kit.dockerfile, stageDir)}`;
+  let hash: string;
+  const buildArgs: string[] = [];
+  if (kit.base) {
+    const baseTag = await ensureImage(kit.base, exec, opts);
+    hash = createHash('sha256').update(await readFile(kit.dockerfile)).update('\0').update(baseTag).digest('hex').slice(0, 12);
+    buildArgs.push('--build-arg', `BASE=${baseTag}`);
+  } else {
+    const stageDir = join(context, '.stage');
+    const staged = await stat(stageDir).then((s) => s.isDirectory(), () => false);
+    if (!staged) throw new Error('Kit image files not staged — run: npm run build:image');
+    await assertStageCurrent(stageDir, opts.agentDir ?? DEFAULT_AGENT_DIR);
+    hash = await kitContentHash(kit.dockerfile, stageDir);
+  }
+  const tag = `anton/kit-${kit.name}:${packageVersion()}-${hash}`;
   const have = await exec('docker', ['image', 'inspect', tag]);
   if (have.exitCode === 0) return tag;
-  const build = await exec('docker', ['build', '-t', tag, '-f', kit.dockerfile, context]);
+  const build = await exec('docker', ['build', '-t', tag, '-f', kit.dockerfile, ...buildArgs, context]);
   if (build.exitCode !== 0) {
     throw new Error(`docker build failed for ${tag}: ${build.stderr.trim()}`);
   }
