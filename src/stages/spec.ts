@@ -5,7 +5,7 @@ import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner
 import type { AgentRequest } from '../agent/protocol.js';
 import { writeFileAtomic } from '../core/atomic.js';
 import { remainingUsd } from '../core/budget.js';
-import { DEFAULTS } from '../core/config.js';
+import { ROLE_MODELS } from '../core/config.js';
 import type { JobState } from '../core/state.js';
 import type { AcceptanceCheck } from '../kits/types.js';
 import { loadPrompt } from './prompts.js';
@@ -70,7 +70,7 @@ export async function runSpec(
 ): Promise<{ spec: SpecDoc; state: JobState }> {
   const run = deps.runAgent ?? defaultRunAgent;
   const systemPrompt = await loadPrompt('spec.md');
-  const { model, effort } = DEFAULTS.models.spec;
+  const { model, effort } = ROLE_MODELS.pm;
   let cur: StageCtx = ctx;
   let sessionId: string | undefined;
   /** The previous call's cumulative SDK total; a resumed session's total continues from it. */
@@ -81,7 +81,7 @@ export async function runSpec(
     const final = call === MAX_QUESTION_ROUNDS;
     if (final) prompt += '\n\nYou have no more question rounds. Please write the spec now.';
     const req: AgentRequest = {
-      role: 'spec',
+      role: 'pm',
       model,
       effort,
       systemPrompt,

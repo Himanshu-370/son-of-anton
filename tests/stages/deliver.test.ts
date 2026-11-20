@@ -15,7 +15,7 @@ const spec: SpecDoc = {
 };
 const plan: Plan = {
   commands: { install: 'pip install -e .', test: 'pytest --junitxml="$ANTON_JUNIT"', run: 'sumcli 1 2' },
-  tasks: [{ id: 'T1', title: 'x', acceptanceChecks: ['AC-1', 'AC-2'], instructions: 'y' }],
+  tasks: [{ id: 'T1', title: 'x', acceptanceChecks: ['AC-1', 'AC-2'], instructions: 'y', area: 'backend' }],
 };
 let ctx: StageCtx;
 beforeEach(async () => {
@@ -84,5 +84,109 @@ describe('runDeliver', () => {
     await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag, listTags });
     expect(listTags).toHaveBeenCalledWith('/r', 'anton/j1/delivered-*');
     expect(tag).toHaveBeenCalledWith('/r', 'anton/j1/delivered-2');
+  });
+
+  describe('code review and security sections', () => {
+    const sec = (id: string, severity: string, title: string) => ({
+      id, severity, area: 'backend', file: 'src/a.ts', title, detail: 'd', source: 'review',
+    });
+    async function put(name: string, body: unknown) {
+      await mkdir(join(ctx.jobDir, 'evidence'), { recursive: true });
+      await writeFile(join(ctx.jobDir, 'evidence', name), JSON.stringify(body));
+    }
+    const deliver = async () => {
+      await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag: async () => {}, listTags: async () => [] });
+      return readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    };
+
+    it('Code review section says it did not run when results.json has no review section', async () => {
+      const md = await deliver();
+      expect(md).toMatch(/## Code review\n\nCode review did not run for this delivery\./);
+    });
+
+    it('Code review section says No findings. when the review ran and found nothing', async () => {
+      await put('results.json', { round: 1, results, runOk: true, review: { findings: [] } });
+      const md = await deliver();
+      expect(md).toMatch(/## Code review\n\nNo findings\./);
+    });
+
+    it('Code review section lists findings', async () => {
+      let md: string;
+      await put('results.json', {
+        round: 2, results, runOk: true,
+        review: { findings: [{ id: 'CR-1', severity: 'non_blocking', area: 'frontend', file: 'ui.ts', line: 4, summary: 'Rename x' }] },
+      });
+      md = await deliver();
+      expect(md).toContain('CR-1');
+      expect(md).toContain('non_blocking');
+      expect(md).toContain('frontend');
+      expect(md).toContain('ui.ts');
+      expect(md).toContain('Rename x');
+      expect(md.indexOf('## Acceptance checks')).toBeLessThan(md.indexOf('## Code review'));
+      expect(md.indexOf('## Security')).toBeLessThan(md.indexOf('## How to run'));
+    });
+
+    it('Security section lists accepted risk with reason', async () => {
+      await put('results.json', {
+        round: 2, results, runOk: true,
+        security: { findings: [sec('SEC-aaaaaaaa', 'high', 'Weak hash'), sec('SEC-bbbbbbbb', 'low', 'Verbose errors')], unavailable: [] },
+      });
+      await put('accepted-risks.json', { risks: [{ id: 'SEC-aaaaaaaa', reason: 'internal tool only', acceptedAt: 'x' }] });
+      const md = await deliver();
+      expect(md).toContain('### high');
+      expect(md).toContain('accepted — internal tool only');
+      expect(md.indexOf('### high')).toBeLessThan(md.indexOf('### low'));
+      const low = md.slice(md.indexOf('SEC-bbbbbbbb'));
+      expect(low.split('\n')[0]).not.toContain('accepted');
+    });
+
+    const scn = (id: string, file: string, title: string) => ({ ...sec(id, 'high', title), file, source: 'scanner', tool: 'gitleaks' });
+
+    it('a scanner finding gone from the latest verify is listed under "No longer reported"', async () => {
+      await put('results-verify-1.json', { round: 1, security: { findings: [scn('SEC-11111111', 'src/x.ts', 'Leaked key')], unavailable: [] } });
+      await put('results-verify-2.json', { round: 2, reviewedFiles: [], security: { findings: [], unavailable: [] } });
+      await put('results.json', { round: 2, results, runOk: true, review: { findings: [] }, security: { findings: [], unavailable: [] } });
+      const md = await deliver();
+      expect(md).toContain('### No longer reported');
+      expect(md).not.toContain('Fixed in earlier rounds');
+      expect(md).toMatch(/SEC-11111111[^\n]*Leaked key/);
+    });
+
+    it('a review finding is listed only when its file appears in a later verify\'s diff', async () => {
+      await put('results-verify-1.json', {
+        round: 1,
+        security: { findings: [sec('SEC-11111111', 'critical', 'SQL injection'), { ...sec('SEC-22222222', 'high', 'Open redirect'), file: 'src/r.ts' }], unavailable: [] },
+      });
+      await put('results-verify-2.json', { round: 2, reviewedFiles: ['src/a.ts'], security: { findings: [], unavailable: [] } });
+      await put('results.json', { round: 2, results, runOk: true, review: { findings: [] }, security: { findings: [], unavailable: [] } });
+      const md = await deliver();
+      expect(md).toMatch(/SEC-11111111[^\n]*SQL injection/);
+      expect(md).not.toContain('SEC-22222222');
+    });
+
+    it('a review finding whose file only changed in its own verify is not listed', async () => {
+      await put('results-verify-1.json', { round: 1, reviewedFiles: ['src/a.ts'], security: { findings: [sec('SEC-11111111', 'critical', 'SQL injection')], unavailable: [] } });
+      await put('results-verify-2.json', { round: 2, reviewedFiles: [], security: { findings: [], unavailable: [] } });
+      await put('results.json', { round: 2, results, runOk: true, review: { findings: [] }, security: { findings: [], unavailable: [] } });
+      const md = await deliver();
+      expect(md).not.toContain('SEC-11111111');
+      expect(md).not.toContain('No longer reported');
+    });
+
+    it('verify copies are ordered numerically (10 after 9)', async () => {
+      for (let n = 1; n <= 9; n++) await put(`results-verify-${n}.json`, { round: 1, security: { findings: [], unavailable: [] } });
+      await put('results-verify-9.json', { round: 1, security: { findings: [sec('SEC-33333333', 'high', 'XSS')], unavailable: [] } });
+      await put('results-verify-10.json', { round: 2, reviewedFiles: ['src/a.ts'], security: { findings: [], unavailable: [] } });
+      await put('results.json', { round: 2, results, runOk: true, security: { findings: [], unavailable: [] } });
+      const md = await deliver();
+      expect(md).toMatch(/SEC-33333333[^\n]*XSS/);
+    });
+
+    it('unavailable scanner noted', async () => {
+      await put('results.json', { round: 1, results, runOk: true, security: { findings: [], unavailable: ['semgrep'] } });
+      const md = await deliver();
+      expect(md).toMatch(/Scanners unavailable[^\n]*semgrep/);
+      expect(md).toContain('No findings.');
+    });
   });
 });

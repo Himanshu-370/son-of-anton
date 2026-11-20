@@ -1,10 +1,11 @@
 import { describe, it, expect, afterAll } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { randomBytes } from 'node:crypto';
 import { execa } from 'execa';
-import { startContainer, runIn, stopContainer } from '../../src/docker/container.js';
+import { startContainer, runIn, stopContainer, ensureImage } from '../../src/docker/container.js';
 
 const IMAGE = 'alpine:3.20';
 const slug = `e2e-test-${randomBytes(4).toString('hex')}`;
@@ -33,4 +34,38 @@ describe.skipIf(!process.env.ANTON_E2E)('docker e2e', () => {
     const ps = await execa('docker', ['ps', '-aq', '--filter', `name=^${name}$`]);
     expect(ps.stdout.trim()).toBe('');
   }, 120_000);
+
+  it('kit image has pinned security scanners on PATH', async () => {
+    const dockerfile = join(dirname(fileURLToPath(import.meta.url)), '../../src/kits/fallback/Dockerfile');
+    const image = await ensureImage({ name: 'fallback', dockerfile });
+    const kitSlug = `e2e-scan-${randomBytes(4).toString('hex')}`;
+    const kitName = `anton-${kitSlug}`;
+    const kitRepo = await mkdtemp(join(tmpdir(), 'anton-e2e-scan-'));
+    try {
+      await startContainer(kitSlug, kitRepo, image);
+      for (const [cmd, re] of [
+        ['gitleaks version', /8\.30\.1/],
+        ['osv-scanner --version', /2\.7\.1/],
+        ['semgrep --version', /1\.186\.0/],
+      ] as const) {
+        const r = await runIn(kitName, cmd);
+        expect(r.exitCode, `${cmd}: ${r.stderr}`).toBe(0);
+        expect(r.stdout + r.stderr).toMatch(re);
+      }
+
+      // safe.directory: git (and gitleaks) work on the bind-mounted repo despite the owner mismatch.
+      expect((await runIn(kitName, 'git config --system --get-all safe.directory')).stdout).toContain('/workspace');
+      await execa('git', ['init', '-q', kitRepo]);
+      const st = await runIn(kitName, 'git -C /workspace status --porcelain');
+      expect(st.exitCode, st.stderr).toBe(0);
+
+      // The image's entry speaks the current protocol (echoes protocolVersion 2), no API needed.
+      await writeFile(join(kitRepo, 'bad-request.json'), '{"role": 1}');
+      const ev = await runIn(kitName, 'node /opt/anton/entry.js /workspace/bad-request.json');
+      expect(JSON.parse(ev.stdout.trim().split('\n').at(-1)!)).toMatchObject({ type: 'error', protocolVersion: 2 });
+    } finally {
+      await stopContainer(kitName);
+      await rm(kitRepo, { recursive: true, force: true });
+    }
+  }, 300_000);
 });

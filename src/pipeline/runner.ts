@@ -17,9 +17,10 @@ import { fallbackKit } from '../kits/fallback/index.js';
 import type { Kit } from '../kits/types.js';
 import { runBuild as defaultRunBuild } from '../stages/build.js';
 import { runDeliver as defaultRunDeliver, type DeliverInput } from '../stages/deliver.js';
+import { failuresPath } from '../stages/qa.js';
 import { PlanSchema, runPlan as defaultRunPlan, type Plan } from '../stages/plan.js';
 import { SpecDocBaseSchema, type SpecDoc } from '../stages/spec.js';
-import { runVerify as defaultRunVerify, type VerifyResult } from '../stages/verify.js';
+import { runVerify as defaultRunVerify, type VerifyDeps, type VerifyResult } from '../stages/verify.js';
 
 export const containerName = (slug: string) => `anton-${slug}`;
 
@@ -35,7 +36,9 @@ export type RunnerDeps = {
   kit?: Kit;
   runPlan?: (ctx: StageCtx, spec: SpecDoc) => Promise<{ plan: Plan; state: JobState }>;
   runBuild?: (ctx: StageCtx, spec: SpecDoc, plan: Plan) => Promise<JobState>;
-  runVerify?: (ctx: StageCtx, kit: Kit, spec: SpecDoc, plan: Plan) => Promise<VerifyResult>;
+  runVerify?: (ctx: StageCtx, kit: Kit, spec: SpecDoc, plan: Plan, deps?: VerifyDeps) => Promise<VerifyResult>;
+  /** Injectable reviewers and git lookups, forwarded to runVerify. */
+  verifyDeps?: VerifyDeps;
   runDeliver?: (ctx: StageCtx, spec: SpecDoc, plan: Plan, input: DeliverInput) => Promise<JobState>;
   log?: (line: string) => void;
 };
@@ -53,14 +56,35 @@ async function readJson(path: string): Promise<unknown> {
   return JSON.parse(await fsp.readFile(path, 'utf8'));
 }
 
-function pauseMessage(project: string, reason: PauseReason | undefined): string {
+/** Which kinds of blockers the latest failures.json holds. Missing or corrupt means none. */
+async function failureKinds(jobDir: string): Promise<{ security: boolean; other: boolean }> {
+  try {
+    const items: unknown = JSON.parse(await fsp.readFile(failuresPath(jobDir), 'utf8'));
+    if (!Array.isArray(items)) return { security: false, other: false };
+    const kinds = items.map((i) => (i as { kind?: unknown } | null)?.kind);
+    return { security: kinds.includes('security'), other: kinds.some((k) => k !== 'security') };
+  } catch {
+    return { security: false, other: false };
+  }
+}
+
+function pauseMessage(
+  project: string,
+  reason: PauseReason | undefined,
+  kinds: { security: boolean; other: boolean } = { security: false, other: false },
+): string {
+  const risk = kinds.security
+    ? ` Security findings can be accepted with: anton accept-risk ${project} <id> --reason "<text>", then: anton resume ${project} (re-verifies; the reviewers run again).` +
+      ` Or: anton resume ${project} --accept-as-is delivers now and ships any other blockers too.` +
+      (kinds.other ? ' Other blockers remain, so accepting risks alone will not pass verify.' : '')
+    : '';
   switch (reason) {
     case 'budget_cap':
       return `${project}: paused, budget cap reached. Resume with: anton resume ${project} --budget <usd>`;
     case 'round_cap':
-      return `${project}: paused, round cap reached. Run: anton resume ${project} --accept-as-is (or abandon)`;
+      return `${project}: paused, round cap reached. Run: anton resume ${project} --accept-as-is (or abandon).${risk}`;
     case 'no_progress':
-      return `${project}: paused, no progress between rounds. See the failure report.`;
+      return `${project}: paused, no progress between rounds. See the failure report.${risk}`;
     case 'error':
       return `${project}: paused on an error. See logs/error.log, then: anton resume ${project}`;
     default:
@@ -132,7 +156,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
             state = await runBuild(ctx('build'), await getSpec(), await getPlan());
             break;
           case 'verify': {
-            const r = await runVerify(ctx('verify'), kit, await getSpec(), await getPlan());
+            const r = await runVerify(ctx('verify'), kit, await getSpec(), await getPlan(), deps.verifyDeps);
             lastVerify = { results: r.results, runOk: r.runOk };
             state = r.state;
             break;
@@ -143,7 +167,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
         }
       }
       log(`stopped at stage: ${state.stage}`);
-      if (state.stage === 'paused') final = pauseMessage(project, state.pauseReason);
+      if (state.stage === 'paused') final = pauseMessage(project, state.pauseReason, await failureKinds(jobDir));
       else if (state.stage === 'awaiting_final_review') {
         final = `${project}: ready for review. See REPORT.md, then: anton approve ${project}`;
       }

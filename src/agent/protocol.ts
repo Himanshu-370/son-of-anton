@@ -1,5 +1,12 @@
 import { z } from 'zod';
 
+/**
+ * Host <-> entry protocol version. The host stamps it on every request and refuses a result/error
+ * event that does not echo it, so an image built from older agent code (which would, for example,
+ * silently drop `tools`) fails closed instead of running with the wrong options.
+ */
+export const PROTOCOL_VERSION = 2;
+
 export const AgentRequestSchema = z.object({
   role: z.string(),
   model: z.string(),
@@ -7,7 +14,7 @@ export const AgentRequestSchema = z.object({
   systemPrompt: z.string(),
   /**
    * 'replace' (default): systemPrompt replaces the SDK's default prompt. 'append': the Claude Code
-   * preset prompt is kept and systemPrompt is appended to it (used by the build role).
+   * preset prompt is kept and systemPrompt is appended to it (used by the role-split build agents).
    */
   systemPromptMode: z.enum(['replace', 'append']).optional(),
   prompt: z.string(),
@@ -21,6 +28,13 @@ export const AgentRequestSchema = z.object({
    * counts only the increment over it, and the entry offsets its interim estimates by it. Default 0.
    */
   baseUsd: z.number().min(0).optional(),
+  /**
+   * Exact built-in tool set for the session (read-only reviewers). Passed as the SDK `tools`
+   * option, so no other built-in tool exists for the session. Omitted: SDK defaults.
+   */
+  tools: z.array(z.string()).optional(),
+  /** Set by the host (runAgent) to PROTOCOL_VERSION; the entry refuses a different value. */
+  protocolVersion: z.number().int().optional(),
 });
 export type AgentRequest = z.infer<typeof AgentRequestSchema>;
 
@@ -34,6 +48,8 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
     output: z.unknown(),
     sessionId: z.string(),
     totalUsd: z.number().min(0),
+    /** The entry's PROTOCOL_VERSION. Absent from Phase 1 entries; the host rejects a mismatch. */
+    protocolVersion: z.number().int().optional(),
   }),
   z.object({
     type: z.literal('error'),
@@ -41,6 +57,7 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
     totalUsd: z.number().min(0),
     /** Machine-readable cause. 'budget': the SDK stopped at maxBudgetUsd (host throws BudgetExceeded). */
     code: z.enum(['budget']).optional(),
+    protocolVersion: z.number().int().optional(),
   }),
 ]);
 export type AgentEvent = z.infer<typeof AgentEventSchema>;

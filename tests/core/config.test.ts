@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { DEFAULTS } from '../../src/core/config.js';
+import { AREA_ORDER, DEFAULTS, ROLE_MODELS } from '../../src/core/config.js';
 
 describe('DEFAULTS', () => {
   it('has budget, warn threshold and max rounds', () => {
@@ -7,10 +7,26 @@ describe('DEFAULTS', () => {
     expect(DEFAULTS.warnAt).toBe(0.8);
     expect(DEFAULTS.maxRounds).toBe(3);
   });
+});
 
-  it('has per-stage models', () => {
-    expect(DEFAULTS.models.spec).toEqual({ model: 'claude-opus-5-5', effort: 'high' });
-    expect(DEFAULTS.models.plan).toEqual({ model: 'claude-opus-5-5', effort: 'medium' });
-    expect(DEFAULTS.models.build).toEqual({ model: 'claude-sonnet-5-5', effort: 'medium' });
+describe('ROLE_MODELS', () => {
+  it('matches the role table for all 9 roles', () => {
+    expect(ROLE_MODELS).toEqual({
+      pm: { model: 'claude-opus-5-5', effort: 'high' },
+      tech_lead: { model: 'claude-opus-5-5', effort: 'medium' },
+      frontend: { model: 'claude-sonnet-5-5', effort: 'medium' },
+      backend: { model: 'claude-sonnet-5-5', effort: 'medium' },
+      infra: { model: 'claude-sonnet-5-5', effort: 'medium' },
+      qa: { model: 'claude-sonnet-5-5', effort: 'medium' },
+      code_reviewer: { model: 'claude-sonnet-5-5', effort: 'medium' },
+      security_reviewer: { model: 'claude-sonnet-5-5', effort: 'high' },
+      coach: { model: 'claude-haiku-5-5', effort: 'low' },
+    });
+  });
+});
+
+describe('AREA_ORDER', () => {
+  it('builds infra, then backend, then frontend', () => {
+    expect(AREA_ORDER).toEqual(['infra', 'backend', 'frontend']);
   });
 });

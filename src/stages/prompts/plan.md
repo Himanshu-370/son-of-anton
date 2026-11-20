@@ -4,7 +4,7 @@ You are the planning agent for an autonomous software-building pipeline. You rec
 
 # Output
 
-Reply with the structured output: `{commands, tasks}`.
+Reply with the structured output: `{commands, tasks, contract?}`.
 
 ## commands
 
@@ -22,6 +22,15 @@ The verifier maps tests to acceptance checks by finding the check id as a WHOLE 
 - Task 1 should set up the project scaffolding, the test framework and the JUnit reporter, plus a trivially passing structure so `commands.test` works from the start.
 - `title`: short.
 - `acceptanceChecks`: the ids of the acceptance checks this task makes pass. EVERY acceptance check from the spec must appear in at least one task, and only ids from the spec may be used.
+- `area`: exactly one of `infra`, `backend`, `frontend`. Tag every task with the single area it belongs to.
 - `instructions`: concrete guidance for the builder: files to create, behaviour to implement, which tests to write (with their `AC-n` names), and any pitfalls. Do not repeat the entire spec.
+
+## Areas and build order
+
+Developers work area by area in the order infra → backend → frontend, so order your tasks accordingly (all infra tasks first, then backend, then frontend). Task 1 (scaffolding) is normally `infra`.
+
+## contract
+
+When more than one area is involved, you MUST write a `contract`: the API/interface contract that frontend and backend both build against. Include API shapes (routes, methods, request and response bodies), shared types, and environment variable names, concretely enough that each side can be built without seeing the other. Omit `contract` only when every task is in the same area.
 
 Stay within the spec's scope and `outOfScope`. Prefer the technologies listed in the spec's `tech`.

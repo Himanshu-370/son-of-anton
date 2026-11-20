@@ -16,9 +16,12 @@ import { resumeCommand } from '../../src/cli/commands/resume.js';
 import { statusCommand } from '../../src/cli/commands/status.js';
 import { stopCommand } from '../../src/cli/commands/stop.js';
 import { abandonCommand } from '../../src/cli/commands/abandon.js';
+import { acceptRiskCommand } from '../../src/cli/commands/accept-risk.js';
+import { loadAcceptedRisks } from '../../src/security/risks.js';
 import { logsCommand } from '../../src/cli/commands/logs.js';
 import type { SpecDoc } from '../../src/stages/spec.js';
 import { failureReportPath } from '../../src/stages/verify.js';
+import { failuresPath } from '../../src/stages/qa.js';
 
 const DEAD_PID = 999_999;
 
@@ -153,6 +156,23 @@ describe('anton reject', () => {
     expect(await readFile(join(dir, 'notes-round-1.md'), 'utf8')).toContain('make it blue');
     expect(await readFile(failureReportPath(dir), 'utf8')).toContain('make it blue');
     expect(h.spawned).toEqual(['p']);
+  });
+
+  it('reject notes fan out to every plan area', async () => {
+    const { dir } = await project('p', { stage: 'awaiting_final_review', round: 2, completedFixAreas: ['backend'] });
+    const t = (id: string, area: string) => ({ id, title: id, acceptanceChecks: [], instructions: 'x', area });
+    await writeFile(join(dir, 'plan.json'), JSON.stringify({
+      commands: { install: 'i', test: 't' },
+      tasks: [t('T1', 'frontend'), t('T2', 'backend'), t('T3', 'backend')],
+    }));
+    const h = harness();
+    expect(await rejectCommand('p', { notes: 'make it blue' }, h.deps)).toBe(0);
+    expect(JSON.parse(await readFile(failuresPath(dir), 'utf8'))).toEqual([
+      { area: 'backend', kind: 'review', id: 'NOTES-1', text: 'make it blue' },
+      { area: 'frontend', kind: 'review', id: 'NOTES-1', text: 'make it blue' },
+    ]);
+    expect(await readFile(join(dir, 'notes-round-1.md'), 'utf8')).toContain('make it blue');
+    expect((await loadState(dir)).completedFixAreas).toEqual([]);
   });
 
   it('while the previous runner is still finishing (live lock) → exit 1 "still finishing", nothing changed', async () => {
@@ -292,6 +312,57 @@ describe('anton abandon', () => {
     expect(await abandonCommand('p', h.deps)).toBe(0);
     expect((await loadState(dir)).stage).toBe('abandoned');
     expect(stopped).toEqual(['anton-p']);
+  });
+});
+
+describe('anton accept-risk', () => {
+  const finding = { id: 'SEC-abc12345', severity: 'high', area: 'backend', file: 'a.ts', title: 'Weak hash', detail: 'd', source: 'review' };
+  async function withResults(stage: JobState['stage']) {
+    const p = await project('p', stage === 'paused' ? { stage, pausedFrom: 'verify', pauseReason: 'round_cap', round: 1 } : { stage });
+    await mkdir(join(p.dir, 'evidence'), { recursive: true });
+    await writeFile(join(p.dir, 'evidence', 'results.json'), JSON.stringify({ round: 1, results: [], runOk: true, security: { findings: [finding], unavailable: [] } }));
+    return p;
+  }
+
+  it('accept-risk records reason; rejects unknown id; rejects blank reason; refuses at stage build', async () => {
+    const { dir } = await withResults('paused');
+    let h = harness();
+    expect(await acceptRiskCommand('p', 'SEC-abc12345', { reason: 'internal only' }, h.deps)).toBe(0);
+    expect(h.text()).toContain('Weak hash');
+    expect(h.text()).toContain('accepted');
+    expect((await loadAcceptedRisks(dir)).map((r) => [r.id, r.reason])).toEqual([['SEC-abc12345', 'internal only']]);
+    expect((await loadState(dir)).stage).toBe('paused');
+
+    h = harness();
+    expect(await acceptRiskCommand('p', 'SEC-deadbeef', { reason: 'x' }, h.deps)).toBe(1);
+    expect(h.errText()).toContain('Unknown security finding SEC-deadbeef');
+    h = harness();
+    expect(await acceptRiskCommand('p', 'nope', { reason: 'x' }, h.deps)).toBe(1);
+    expect(h.errText()).toContain('Unknown security finding nope');
+
+    h = harness();
+    expect(await acceptRiskCommand('p', 'SEC-abc12345', { reason: '   ' }, h.deps)).toBe(1);
+    expect(h.errText()).toContain('--reason');
+
+    await saveState(dir, { ...(await loadState(dir)), stage: 'build' });
+    h = harness();
+    expect(await acceptRiskCommand('p', 'SEC-abc12345', { reason: 'again' }, h.deps)).toBe(1);
+    expect(h.errText()).toContain('stage: build');
+    expect((await loadAcceptedRisks(dir))[0]!.reason).toBe('internal only');
+  });
+
+  it('works at awaiting_final_review', async () => {
+    await withResults('awaiting_final_review');
+    const h = harness();
+    expect(await acceptRiskCommand('p', 'SEC-abc12345', { reason: 'ok' }, h.deps)).toBe(0);
+    expect(h.text()).toContain('Note: REPORT.md was written before this acceptance; it will show it after the next delivery.');
+  });
+
+  it('does not print the REPORT.md note when paused', async () => {
+    await withResults('paused');
+    const h = harness();
+    expect(await acceptRiskCommand('p', 'SEC-abc12345', { reason: 'ok' }, h.deps)).toBe(0);
+    expect(h.text()).not.toContain('REPORT.md was written');
   });
 });
 

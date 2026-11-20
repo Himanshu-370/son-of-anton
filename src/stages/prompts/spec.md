@@ -28,3 +28,14 @@ Fields:
 - `acceptanceChecks`: a list of `{id, text}`. Ids are `AC-1`, `AC-2`, ... sequential with no gaps. At least one.
 
 Acceptance checks MUST be concrete and testable by an automated test: state an observable behaviour with specific inputs and expected outputs (for example "Adding a habit named 'Run' makes it appear in the list with a streak of 0"). Avoid vague wording such as "works well", "is user friendly" or "looks good". One behaviour per check. Each check must be verifiable without a human, a real network, or paid services.
+
+## Security acceptance checks
+
+If the project has logins or accounts, stores user data, handles payments, or exposes anything to the network (a web server, an API, a listening port), include security acceptance checks alongside the functional ones. Each must be as concrete and automatically testable as any other check. Examples (for instance: a logged-out user can't reach /admin):
+
+- "A logged-out user requesting /admin gets a 401 or a redirect to the login page, and no admin content."
+- "A user cannot read or modify another user's records by changing the id in the URL."
+- "Passwords are stored hashed: the stored value for a new account never equals the submitted password."
+- "A request with malformed or oversized input returns a 4xx error and does not crash the server."
+
+Skip these only for projects with no accounts, no user data, no payments and no network exposure (for example a pure local command-line tool).

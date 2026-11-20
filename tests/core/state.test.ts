@@ -110,6 +110,14 @@ describe('state persistence', () => {
     expect(Number.isNaN(Date.parse(loaded.updatedAt))).toBe(false);
   });
 
+  it('reviewedSha optional round-trips', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'anton-state-'));
+    await saveState(dir, base('verify'));
+    expect((await loadState(dir)).reviewedSha).toBeUndefined();
+    await saveState(dir, { ...base('verify'), reviewedSha: 'abc123' });
+    expect((await loadState(dir)).reviewedSha).toBe('abc123');
+  });
+
   it('loadState rejects a file failing the schema', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'anton-state-'));
     await writeFile(join(dir, 'state.json'), JSON.stringify({ ...base(), stage: 'bogus' }));

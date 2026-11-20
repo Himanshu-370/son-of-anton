@@ -1,0 +1,100 @@
+{
+  "version": "1.186.0",
+  "results": [
+    {
+      "check_id": "javascript.express.security.audit.express-check-csurf-middleware-usage.express-check-csurf-middleware-usage",
+      "path": "app.js",
+      "start": {
+        "line": 2,
+        "col": 7,
+        "offset": 42
+      },
+      "end": {
+        "line": 2,
+        "col": 22,
+        "offset": 57
+      },
+      "extra": {
+        "message": "A CSRF middleware was not detected in your express application. Ensure you are either using one such as `csurf` or `csrf` (see rule references) and/or you are properly doing CSRF validation in your routes with a token or cookies.",
+        "severity": "INFO",
+        "lines": "requires login"
+      }
+    },
+    {
+      "check_id": "javascript.browser.security.eval-detected.eval-detected",
+      "path": "app.js",
+      "start": {
+        "line": 3,
+        "col": 33,
+        "offset": 91
+      },
+      "end": {
+        "line": 3,
+        "col": 53,
+        "offset": 111
+      },
+      "extra": {
+        "message": "Detected the use of eval(). eval() can be dangerous if used to evaluate dynamic content. If this content can be input from outside the program, this may be a code injection vulnerability. Ensure evaluated content is not definable by external sources.",
+        "severity": "WARNING",
+        "lines": "requires login"
+      }
+    },
+    {
+      "check_id": "javascript.lang.security.audit.code-string-concat.code-string-concat",
+      "path": "app.js",
+      "start": {
+        "line": 3,
+        "col": 33,
+        "offset": 91
+      },
+      "end": {
+        "line": 3,
+        "col": 53,
+        "offset": 111
+      },
+      "extra": {
+        "message": "Found data from an Express or Next web request flowing to `eval`. If this data is user-controllable this can lead to execution of arbitrary system commands in the context of your application process. Avoid `eval` whenever possible.",
+        "severity": "ERROR",
+        "lines": "requires login"
+      }
+    },
+    {
+      "check_id": "javascript.express.security.injection.raw-html-format.raw-html-format",
+      "path": "app.js",
+      "start": {
+        "line": 3,
+        "col": 64,
+        "offset": 122
+      },
+      "end": {
+        "line": 3,
+        "col": 88,
+        "offset": 146
+      },
+      "extra": {
+        "message": "User data flows into the host portion of this manually-constructed HTML. This can introduce a Cross-Site-Scripting (XSS) vulnerability if this comes from user-provided input. Consider using a sanitization library such as DOMPurify to sanitize the HTML within.",
+        "severity": "WARNING",
+        "lines": "requires login"
+      }
+    },
+    {
+      "check_id": "javascript.express.security.audit.xss.direct-response-write.direct-response-write",
+      "path": "app.js",
+      "start": {
+        "line": 3,
+        "col": 64,
+        "offset": 122
+      },
+      "end": {
+        "line": 3,
+        "col": 99,
+        "offset": 157
+      },
+      "extra": {
+        "message": "Detected directly writing to a Response object from user-defined input. This bypasses any HTML escaping and may expose your application to a Cross-Site-scripting (XSS) vulnerability. Instead, use 'resp.render()' to render safely escaped HTML.",
+        "severity": "WARNING",
+        "lines": "requires login"
+      }
+    }
+  ]
+}

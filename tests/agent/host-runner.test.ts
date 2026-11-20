@@ -38,7 +38,7 @@ beforeEach(async () => {
 });
 
 const result = (total: number, output: unknown = { ok: 1 }) =>
-  L({ type: 'result', ok: true, output, sessionId: 'sess', totalUsd: total });
+  L({ type: 'result', ok: true, output, sessionId: 'sess', totalUsd: total, protocolVersion: 2 });
 
 describe('runAgent', () => {
   it('returns output and sessionId from result event', async () => {
@@ -54,6 +54,27 @@ describe('runAgent', () => {
       `/workspace/.anton/jobs/${basename(ctx.jobDir)}/requests/build-1.json`,
     ]);
     expect(JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8')).role).toBe('builder');
+  });
+
+  it('stamps protocolVersion 2 on the request file', async () => {
+    await runAgent(ctx, req, { spawn: () => fake([result(0)]).child, notify: vi.fn() });
+    expect(JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8')).protocolVersion).toBe(2);
+  });
+
+  it('a result without protocolVersion 2 (stale image) throws AgentError and still records its cost', async () => {
+    const f = fake([L({ type: 'result', ok: true, output: {}, sessionId: 's', totalUsd: 0.4 })]);
+    const p = runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() });
+    await expect(p).rejects.toBeInstanceOf(AgentError);
+    await expect(runAgent(ctx, req, { spawn: () => fake([L({ type: 'result', ok: true, output: {}, sessionId: 's', totalUsd: 0, protocolVersion: 1 })]).child, notify: vi.fn() }))
+      .rejects.toThrow('agent entry is out of date (protocol 1) — run: npm run build:image');
+    expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(0.4);
+  });
+
+  it('an error event without protocolVersion (even a budget one) throws the out-of-date AgentError', async () => {
+    const f = fake([L({ type: 'error', message: 'x', code: 'budget', totalUsd: 0.1 })]);
+    const p = runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() });
+    await expect(p).rejects.toBeInstanceOf(AgentError);
+    await expect(p).rejects.toThrow('agent entry is out of date (protocol none) — run: npm run build:image');
   });
 
   it('numbers request files incrementally', async () => {
@@ -79,7 +100,7 @@ describe('runAgent', () => {
   });
 
   it('on error event, cost is still recorded and AgentError thrown', async () => {
-    const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'boom', totalUsd: 0.7 })]);
+    const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'boom', totalUsd: 0.7, protocolVersion: 2 })]);
     await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toThrow(AgentError);
     expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(0.7);
   });
@@ -159,14 +180,14 @@ describe('runAgent', () => {
   });
 
   it("an error event with code 'budget' (SDK maxBudgetUsd stop) throws BudgetExceeded, cost recorded", async () => {
-    const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'error_max_budget_usd', code: 'budget', totalUsd: 0.6 })]);
+    const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'error_max_budget_usd', code: 'budget', totalUsd: 0.6, protocolVersion: 2 })]);
     await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toBeInstanceOf(BudgetExceeded);
     expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(0.6);
   });
 
   it('error event crossing cap throws AgentError', async () => {
     await setState({ budgetUsd: 1 });
-    const f = fake([L({ type: 'error', message: 'boom', totalUsd: 1.5 })]);
+    const f = fake([L({ type: 'error', message: 'boom', totalUsd: 1.5, protocolVersion: 2 })]);
     await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toThrow(AgentError);
     expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(1.5);
   });

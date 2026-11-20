@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { runAgent, type ChildLike, type StageCtx } from '../../src/agent/host-runner.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
+import { loadPrompt } from '../../src/stages/prompts.js';
 import { runSpec, writeSpec, readApprovedSpec, SpecNotProduced, type SpecDoc } from '../../src/stages/spec.js';
 
 const spec: SpecDoc = {
@@ -41,7 +42,7 @@ describe('runSpec', () => {
     expect(reqs[1]!.resumeSessionId).toBe('s1');
     expect(reqs[2]!.prompt).toContain('A: yes');
     for (const r of reqs) expect(r.outputSchema!.type).toBe('object');
-    expect(reqs[0]).toMatchObject({ model: 'claude-opus-5-5', effort: 'high', maxTurns: 30, budgetUsd: 9 });
+    expect(reqs[0]).toMatchObject({ role: 'pm', model: 'claude-opus-5-5', effort: 'high', maxTurns: 30, budgetUsd: 9 });
   });
 
   it('forces the spec on the 6th call and throws SpecNotProduced', async () => {
@@ -75,7 +76,7 @@ describe('runSpec cost accounting across resumed turns', () => {
     let call = 0;
     const spawn = (): ChildLike => {
       const t = turns[call++]!;
-      const line = JSON.stringify({ type: 'result', ok: true, output: t.output, sessionId: 'sess', totalUsd: t.totalUsd }) + '\n';
+      const line = JSON.stringify({ type: 'result', ok: true, output: t.output, sessionId: 'sess', totalUsd: t.totalUsd, protocolVersion: 2 }) + '\n';
       return {
         stdout: (async function* () { yield line; })(),
         kill: () => undefined,
@@ -122,5 +123,12 @@ describe('writeSpec / readApprovedSpec', () => {
     await expect(readApprovedSpec(ctx.jobDir)).rejects.toThrow(/duplicate.*AC-1/);
     await writeFile(join(ctx.jobDir, 'spec.md'), '# T\n\nnothing\n');
     await expect(readApprovedSpec(ctx.jobDir)).rejects.toThrow(/no acceptance checks/);
+  });
+
+  it('PM prompt requires security acceptance checks for logins/user data/payments/network exposure', async () => {
+    const p = await loadPrompt('spec.md');
+    expect(p).toMatch(/security acceptance checks/i);
+    for (const w of ['login', 'user data', 'payment', 'network']) expect(p.toLowerCase()).toContain(w);
+    expect(p).toContain("logged-out user can't reach /admin");
   });
 });

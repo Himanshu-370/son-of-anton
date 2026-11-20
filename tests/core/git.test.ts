@@ -3,7 +3,7 @@ import { access, chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
-import { commitAll, tag, headSha, ensureAntonIgnored, listTags } from '../../src/core/git.js';
+import { commitAll, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse, changedFilesSince } from '../../src/core/git.js';
 
 const git = (repo: string, ...args: string[]) =>
   execa('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo });
@@ -144,5 +144,45 @@ describe('git helper', () => {
     const { stdout } = await git(repo, 'ls-files');
     expect(stdout.split('\n')).toContain('b.txt');
     expect(stdout).not.toContain('.anton');
+  });
+
+  it('diffSince returns only the changes after the given sha, and ignores repo hooks', async () => {
+    await writeFile(join(repo, 'a.txt'), 'one\n');
+    const base = (await commitAll(repo, 'first'))!;
+    const marker = join(repo, '..', `${repo.split('/').pop()}-diff-marker`);
+    await mkdir(join(repo, '.git', 'hooks'), { recursive: true });
+    await writeFile(join(repo, '.git', 'hooks', 'post-commit'), `#!/bin/sh\ntouch "${marker}"\n`);
+    await chmod(join(repo, '.git', 'hooks', 'post-commit'), 0o755);
+    await writeFile(join(repo, 'b.txt'), 'two\n');
+    await commitAll(repo, 'second');
+    const d = await diffSince(repo, base);
+    expect(d).toContain('b.txt');
+    expect(d).toContain('+two');
+    expect(d).not.toContain('a.txt');
+    await expect(access(marker)).rejects.toThrow();
+  });
+
+  it('diffSince rejects a malformed sha', async () => {
+    await expect(diffSince(repo, '--output=/tmp/x')).rejects.toThrow(/invalid sha/);
+    await expect(diffSince(repo, 'HEAD~1')).rejects.toThrow(/invalid sha/);
+  });
+
+  it('changedFilesSince lists only paths changed after the given sha, and rejects a malformed sha', async () => {
+    await writeFile(join(repo, 'a.txt'), 'one\n');
+    const base = (await commitAll(repo, 'first'))!;
+    await mkdir(join(repo, 'src'), { recursive: true });
+    await writeFile(join(repo, 'src', 'b.ts'), 'two\n');
+    await commitAll(repo, 'second');
+    expect(await changedFilesSince(repo, base)).toEqual(['src/b.ts']);
+    await expect(changedFilesSince(repo, '--output=/tmp/x')).rejects.toThrow(/invalid sha/);
+  });
+
+  it('revParse resolves a tag to its commit sha and rejects bad refs', async () => {
+    await writeFile(join(repo, 'a.txt'), 'a');
+    const sha = (await commitAll(repo, 'first'))!;
+    await tag(repo, 'anton/j1/spec-approved');
+    expect(await revParse(repo, 'anton/j1/spec-approved')).toBe(sha);
+    await expect(revParse(repo, 'anton/j1/missing')).rejects.toThrow();
+    await expect(revParse(repo, '--output=/tmp/x')).rejects.toThrow(/invalid ref/);
   });
 });

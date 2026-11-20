@@ -5,7 +5,7 @@ import { runAgent as defaultRunAgent } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
 import { writeFileAtomic } from '../core/atomic.js';
 import { remainingUsd } from '../core/budget.js';
-import { DEFAULTS } from '../core/config.js';
+import { ROLE_MODELS } from '../core/config.js';
 import type { JobState } from '../core/state.js';
 import type { Commands } from '../kits/types.js';
 import { loadPrompt } from './prompts.js';
@@ -26,9 +26,11 @@ export const PlanSchema = z.object({
         title: z.string().min(1),
         acceptanceChecks: z.array(z.string()),
         instructions: z.string().min(1),
+        area: z.enum(['frontend', 'backend', 'infra']),
       }),
     )
     .min(1),
+  contract: z.string().optional(),
 });
 export type Plan = z.infer<typeof PlanSchema>;
 
@@ -49,13 +51,20 @@ export function validatePlanCoverage(plan: Plan, checkIds: string[]): void {
   if (unknown.length) throw new PlanInvalid(`plan references unknown acceptance checks: ${unknown.join(', ')}`);
 }
 
+/** A plan spanning two or more areas must carry a contract that the areas build against. */
+export function validatePlanAreas(plan: Plan): void {
+  const areas = new Set(plan.tasks.map((t) => t.area));
+  if (areas.size >= 2 && !plan.contract?.trim()) throw new PlanInvalid(`plan spans ${areas.size} areas but has no contract`);
+}
+
 export type PlanDeps = { runAgent?: typeof defaultRunAgent };
 
 function renderPlan(p: Plan): string {
   const lines = ['# Plan', '', '## Commands', '', `- install: \`${p.commands.install}\``, `- test: \`${p.commands.test}\``];
   if (p.commands.run) lines.push(`- run: \`${p.commands.run}\``);
+  if (p.contract?.trim()) lines.push('', '## Contract', '', p.contract.trim());
   for (const t of p.tasks) {
-    lines.push('', `## ${t.id}: ${t.title}`, '', `Acceptance checks: ${t.acceptanceChecks.join(', ') || '(none)'}`, '', t.instructions);
+    lines.push('', `## ${t.id}: ${t.title} [${t.area}]`, '', `Acceptance checks: ${t.acceptanceChecks.join(', ') || '(none)'}`, '', t.instructions);
   }
   return lines.join('\n') + '\n';
 }
@@ -67,9 +76,9 @@ export async function runPlan(
   deps: PlanDeps = {},
 ): Promise<{ plan: Plan; state: JobState }> {
   const run = deps.runAgent ?? defaultRunAgent;
-  const { model, effort } = DEFAULTS.models.plan;
+  const { model, effort } = ROLE_MODELS.tech_lead;
   const req: AgentRequest = {
-    role: 'plan',
+    role: 'tech_lead',
     model,
     effort,
     systemPrompt: await loadPrompt('plan.md'),
@@ -81,6 +90,7 @@ export async function runPlan(
   const res = await run(ctx, req);
   const plan = PlanSchema.parse(res.output);
   validatePlanCoverage(plan, spec.acceptanceChecks.map((c) => c.id));
+  validatePlanAreas(plan);
   await writeFileAtomic(join(ctx.jobDir, 'plan.json'), JSON.stringify(plan, null, 2) + '\n');
   await writeFileAtomic(join(ctx.jobDir, 'plan.md'), renderPlan(plan));
   return { plan, state: res.state };
