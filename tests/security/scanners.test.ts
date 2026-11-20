@@ -69,6 +69,41 @@ describe('runScanners', () => {
     expect(await ref(3)).toBe(await ref(40));
   });
 
+  const sgRefs = async (hits: Array<{ line: number; lines: string; rule?: string }>): Promise<string[]> => {
+    const sg = JSON.parse(fx('semgrep.json'));
+    sg.results = hits.map((h) => ({
+      ...sg.results[1], check_id: h.rule ?? 'r.eval', start: { line: h.line }, extra: { ...sg.results[1].extra, lines: h.lines },
+    }));
+    const out = await runScanners('c', { runIn: fake({ semgrep: r(0, JSON.stringify(sg)) }).runIn });
+    return out.findings.filter((x) => x.tool === 'semgrep').map(scannerRef);
+  };
+
+  it('requires-login: two hits of one rule in one file get different refs', async () => {
+    const refs = await sgRefs([{ line: 3, lines: 'requires login' }, { line: 9, lines: 'requires login' }]);
+    expect(new Set(refs).size).toBe(2);
+  });
+
+  it('identical matched lines at two places get different refs', async () => {
+    const refs = await sgRefs([{ line: 3, lines: 'eval(x)' }, { line: 9, lines: '  eval(x)' }]);
+    expect(new Set(refs).size).toBe(2);
+  });
+
+  it('an indentation-only change keeps the ref', async () => {
+    const [a] = await sgRefs([{ line: 3, lines: 'eval(x)' }]);
+    const [b] = await sgRefs([{ line: 3, lines: '    eval(x)  ' }]);
+    expect(a).toBe(b);
+  });
+
+  it('gitleaks without Fingerprint falls back to file:rule:line, never "undefined"', async () => {
+    const [a] = JSON.parse(fx('gitleaks.json'));
+    const { Fingerprint: _f, ...noFp } = a;
+    const { StartLine: _l, ...noLine } = noFp;
+    const keys = async (x: object) =>
+      (await runScanners('c', { runIn: fake({ gitleaks: r(1), report: r(0, JSON.stringify([x])) }).runIn })).findings[0]!.key;
+    expect(await keys(noFp)).toBe('config.js:aws-access-token:1');
+    expect(await keys(noLine)).toBe('config.js:aws-access-token:?');
+  });
+
   it('osv key is the vulnerability id', async () => {
     const out = await runScanners('c', { runIn: fake({ osv: r(1, fx('osv.json')) }).runIn });
     expect(out.findings.find((x) => x.tool === 'osv-scanner')!.key).toBe('GHSA-29mw-wpgm-hmr9');
