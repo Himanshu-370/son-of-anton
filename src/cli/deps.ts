@@ -31,7 +31,7 @@ export type CliDeps = {
   startContainer?: (slug: string, repo: string, image: string) => Promise<string>;
   stopContainer?: (name: string) => Promise<void>;
   runSpec?: typeof defaultRunSpec;
-  /** Builds or refreshes the repo map before a change's spec . */
+  /** Builds or refreshes the repo map before a change's spec. */
   ensureRepoMap?: (ctx: StageCtx) => Promise<JobState>;
   ask?: (questions: string[]) => Promise<string[]>;
   /** Start the detached background run for a project. */
