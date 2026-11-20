@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { readFile, rm } from 'node:fs/promises';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { execa } from 'execa';
 import { writeFileAtomic } from './atomic.js';
 import { redact } from './secrets.js';
@@ -99,6 +99,54 @@ export async function resetWorktree(repo: string): Promise<void> {
   await ensureAntonIgnored(repo);
   await git(repo, ['checkout', '--', '.']);
   await git(repo, ['clean', '-fd']);
+}
+
+/**
+ * `git status --porcelain` as path -> XY code, untracked files listed one by one, `.anton/` left out.
+ * A rename/copy entry contributes both its new and its old path.
+ */
+export async function porcelainStatus(repo: string): Promise<Map<string, string>> {
+  await ensureAntonIgnored(repo);
+  const parts = (await git(repo, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])).split('\0');
+  const out = new Map<string, string>();
+  for (let i = 0; i < parts.length; i++) {
+    const e = parts[i]!;
+    if (e.length < 4) continue;
+    const code = e.slice(0, 2);
+    const paths = [e.slice(3)];
+    if (code[0] === 'R' || code[0] === 'C') paths.push(parts[++i] ?? '');
+    for (const p of paths) if (p && !p.startsWith('.anton/')) out.set(p, code);
+  }
+  return out;
+}
+
+/**
+ * Puts repo-relative `paths` back to HEAD: tracked ones via `checkout HEAD --`, others are unstaged and
+ * deleted. Refuses (throws, before touching anything) a path outside the repo, in `.git/` or in `.anton/`.
+ */
+export async function restorePaths(repo: string, paths: string[]): Promise<void> {
+  for (const p of paths) {
+    const rel = relative(repo, resolve(repo, p));
+    const top = rel.split(/[\\/]/)[0]!.toLowerCase(); // case-insensitive file systems: .GIT is .git
+    if (!rel || isAbsolute(p) || isAbsolute(rel) || top === '..' || top === '.git' || top === '.anton') {
+      throw new Error(`refusing to restore ${JSON.stringify(p)}: outside the project files`);
+    }
+  }
+  // Literal pathspecs: a file named `*.js` must not match every .js file.
+  const lit = ['--literal-pathspecs'];
+  for (const p of paths) {
+    let inHead = true;
+    try {
+      await git(repo, [...lit, 'cat-file', '-e', `HEAD:${p}`]);
+    } catch {
+      inHead = false;
+    }
+    if (inHead) await git(repo, [...lit, 'checkout', '-q', 'HEAD', '--', p]);
+    else {
+      await git(repo, [...lit, 'rm', '-q', '--cached', '--ignore-unmatch', '--', p]);
+      await rm(resolve(repo, p), { force: true, recursive: true });
+    }
+  }
 }
 
 /** Create and switch to a new branch; git's error surfaces if it already exists. */

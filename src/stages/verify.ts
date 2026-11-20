@@ -85,7 +85,7 @@ export function failureSignature(items: FailureItem[]): string {
 
 /** The kit's run-failure section when it has one, else a generic pointer. */
 function runFailureText(kitReport: string): string {
-  const m = /### Run failed[\s\S]*?(?=\n### |$)/.exec(kitReport);
+  const m = /### (Run failed|App did not start)[\s\S]*?(?=\n### |$)/.exec(kitReport);
   return m ? m[0].trim() : 'The smoke run (plan `commands.run`) failed. See the check details in the failure report.';
 }
 
@@ -127,15 +127,17 @@ export async function runVerify(
   plan: Plan,
   deps: VerifyDeps = {},
 ): Promise<VerifyResult> {
-  const { results, runOk, failureReport: kitReport, tests, testsRan } = await kit.verify({
+  const { results, runOk, failureReport: kitReport, tests, testsRan, state: kitState } = await kit.verify({
     container: ctx.container,
     jobDir: ctx.jobDir,
     checks: spec.acceptanceChecks,
     commands: plan.commands,
     secrets: ctx.secrets,
+    stage: ctx,
   });
   const s = ctx.state;
-  let state = s;
+  // A kit agent (web browser tester) records its cost in the state it returns; keep it.
+  let state = kitState ?? s;
   const record: Record<string, unknown> = { round: s.round, results, runOk };
 
   // No baseline (new job) or an invalid one: no regression logic and nothing is pre-existing.

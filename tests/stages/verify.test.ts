@@ -90,7 +90,7 @@ describe('runVerify', () => {
     expect(r.passed).toBe(true);
     expect(r.state.stage).toBe('deliver');
     expect((await loadState(ctx.jobDir)).stage).toBe('deliver');
-    expect(seen[0]).toEqual({ container: 'c', jobDir: ctx.jobDir, checks: spec.acceptanceChecks, commands: plan.commands });
+    expect(seen[0]).toEqual({ container: 'c', jobDir: ctx.jobDir, checks: spec.acceptanceChecks, commands: plan.commands, stage: ctx });
     const saved = await readJson(join(ctx.jobDir, 'evidence', 'results.json'));
     expect(saved).toEqual({
       round: 1, results: [pass('AC-1'), pass('AC-2')], runOk: true,
