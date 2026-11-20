@@ -77,7 +77,8 @@ export type StoreDeps = { home?: string; clone?: Clone };
 
 /**
  * Clone the marketplace, copy the plugin (no `.git`) to `<destRoot>/<marketplace-slug>/<plugin>/<commit12>/`
- * and, unless `lock: false`, pin it in plugins.lock. A refused plugin leaves the lock and folder untouched.
+ * and, unless `lock: false`, pin it in plugins.lock. A refused plugin leaves the lock and folder untouched;
+ * an already pinned name is a no-op at the same commit and hash, otherwise refused (use `plugins update`).
  */
 export async function installPlugin(
   spec: string,
@@ -105,6 +106,12 @@ export async function installPlugin(
       name: plugin, marketplace, url, version: await pluginVersion(src), commit, sha256: hash,
       dir: `${slug}/${plugin}/${commit.slice(0, 12)}`,
     };
+    // No silent updates (§10.1): moving a pin is `anton plugins update`'s job. Staging installs skip this.
+    const pinned = (opts.lock ?? true) ? lock.find((e) => e.name === plugin) : undefined;
+    if (pinned) {
+      if (pinned.commit === commit && pinned.sha256 === hash) return pinned;
+      throw new Error(`Plugin ${plugin} is already installed at ${pinned.commit.slice(0, 12)} — run: anton plugins update ${plugin}`);
+    }
     const dest = join(destRoot, entry.dir);
     if (await exists(dest)) {
       // Folders are immutable: an existing one is reused only if it is byte-identical.

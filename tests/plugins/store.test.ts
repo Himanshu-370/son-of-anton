@@ -124,11 +124,26 @@ describe('installPlugin', () => {
     expect(await pluginsFolder()).toEqual(['acme-mkt']);
   });
 
-  it('re-adding from the same marketplace replaces the entry', async () => {
+  it('re-adding the same pin is a no-op', async () => {
     const clone = fakeClone({ [MKT]: await marketplace('cave') });
-    await installPlugin('cave@acme/mkt', { home, clone });
-    const again = await installPlugin('cave@acme/mkt', { home, clone });
-    expect(await readLock(home)).toEqual([again]);
+    const first = await installPlugin('cave@acme/mkt', { home, clone });
+    expect(await installPlugin('cave@acme/mkt', { home, clone })).toEqual(first);
+    expect(await readLock(home)).toEqual([first]);
+  });
+
+  it('re-adding never re-pins a newer commit; staging install still gets it', async () => {
+    const map = { [MKT]: await marketplace('cave') };
+    const clone = fakeClone(map);
+    const first = await installPlugin('cave@acme/mkt', { home, clone });
+    map[MKT] = await marketplace('cave', { plugin: { 'hooks/new.sh': 'echo new\n' } });
+    await expect(installPlugin('cave@acme/mkt', { home, clone })).rejects.toThrow(
+      `Plugin cave is already installed at ${first.commit.slice(0, 12)} — run: anton plugins update cave`,
+    );
+    expect(await readLock(home)).toEqual([first]);
+    expect(await readdir(join(home, 'plugins', 'acme-mkt', 'cave'))).toEqual([first.commit.slice(0, 12)]);
+    const staged = await installPlugin('cave@acme/mkt', { home, clone }, { lock: false, destRoot: join(home, 'staging') });
+    expect(staged.commit).not.toBe(first.commit);
+    expect(await readLock(home)).toEqual([first]);
   });
 
   it('verifyInstalled detects an edited file', async () => {
