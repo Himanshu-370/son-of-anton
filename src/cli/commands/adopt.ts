@@ -15,6 +15,7 @@ export async function adoptCommand(path: string, opts: { name?: string }, deps: 
     let name: string;
     if (opts.name !== undefined) {
       name = opts.name;
+      if (slugify(name) !== name) throw new UsageError('Project names may only use a-z, 0-9 and -');
       if ((await listProjects()).some((p) => p.name === name)) throw new UsageError(`A project named ${name} already exists`);
     } else {
       name = await uniqueName(slugify(basename(real)));

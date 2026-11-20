@@ -517,6 +517,12 @@ describe('adopt', () => {
     expect(await adoptCommand(await repo('x'), { name: 'taken' }, h.deps)).toBe(1);
     expect(h.errText()).toContain('A project named taken already exists');
   });
+  it('non-slug --name → exit 1, nothing registered', async () => {
+    const h = harness();
+    expect(await adoptCommand(await repo('x'), { name: 'My App' }, h.deps)).toBe(1);
+    expect(h.errText()).toContain('Project names may only use a-z, 0-9 and -');
+    expect(await listProjects()).toEqual([]);
+  });
   it('default name collision gets a suffix', async () => {
     await project('dup');
     const h = harness();
