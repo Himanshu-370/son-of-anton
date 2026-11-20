@@ -61,7 +61,7 @@ export async function commitAll(repo: string, message: string): Promise<string |
   return headSha(repo);
 }
 
-/** True when the work tree has no changes (`.anton/` is excluded, so it does not count). */
+/** True when the work tree has no changes (`.anton/` is excluded, so it does not count). Writes .git/info/exclude first, by design. */
 export async function isClean(repo: string): Promise<boolean> {
   await ensureAntonIgnored(repo);
   return (await git(repo, ['status', '--porcelain'])).trim() === '';
@@ -70,6 +70,22 @@ export async function isClean(repo: string): Promise<boolean> {
 /** Create and switch to a new branch; git's error surfaces if it already exists. */
 export async function createBranch(repo: string, name: string): Promise<void> {
   await git(repo, ['switch', '-c', name]);
+}
+
+/** Undo `createBranch`: switch back to the previously checked-out ref and force-delete `name`. */
+export async function dropBranch(repo: string, name: string): Promise<void> {
+  await git(repo, ['switch', '-']);
+  await git(repo, ['branch', '-D', name]);
+}
+
+/** False for a repo with no commits (unborn HEAD). */
+export async function hasCommits(repo: string): Promise<boolean> {
+  try {
+    await git(repo, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function tag(repo: string, name: string): Promise<void> {

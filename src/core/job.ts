@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { execa } from 'execa';
 import { DEFAULTS } from './config.js';
 import { jobDir, projectDir } from './paths.js';
-import { createBranch, isClean } from './git.js';
+import { createBranch, dropBranch, hasCommits, isClean } from './git.js';
 import { getProject, registerProject, slugify, uniqueName } from './registry.js';
 import { loadState, saveState, type JobState } from './state.js';
 
@@ -43,6 +43,13 @@ export async function createNewProject(
   return { name, repoPath, jobId, jobDir: dir };
 }
 
+export class NoJobs extends Error {
+  constructor(repoPath: string) {
+    super(`No job found in ${repoPath}`);
+    this.name = 'NoJobs';
+  }
+}
+
 /** The project's current job: the folder in `.anton/jobs/` with the highest `<n>-` prefix. */
 export async function currentJobId(repoPath: string): Promise<string> {
   let ids: string[] = [];
@@ -53,7 +60,7 @@ export async function currentJobId(repoPath: string): Promise<string> {
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
   }
-  if (ids.length === 0) throw new Error(`No job found in ${repoPath}`);
+  if (ids.length === 0) throw new NoJobs(repoPath);
   return ids.sort((a, b) => parseInt(b, 10) - parseInt(a, 10))[0]!;
 }
 
@@ -61,6 +68,13 @@ export class DirtyRepo extends Error {
   constructor() {
     super('Commit or stash your changes first');
     this.name = 'DirtyRepo';
+  }
+}
+
+export class NoCommits extends Error {
+  constructor() {
+    super('Make an initial commit first');
+    this.name = 'NoCommits';
   }
 }
 
@@ -78,37 +92,49 @@ export async function createChangeJob(
   opts: { budgetUsd?: number } = {},
 ): Promise<NewProject & { branch: string }> {
   const { repoPath } = await getProject(project);
-  if (!(await isClean(repoPath))) throw new DirtyRepo();
   let n = 1;
   try {
     const latest = await currentJobId(repoPath);
-    const s = await loadState(jobDir(repoPath, latest));
-    if (s.stage !== 'done' && s.stage !== 'abandoned') throw new JobActive(project, latest, s.stage);
     n = parseInt(latest, 10) + 1;
+    let stage: string | undefined;
+    try {
+      stage = (await loadState(jobDir(repoPath, latest))).stage;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; // crashed leftover: not active, number still counts
+    }
+    if (stage && stage !== 'done' && stage !== 'abandoned') throw new JobActive(project, latest, stage);
   } catch (e) {
-    if (!(e instanceof Error) || e.message !== `No job found in ${repoPath}`) throw e; // adopted repo: no jobs yet
+    if (!(e instanceof NoJobs)) throw e; // adopted repo: no jobs yet
   }
+  if (!(await isClean(repoPath))) throw new DirtyRepo();
+  if (!(await hasCommits(repoPath))) throw new NoCommits();
   // `anton/<n>-` prefix plus slug must fit in 60 chars
-  const slug = slugify(description).slice(0, 60 - `anton/${n}-`.length).replace(/-+$/, '') || 'change';
+  const slug = slugify(description).slice(0, 60 - `anton/${n}-`.length).replace(/-+$/, '');
   const id = `${n}-${slug}`;
   const branch = `anton/${id}`;
-  await createBranch(repoPath, branch);
   const dir = jobDir(repoPath, id);
-  await fsp.mkdir(dir, { recursive: true });
-  await fsp.writeFile(join(dir, 'description.txt'), description.endsWith('\n') ? description : description + '\n');
-  await saveState(dir, {
-    jobId: id,
-    kind: 'change',
-    branch,
-    project,
-    stage: 'spec',
-    round: 0,
-    maxRounds: DEFAULTS.maxRounds,
-    budgetUsd: opts.budgetUsd ?? DEFAULTS.budgetUsd,
-    spentUsd: 0,
-    warned80: false,
-    completedTasks: [],
-    updatedAt: '',
-  });
+  await createBranch(repoPath, branch);
+  try {
+    await fsp.mkdir(dir, { recursive: true });
+    await fsp.writeFile(join(dir, 'description.txt'), description.endsWith('\n') ? description : description + '\n');
+    await saveState(dir, {
+      jobId: id,
+      kind: 'change',
+      branch,
+      project,
+      stage: 'spec',
+      round: 0,
+      maxRounds: DEFAULTS.maxRounds,
+      budgetUsd: opts.budgetUsd ?? DEFAULTS.budgetUsd,
+      spentUsd: 0,
+      warned80: false,
+      completedTasks: [],
+      updatedAt: '',
+    });
+  } catch (e) {
+    await dropBranch(repoPath, branch);
+    await fsp.rm(dir, { recursive: true, force: true });
+    throw e;
+  }
   return { name: project, repoPath, jobId: id, jobDir: dir, branch };
 }

@@ -196,6 +196,9 @@ describe('isClean / createBranch', () => {
     expect(await isClean(repo)).toBe(true);
     await writeFile(join(repo, 'a.txt'), 'b');
     expect(await isClean(repo)).toBe(false);
+    await git(repo, 'checkout', '-q', 'a.txt');
+    await writeFile(join(repo, 'new.txt'), 'n');
+    expect(await isClean(repo)).toBe(false);
   });
   it('createBranch switches, and fails if the branch exists', async () => {
     await writeFile(join(repo, 'a.txt'), 'a');

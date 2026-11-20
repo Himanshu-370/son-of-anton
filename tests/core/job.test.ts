@@ -1,13 +1,22 @@
-import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdtemp, readFile, stat } from 'node:fs/promises';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { mkdir, mkdtemp, rm, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
-import { writeFile } from 'node:fs/promises';
-import { createChangeJob, createNewProject, DirtyRepo, JobActive } from '../../src/core/job.js';
+import { createChangeJob, createNewProject, DirtyRepo, JobActive, NoCommits } from '../../src/core/job.js';
 import { listProjects } from '../../src/core/registry.js';
 import { commitAll } from '../../src/core/git.js';
 import { loadState, saveState } from '../../src/core/state.js';
+
+const failSave = vi.hoisted(() => ({ on: false }));
+vi.mock('../../src/core/state.js', async (orig) => {
+  const m = await orig<typeof import('../../src/core/state.js')>();
+  return {
+    ...m,
+    saveState: (...a: Parameters<typeof m.saveState>) =>
+      failSave.on ? Promise.reject(new Error('disk full')) : m.saveState(...a),
+  };
+});
 
 beforeEach(async () => {
   process.env.ANTON_HOME = await mkdtemp(join(tmpdir(), 'anton-job-'));
@@ -75,5 +84,41 @@ describe('createChangeJob', () => {
     const p = await doneProject();
     const c = await createChangeJob(p.name, 'x'.repeat(100));
     expect(c.branch.length).toBeLessThanOrEqual(60);
+  });
+  it('active job → JobActive message, checked before dirtiness', async () => {
+    const p = await createNewProject('init thing');
+    await writeFile(join(p.repoPath, 'a.txt'), 'a');
+    await expect(createChangeJob(p.name, 'Add auth')).rejects.toThrow(
+      `${p.name} already has an active job (1-init, stage spec)`,
+    );
+  });
+  it('adopted repo with no jobs → first change job is 1-<slug>', async () => {
+    const p = await doneProject();
+    await rm(join(p.repoPath, '.anton'), { recursive: true });
+    expect((await createChangeJob(p.name, 'Add auth')).jobId).toBe('1-add-auth');
+  });
+  it('repo with no commits → NoCommits, nothing created', async () => {
+    const p = await createNewProject('init thing');
+    await rm(join(p.repoPath, '.anton'), { recursive: true });
+    await expect(createChangeJob(p.name, 'x')).rejects.toBeInstanceOf(NoCommits);
+    await expect(createChangeJob(p.name, 'x')).rejects.toThrow('Make an initial commit first');
+  });
+  it('failed state write rolls back branch and job dir', async () => {
+    const p = await doneProject();
+    const before = await branch(p.repoPath);
+    failSave.on = true;
+    try {
+      await expect(createChangeJob(p.name, 'Add auth')).rejects.toThrow('disk full');
+    } finally {
+      failSave.on = false;
+    }
+    expect(await branch(p.repoPath)).toBe(before);
+    expect((await execa('git', ['branch', '--list', 'anton/*'], { cwd: p.repoPath })).stdout).toBe('');
+    await expect(stat(join(p.repoPath, '.anton', 'jobs', '2-add-auth'))).rejects.toThrow();
+  });
+  it('leftover job dir without state.json does not block, and its number is not reused', async () => {
+    const p = await doneProject();
+    await mkdir(join(p.repoPath, '.anton', 'jobs', '2-crashed'), { recursive: true });
+    expect((await createChangeJob(p.name, 'Add auth')).jobId).toBe('3-add-auth');
   });
 });
