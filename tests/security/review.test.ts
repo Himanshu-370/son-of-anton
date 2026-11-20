@@ -159,6 +159,19 @@ describe('runSecurityReview', () => {
     expect(p).toContain('12 more scanner findings not shown; run semgrep in /workspace to see them');
   });
 
+  it('on an id collision the most severe finding is kept (critical > high > medium > low)', async () => {
+    const r = await runSecurityReview(ctx, spec, plan, 'abc', harness([
+      raw({ severity: 'low', detail: 'first' }),
+      raw({ severity: 'critical', detail: 'worst' }),
+      raw({ severity: 'medium' }),
+      raw({ source: 'review', tool: undefined, ref: undefined, title: 'IDOR', severity: 'medium' }),
+      raw({ source: 'review', tool: undefined, ref: undefined, title: 'IDOR', severity: 'high', detail: 'hi' }),
+    ]).deps);
+    expect(r.findings).toHaveLength(2);
+    expect(r.findings[0]).toMatchObject({ severity: 'critical', detail: 'worst', source: 'scanner' });
+    expect(r.findings[1]).toMatchObject({ severity: 'high', detail: 'hi', title: 'IDOR' });
+  });
+
   it('unavailable scanners are returned unchanged', async () => {
     const r = await runSecurityReview(ctx, spec, plan, 'abc', harness([], ['semgrep', 'osv-scanner']).deps);
     expect(r.unavailable).toEqual(['semgrep', 'osv-scanner']);

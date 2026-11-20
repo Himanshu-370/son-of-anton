@@ -171,8 +171,8 @@ export async function runSecurityReview(
   };
   const res = await run(ctx, req);
   const out = OutputSchema.parse(res.output);
-  const seen = new Set<string>();
-  const findings: SecurityFinding[] = [];
+  // Deduped by id, keeping the most severe finding on a collision (first-seen order is kept).
+  const byId = new Map<string, SecurityFinding>();
   for (const { ref, ...f } of out.findings) {
     // Ids never come from the model: a scanner finding's id derives from the host's ref (and its
     // tool/file from the scanner record); a missing or unknown ref makes it a review finding.
@@ -186,9 +186,9 @@ export async function runSecurityReview(
       const review = { ...rest, source: 'review' as const };
       finding = { id: securityFindingId(review), ...review };
     }
-    if (seen.has(finding.id)) continue;
-    seen.add(finding.id);
-    findings.push(finding);
+    const prev = byId.get(finding.id);
+    if (!prev || SEVERITY_RANK[finding.severity] < SEVERITY_RANK[prev.severity]) byId.set(finding.id, finding);
   }
+  const findings = [...byId.values()];
   return { findings, unavailable, state: res.state };
 }
