@@ -82,7 +82,12 @@ export function isValidJUnit(xml: string): boolean {
   return parseCases(xml) !== null;
 }
 
-/** `classname::name` of passing testcases (skipped is not passing), so same-named tests stay distinct. mapJUnit labels are unchanged. Empty when the XML is invalid. */
+/** Every testcase as `{name, passed}`; skipped is not passed. Names are `classname::name` so same-named tests stay distinct (mapJUnit labels are unchanged). Empty when the XML is invalid. */
+export function allTests(xml: string): { name: string; passed: boolean }[] {
+  return (parseCases(xml) ?? []).map((t) => ({ name: t.classname && t.name ? `${t.classname}::${t.name}` : t.label, passed: t.ok }));
+}
+
+/** Names of the passing testcases, labelled as in allTests. */
 export function passingTests(xml: string): string[] {
-  return (parseCases(xml) ?? []).filter((t) => t.ok).map((t) => (t.classname && t.name ? `${t.classname}::${t.name}` : t.label));
+  return allTests(xml).filter((t) => t.passed).map((t) => t.name);
 }

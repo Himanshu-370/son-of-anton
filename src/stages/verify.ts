@@ -17,8 +17,9 @@ import {
   type SecurityFinding,
 } from '../security/review.js';
 import { loadAcceptedRisks } from '../security/risks.js';
+import { loadBaseline } from './baseline.js';
 import type { Plan } from './plan.js';
-import { attributeFailures, failuresPath, renderFailureReport, type FailureItem } from './qa.js';
+import { attributeFailures, failuresPath, regressionItems, renderFailureReport, type FailureItem } from './qa.js';
 import type { SpecDoc } from './spec.js';
 
 export type VerifyResult = {
@@ -125,7 +126,7 @@ export async function runVerify(
   plan: Plan,
   deps: VerifyDeps = {},
 ): Promise<VerifyResult> {
-  const { results, runOk, failureReport: kitReport } = await kit.verify({
+  const { results, runOk, failureReport: kitReport, tests } = await kit.verify({
     container: ctx.container,
     jobDir: ctx.jobDir,
     checks: spec.acceptanceChecks,
@@ -135,12 +136,15 @@ export async function runVerify(
   let state = s;
   const record: Record<string, unknown> = { round: s.round, results, runOk };
 
+  // No baseline (new job) or an invalid one: no regression logic and nothing is pre-existing.
+  const baseline = await loadBaseline(ctx.jobDir);
   let failures = attributeFailures(results, runOk, plan, runFailureText(kitReport));
+  if (baseline?.ran) failures.push(...regressionItems(baseline.passingTests, tests ?? [], plan));
   const checksFailed = failures.length > 0;
   if (!checksFailed) {
     const baseSha = await reviewBase(ctx, state, deps.revParse ?? defaultRevParse);
     const acceptedIds = (await loadAcceptedRisks(ctx.jobDir)).map((r) => r.id);
-    const prior = { previous: await previousSecurity(ctx.jobDir), accepted: acceptedIds };
+    const prior = { previous: await previousSecurity(ctx.jobDir), accepted: acceptedIds, baselineRefs: baseline?.scannerRefs ?? [] };
     const code = await (deps.runCodeReview ?? defaultRunCodeReview)({ ...ctx, state }, spec, plan, baseSha);
     state = code.state;
     const security = await (deps.runSecurityReview ?? defaultRunSecurityReview)(

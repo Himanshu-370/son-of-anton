@@ -18,7 +18,8 @@ export type VerifyContext = {
   commands: Commands;
 };
 
-export type VerifyOutcome = { results: CheckResult[]; runOk: boolean; failureReport: string };
+/** `tests` lists every testcase (named as in BaselineOutcome.passingTests) so verify can compare with the baseline. */
+export type VerifyOutcome = { results: CheckResult[]; runOk: boolean; failureReport: string; tests: { name: string; passed: boolean }[] };
 
 export type BaselineContext = { container: string; jobDir: string; commands: Commands };
 export type BaselineOutcome = { passingTests: string[]; ran: boolean };

@@ -21,6 +21,8 @@ export type SecurityFinding = {
   detail: string;
   source: 'scanner' | 'review';
   tool?: string;
+  /** True when a scanner finding was already in the baseline; never blocks. */
+  preexisting: boolean;
 };
 
 const RawFindingSchema = z.object({
@@ -65,10 +67,10 @@ export function scannerFindingId(ref: string): string {
 
 /** A finding from an earlier round, passed back so the reviewer can reuse its exact title. */
 export type PriorFinding = { id: string; title: string; file: string };
-export type SecurityReviewContext = { previous?: PriorFinding[]; accepted?: string[] };
+export type SecurityReviewContext = { previous?: PriorFinding[]; accepted?: string[]; baselineRefs?: string[] };
 
 export function blocking(findings: SecurityFinding[], accepted: Set<string>): SecurityFinding[] {
-  return findings.filter((f) => (f.severity === 'critical' || f.severity === 'high') && !accepted.has(f.id));
+  return findings.filter((f) => (f.severity === 'critical' || f.severity === 'high') && !accepted.has(f.id) && !f.preexisting);
 }
 
 /** Scanner findings shown to the reviewer; the rest are summarised in a note. */
@@ -171,6 +173,7 @@ export async function runSecurityReview(
   };
   const res = await run(ctx, req);
   const out = OutputSchema.parse(res.output);
+  const baselineRefs = new Set(prior.baselineRefs ?? []);
   // Deduped by id, keeping the most severe finding on a collision (first-seen order is kept).
   const byId = new Map<string, SecurityFinding>();
   for (const { ref, ...f } of out.findings) {
@@ -179,14 +182,17 @@ export async function runSecurityReview(
     const hit = f.source === 'scanner' && ref !== undefined ? byRef.get(ref) : undefined;
     let finding: SecurityFinding;
     if (hit) {
-      finding = { id: scannerFindingId(hit.ref), ...f, source: 'scanner', tool: hit.tool, file: hit.file };
+      finding = {
+        id: scannerFindingId(hit.ref), ...f, source: 'scanner', tool: hit.tool, file: hit.file,
+        preexisting: baselineRefs.has(hit.ref),
+      };
       // The scanner's rating is a floor: the model may raise it, never lower it.
       if (SEVERITY_RANK[hit.severity] < SEVERITY_RANK[finding.severity]) finding.severity = hit.severity;
       if (finding.line === undefined && hit.line !== undefined) finding.line = hit.line;
     } else {
       const { tool: _tool, ...rest } = f;
       const review = { ...rest, source: 'review' as const };
-      finding = { id: securityFindingId(review), ...review };
+      finding = { id: securityFindingId(review), ...review, preexisting: false };
     }
     const prev = byId.get(finding.id);
     if (!prev || SEVERITY_RANK[finding.severity] < SEVERITY_RANK[prev.severity]) byId.set(finding.id, finding);

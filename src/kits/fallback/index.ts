@@ -3,7 +3,7 @@ import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runIn as dockerRunIn } from '../../docker/container.js';
 import { trimOutput } from '../../core/trim.js';
-import { isValidJUnit, mapJUnit, passingTests } from '../../verify/junit.js';
+import { allTests, isValidJUnit, mapJUnit, passingTests } from '../../verify/junit.js';
 import type { BaselineContext, CheckResult, Kit, VerifyContext } from '../types.js';
 
 type RunIn = (name: string, cmd: string) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
@@ -52,7 +52,7 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
     const results: CheckResult[] = ctx.checks.map((c) => ({
       id: c.id, status: 'fail', reason: 'run_failed', tests: [], error,
     }));
-    return { results, runOk: false, failureReport: buildReport(results, outPath) };
+    return { results, runOk: false, failureReport: buildReport(results, outPath), tests: [] };
   }
 
   await runIn(ctx.container, `rm -f ${shq(junit)}`);
@@ -76,7 +76,7 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
     runOk = r.exitCode === 0 || r.exitCode === 124;
     if (!runOk) runFailure = { exitCode: r.exitCode, output: `${r.stdout}\n${r.stderr}`.trim() };
   }
-  return { results, runOk, failureReport: buildReport(results, outPath, { testNote, runFailure }) };
+  return { results, runOk, failureReport: buildReport(results, outPath, { testNote, runFailure }), tests: allTests(xmlText) };
 }
 
 async function baseline(ctx: BaselineContext, deps: { runIn?: RunIn } = {}) {

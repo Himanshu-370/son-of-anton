@@ -54,3 +54,14 @@ describe('passingTests', () => {
     expect(passingTests(xml)).toEqual(['A::works', 'B::works', 'solo']);
   });
 });
+
+describe('allTests', () => {
+  it('labels match passingTests and flag failures and skips', async () => {
+    const { allTests, passingTests } = await import('../../src/verify/junit.js');
+    const xml = '<testsuite><testcase classname="A" name="ok"/><testcase classname="A" name="bad"><failure>x</failure></testcase><testcase name="solo"/><testcase classname="B" name="sk"><skipped/></testcase></testsuite>';
+    expect(allTests(xml)).toEqual([
+      { name: 'A::ok', passed: true }, { name: 'A::bad', passed: false }, { name: 'solo', passed: true }, { name: 'B::sk', passed: false },
+    ]);
+    expect(passingTests(xml)).toEqual(['A::ok', 'solo']);
+  });
+});
