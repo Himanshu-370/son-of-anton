@@ -783,6 +783,26 @@ describe('anton change', () => {
     expect(stopped).toEqual(['anton-app']);
   });
 
+  it('change picks the kit from repo file names; the spec container stays on the fallback image', async () => {
+    const dir = await adopted();
+    const images: string[] = [];
+    const listed: string[] = [];
+    const h = harness({
+      ensureImage: async () => 'fallback-img',
+      startContainer: async (slug, _r, image) => { images.push(image); return `anton-${slug}`; },
+      ensureRepoMap: async (ctx) => ctx.state,
+      listFiles: async (r) => { listed.push(r); return ['package.json', 'next.config.js']; },
+      runSpec: async (ctx) => ({ spec, state: ctx.state }),
+    });
+    expect(await changeCommand('app', 'add a flag', {}, h.deps)).toBe(0);
+    expect(listed).toEqual([dir]);
+    expect(images).toEqual(['fallback-img']);
+    const d = jobDirOf(dir, '1-add-a-flag');
+    expect(JSON.parse(await readFile(join(d, 'spec.json'), 'utf8')).kit).toBe('web');
+    expect(await readFile(join(d, 'spec.md'), 'utf8')).toContain('\nKit: web\n');
+    expect(h.text()).toContain('Kit: web');
+  });
+
   it('change on dirty repo → exit 1 "Commit or stash your changes first", runSpec not called', async () => {
     await adopted(true);
     const runSpec = vi.fn();

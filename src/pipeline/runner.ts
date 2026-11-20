@@ -14,7 +14,7 @@ import {
   startContainer as dockerStartContainer,
   stopContainer as dockerStopContainer,
 } from '../docker/container.js';
-import { fallbackKit } from '../kits/fallback/index.js';
+import { kitByName } from '../kits/index.js';
 import type { Kit } from '../kits/types.js';
 import { runBaseline as defaultRunBaseline } from '../stages/baseline.js';
 import { runBuild as defaultRunBuild } from '../stages/build.js';
@@ -31,10 +31,11 @@ export const ACTIVE_STAGES: readonly JobState['stage'][] = ['plan', 'baseline', 
 
 export type RunnerDeps = {
   acquireLock?: (repo: string) => Promise<() => Promise<void>>;
-  /** Start (or reuse) the job's container; returns its name. */
-  startContainer?: (slug: string, repo: string) => Promise<string>;
+  /** Start (or reuse) the job's container on the kit's image; returns its name. */
+  startContainer?: (slug: string, repo: string, kit: Kit) => Promise<string>;
   stopContainer?: (name: string) => Promise<void>;
   notify?: (title: string, message: string) => Promise<void>;
+  /** Overrides the approved spec's kit (tests). */
   kit?: Kit;
   runPlan?: (ctx: StageCtx, spec: SpecDoc) => Promise<{ plan: Plan; state: JobState }>;
   runBaseline?: (ctx: StageCtx, kit: Kit, plan: Plan) => Promise<JobState>;
@@ -47,14 +48,26 @@ export type RunnerDeps = {
   currentBranch?: (repo: string) => Promise<string>;
 };
 
-/** Reuse a running `anton-<slug>` container, else ensure the kit image and start a fresh one. */
-export async function startOrReuseContainer(slug: string, repo: string, exec: ExecFn = defaultExec): Promise<string> {
+/**
+ * Reuse a running `anton-<slug>` container when it runs the kit's image; otherwise start a fresh one
+ * (startContainer removes the old one first, e.g. a spec-session container on the fallback image).
+ */
+export async function startOrReuseContainer(
+  slug: string,
+  repo: string,
+  kit: Kit,
+  exec: ExecFn = defaultExec,
+  ensure: (kit: Kit, exec: ExecFn) => Promise<string> = ensureImage,
+): Promise<string> {
   // Validate secrets before any docker call or API spend.
   const envFile = await secretsEnvFile(slug);
   const name = containerName(slug);
+  const image = await ensure(kit, exec);
   const r = await exec('docker', ['inspect', '-f', '{{.State.Running}}', name]);
-  if (r.exitCode === 0 && r.stdout.trim() === 'true') return name;
-  const image = await ensureImage(fallbackKit, exec);
+  if (r.exitCode === 0 && r.stdout.trim() === 'true') {
+    const img = await exec('docker', ['inspect', '-f', '{{.Config.Image}}', name]);
+    if (img.exitCode === 0 && img.stdout.trim() === image) return name;
+  }
   return dockerStartContainer(slug, repo, image, exec, { envFile });
 }
 
@@ -119,8 +132,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
     }
   };
   const stopContainer = deps.stopContainer ?? ((n: string) => dockerStopContainer(n));
-  const startContainer = deps.startContainer ?? ((s: string, r: string) => startOrReuseContainer(s, r));
-  const kit = deps.kit ?? fallbackKit;
+  const startContainer = deps.startContainer ?? ((s: string, r: string, k: Kit) => startOrReuseContainer(s, r, k));
   const runPlan = deps.runPlan ?? defaultRunPlan;
   const runBaseline = deps.runBaseline ?? defaultRunBaseline;
   const runBuild = deps.runBuild ?? defaultRunBuild;
@@ -144,12 +156,13 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
     }
     try {
       await assertOnJobBranch(repo, state, deps.currentBranch);
-      startedContainer = true;
-      const container = await startContainer(project, repo);
-      secrets = await loadSecrets(project);
       let spec: SpecDoc | undefined;
       let plan: Plan | undefined;
       const getSpec = async () => (spec ??= SpecDocBaseSchema.parse(await readJson(join(jobDir, 'spec.approved.json'))));
+      const kit = deps.kit ?? kitByName((await getSpec()).kit);
+      startedContainer = true;
+      const container = await startContainer(project, repo, kit);
+      secrets = await loadSecrets(project);
       const getPlan = async () => (plan ??= PlanSchema.parse(await readJson(join(jobDir, 'plan.json'))));
       const ctx = (stage: string): StageCtx => ({ project, repo, container, jobDir, state, stage, secrets });
       let lastVerify: DeliverInput;

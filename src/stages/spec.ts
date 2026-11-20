@@ -15,21 +15,23 @@ export const MAX_QUESTION_ROUNDS = 5;
 
 const AcceptanceCheckSchema: z.ZodType<AcceptanceCheck> = z.object({ id: z.string().regex(/^AC-\d+$/), text: z.string().min(1) });
 
-const specShape = {
+/** What the PM agent writes. The kit is not its choice: the spec session picks it (selectKit). */
+const agentSpecShape = {
   title: z.string().min(1),
   summary: z.string(),
   outOfScope: z.array(z.string()),
-  kit: z.literal('fallback'),
   tech: z.array(z.string()),
   acceptanceChecks: z.array(AcceptanceCheckSchema).min(1),
   /** Outside services the project calls, with the env var names each needs. Default [] keeps older spec.json files parsing. */
   services: z.array(z.object({ name: z.string().min(1), envVars: z.array(z.string().regex(/^[A-Z_][A-Z0-9_]*$/, 'env var names only, never values')) })).default([]),
 };
 
-/** Structure without the id-sequence rule; used when reading human-edited specs. */
-export const SpecDocBaseSchema = z.object(specShape);
+export const KIT_NAMES = ['fallback', 'web'] as const;
 
-export const SpecDocSchema = SpecDocBaseSchema.refine(
+/** Structure without the id-sequence rule; used when reading human-edited specs. Default kit keeps older spec.json files parsing. */
+export const SpecDocBaseSchema = z.object({ ...agentSpecShape, kit: z.enum(KIT_NAMES).default('fallback') });
+
+const AgentSpecSchema = z.object(agentSpecShape).refine(
   (s) => s.acceptanceChecks.every((c, i) => c.id === `AC-${i + 1}`),
   { message: 'acceptance check ids must be sequential AC-1..AC-n' },
 );
@@ -38,7 +40,7 @@ export type SpecDoc = z.infer<typeof SpecDocBaseSchema>;
 const turnShape = {
   kind: z.enum(['questions', 'spec']),
   questions: z.array(z.string().min(1)).optional(),
-  spec: SpecDocSchema.optional(),
+  spec: AgentSpecSchema.optional(),
 };
 const SpecTurnSchema = z.object(turnShape).superRefine((t, ctx) => {
   if (t.kind === 'questions' && !t.questions?.length) {
@@ -48,7 +50,7 @@ const SpecTurnSchema = z.object(turnShape).superRefine((t, ctx) => {
     ctx.addIssue({ code: 'custom', message: 'kind=spec requires spec', path: ['spec'] });
   }
 });
-const SpecOnlyTurnSchema = z.object({ kind: z.literal('spec'), spec: SpecDocSchema });
+const SpecOnlyTurnSchema = z.object({ kind: z.literal('spec'), spec: AgentSpecSchema });
 
 export class SpecNotProduced extends Error {
   constructor(message = 'agent did not produce a spec') {
@@ -103,7 +105,7 @@ export async function runSpec(
     sessionId = res.sessionId;
     baseUsd = res.totalUsd ?? 0;
     const turn = SpecTurnSchema.parse(res.output);
-    if (turn.kind === 'spec') return { spec: turn.spec!, state: res.state };
+    if (turn.kind === 'spec') return { spec: { ...turn.spec!, kit: 'fallback' }, state: res.state };
     if (final) throw new SpecNotProduced();
     const questions = turn.questions!;
     const answers = await ask(questions);
@@ -116,6 +118,8 @@ function renderSpec(s: SpecDoc): string {
   const list = (xs: string[]) => (xs.length ? xs.map((x) => `- ${x}`).join('\n') : '- (none)');
   return [
     `# ${s.title}`,
+    '',
+    `Kit: ${s.kit}`,
     '',
     '## Summary',
     '',
@@ -147,13 +151,19 @@ export async function writeSpec(jobDir: string, spec: SpecDoc, secrets?: Record<
   await writeFileAtomic(join(jobDir, 'spec.md'), md);
 }
 
-/** Title and acceptance checks come from (possibly human-edited) spec.md; the rest from spec.json. */
+/** Title, kit and acceptance checks come from (possibly human-edited) spec.md; the rest from spec.json. */
 export async function readApprovedSpec(jobDir: string): Promise<SpecDoc> {
   const md = await fsp.readFile(join(jobDir, 'spec.md'), 'utf8');
   const base = JSON.parse(await fsp.readFile(join(jobDir, 'spec.json'), 'utf8')) as unknown;
 
   const title = /^# (.+)$/m.exec(md)?.[1]?.trim();
   if (!title) throw new Error('spec.md has no "# " title heading');
+
+  // An older spec.md has no Kit line: spec.json's value (default fallback) stands.
+  const kit = /^Kit:\s*(.*?)\s*$/m.exec(md)?.[1];
+  if (kit !== undefined && !(KIT_NAMES as readonly string[]).includes(kit)) {
+    throw new Error(`Unknown kit "${kit}" in spec.md (use fallback or web)`);
+  }
 
   const checks: { id: string; text: string }[] = [];
   const seen = new Set<string>();
@@ -167,7 +177,7 @@ export async function readApprovedSpec(jobDir: string): Promise<SpecDoc> {
   }
   if (checks.length === 0) throw new Error('spec.md has no acceptance checks (expected lines like "- **AC-1**: ...")');
 
-  const spec = SpecDocBaseSchema.parse({ ...(base as object), title, acceptanceChecks: checks });
+  const spec = SpecDocBaseSchema.parse({ ...(base as object), title, acceptanceChecks: checks, ...(kit ? { kit } : {}) });
   await writeFileAtomic(join(jobDir, 'spec.approved.json'), JSON.stringify(spec, null, 2) + '\n');
   return spec;
 }

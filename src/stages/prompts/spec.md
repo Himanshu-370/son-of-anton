@@ -23,7 +23,6 @@ Fields:
 - `title`: short name of the thing being built.
 - `summary`: 2 to 5 sentences on what it does and for whom.
 - `outOfScope`: explicit list of things that will NOT be built.
-- `kit`: always `"fallback"`.
 - `tech`: list of chosen technologies (language, framework, libraries). Pick boring, widely supported choices that run in a Linux container.
 - `acceptanceChecks`: a list of `{id, text}`. Ids are `AC-1`, `AC-2`, ... sequential with no gaps. At least one.
 - `services`: a list of `{name, envVars}` for EVERY outside service the project calls (payment, email, third-party APIs and so on); `envVars` are the environment variable names it needs, names only, never values. Use `[]` when there are none. Make a stand-in (a fake or local stub of the service) the default for every check; the real service is only an optional extra test.

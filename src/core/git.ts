@@ -135,6 +135,15 @@ export async function repoRoot(path: string): Promise<string | null> {
   }
 }
 
+/** Tracked paths (`git ls-files`), at most `cap` of them; [] when `repo` is not a git repo. Names only, never contents. */
+export async function listFiles(repo: string, cap = 2000): Promise<string[]> {
+  try {
+    return (await git(repo, ['ls-files', '-z'])).split('\0').filter(Boolean).slice(0, cap);
+  } catch {
+    return [];
+  }
+}
+
 /** False for a repo with no commits (unborn HEAD). */
 export async function hasCommits(repo: string): Promise<boolean> {
   try {

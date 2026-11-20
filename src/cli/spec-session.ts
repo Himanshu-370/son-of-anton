@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
 import { loadSecrets, secretsEnvFile } from '../core/secrets.js';
 import { loadState, saveState, transition } from '../core/state.js';
+import { selectKit, type KitName } from '../kits/index.js';
 import { writeSpec } from '../stages/spec.js';
 import type { Resolved } from './deps.js';
 
@@ -30,13 +31,17 @@ export async function runSpecSession(
     d.exit(130);
   });
   let services: { name: string; envVars: string[] }[] = [];
+  let kit: KitName = 'fallback';
   try {
     const state = await loadState(p.jobDir);
     const ctx: StageCtx = { project: p.name, repo: p.repoPath, container, jobDir: p.jobDir, state, stage: 'spec', secrets };
     if (mode === 'change') ctx.state = await d.ensureRepoMap(ctx);
     const r = await d.runSpec(ctx, p.description, d.ask, {}, mode);
     services = r.spec.services ?? [];
-    await writeSpec(p.jobDir, r.spec, secrets);
+    // The kit is picked here, not by the PM agent; the user can change the Kit: line at approval.
+    const files = mode === 'change' ? await d.listFiles(p.repoPath) : [];
+    kit = selectKit(p.description, files).name as KitName;
+    await writeSpec(p.jobDir, { ...r.spec, kit }, secrets);
     await saveState(p.jobDir, transition(r.state, 'awaiting_spec_approval'));
   } catch (e) {
     // `spec` has no paused edge, so the job can't be resumed: point at abandon + a fresh run.
@@ -51,6 +56,7 @@ export async function runSpecSession(
   const spec = join(p.jobDir, 'spec.md');
   d.out('');
   const names = Object.keys(secrets);
+  d.out(`Kit: ${kit} (change the Kit: line in spec.md to fallback or web before approving if that's wrong)`);
   d.out(`Secrets this job will receive: ${names.length ? names.join(', ') : 'none'}`);
   for (const svc of services) {
     const missing = svc.envVars.filter((v) => !(v in secrets));

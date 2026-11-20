@@ -36,8 +36,11 @@ export interface Kit {
   dockerfile: string;
   /** Kit whose image this one builds on (FROM); ensured first. */
   base?: Kit;
-  /** 0..1 confidence that this kit suits the job description. */
-  detect(description: string): number;
+  /**
+   * 0..1 confidence that this kit suits the job. `files` are repo-relative paths (from `git ls-files`,
+   * capped at 2000; [] for a new project). Reads names only, never file contents.
+   */
+  detect(description: string, files: string[]): number;
   verify(ctx: VerifyContext): Promise<VerifyOutcome>;
   /** Runs install and test on the untouched repo; ran is false when install fails or no valid JUnit comes back. */
   baseline(ctx: BaselineContext): Promise<BaselineOutcome>;
