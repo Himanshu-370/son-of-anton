@@ -3,6 +3,7 @@ import { mkdirSync, openSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
+import type { StageCtx } from '../agent/host-runner.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
 import { currentJobId } from '../core/job.js';
 import { jobDir as jobDirOf } from '../core/paths.js';
@@ -29,6 +30,8 @@ export type CliDeps = {
   startContainer?: (slug: string, repo: string, image: string) => Promise<string>;
   stopContainer?: (name: string) => Promise<void>;
   runSpec?: typeof defaultRunSpec;
+  /** Builds or refreshes the repo map before a change's spec (real one lands with the repo-map task). */
+  ensureRepoMap?: (ctx: StageCtx) => Promise<JobState>;
   ask?: (questions: string[]) => Promise<string[]>;
   /** Start the detached background run for a project. */
   spawnRun?: (name: string, jobDir: string) => void;
@@ -91,6 +94,7 @@ export function resolveDeps(d: CliDeps = {}): Resolved {
     startContainer: d.startContainer ?? ((s, r, i) => dockerStartContainer(s, r, i, exec)),
     stopContainer: d.stopContainer ?? ((n) => dockerStopContainer(n, exec)),
     runSpec: d.runSpec ?? defaultRunSpec,
+    ensureRepoMap: d.ensureRepoMap ?? (async (ctx) => ctx.state),
     ask: d.ask ?? readlineAsk,
     spawnRun: d.spawnRun ?? defaultSpawnRun,
     kill: d.kill ?? ((pid, sig) => { process.kill(pid, sig); }),

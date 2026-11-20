@@ -59,6 +59,8 @@ export type SpecDeps = { runAgent?: typeof defaultRunAgent };
 const SPEC_ONLY_JSON_SCHEMA = z.toJSONSchema(SpecOnlyTurnSchema) as Record<string, unknown>;
 const SPEC_TURN_JSON_SCHEMA = z.toJSONSchema(z.object(turnShape)) as Record<string, unknown>;
 
+const CHANGE_NOTE = `This is a change to an existing codebase, so the spec covers the change, not the whole project. Read .anton/repo-map.md and the relevant code first. List what must keep working (existing behaviour the change must not break) as acceptance checks. If the repo has few or no tests, propose characterization acceptance checks that pin the current behaviour before the change.`;
+
 /**
  * Question loop. Returns the spec and the latest job state (cost accounting from runAgent).
  */
@@ -67,6 +69,7 @@ export async function runSpec(
   description: string,
   ask: (questions: string[]) => Promise<string[]>,
   deps: SpecDeps = {},
+  mode: 'new' | 'change' = 'new',
 ): Promise<{ spec: SpecDoc; state: JobState }> {
   const run = deps.runAgent ?? defaultRunAgent;
   const systemPrompt = await loadPrompt('spec.md');
@@ -75,7 +78,8 @@ export async function runSpec(
   let sessionId: string | undefined;
   /** The previous call's cumulative SDK total; a resumed session's total continues from it. */
   let baseUsd = 0;
-  let prompt = `Description of what to build:\n\n${description}`;
+  let prompt = mode === 'change' ? `Description of the change:\n\n${description}` : `Description of what to build:\n\n${description}`;
+  if (mode === 'change') prompt += `\n\n${CHANGE_NOTE}`;
 
   for (let call = 0; call <= MAX_QUESTION_ROUNDS; call++) {
     const final = call === MAX_QUESTION_ROUNDS;

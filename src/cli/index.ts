@@ -7,6 +7,7 @@ import { abandonCommand } from './commands/abandon.js';
 import { acceptRiskCommand } from './commands/accept-risk.js';
 import { adoptCommand } from './commands/adopt.js';
 import { approveCommand } from './commands/approve.js';
+import { changeCommand } from './commands/change.js';
 import { logsCommand } from './commands/logs.js';
 import { newCommand } from './commands/new.js';
 import { rejectCommand } from './commands/reject.js';
@@ -33,6 +34,13 @@ export function buildProgram(deps: CliDeps = {}): Command {
     .argument('<path>', 'the repository root')
     .option('--name <name>', 'project name (default: the folder name)')
     .action(async (p: string, o: { name?: string }) => exit(await adoptCommand(p, o, deps)));
+  program
+    .command('change')
+    .description('Start a change on an adopted project and write its spec interactively')
+    .argument('<project>')
+    .argument('<description>', 'what to change')
+    .option('--budget <usd>', 'spend cap for this job in USD')
+    .action(async (p: string, desc: string, o: { budget?: string }) => exit(await changeCommand(p, desc, o, deps)));
   program
     .command('approve')
     .description('Approve the spec (starts the build) or the final delivery')

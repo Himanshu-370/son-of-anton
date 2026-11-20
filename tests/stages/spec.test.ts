@@ -125,6 +125,16 @@ describe('writeSpec / readApprovedSpec', () => {
     await expect(readApprovedSpec(ctx.jobDir)).rejects.toThrow(/no acceptance checks/);
   });
 
+  it('change mode prompt mentions repo-map.md and characterization checks', async () => {
+    const { fn, reqs } = fakeRun([{ kind: 'spec', spec }]);
+    await runSpec(ctx, 'add login', async () => [], { runAgent: fn }, 'change');
+    expect(reqs[0]!.prompt).toContain('.anton/repo-map.md');
+    expect(reqs[0]!.prompt).toContain('characterization');
+    const n = fakeRun([{ kind: 'spec', spec }]);
+    await runSpec(ctx, 'x', async () => [], { runAgent: n.fn });
+    expect(n.reqs[0]!.prompt).not.toContain('repo-map.md');
+  });
+
   it('PM prompt requires security acceptance checks for logins/user data/payments/network exposure', async () => {
     const p = await loadPrompt('spec.md');
     expect(p).toMatch(/security acceptance checks/i);

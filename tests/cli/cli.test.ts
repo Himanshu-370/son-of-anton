@@ -15,6 +15,7 @@ import { rejectCommand } from '../../src/cli/commands/reject.js';
 import { resumeCommand } from '../../src/cli/commands/resume.js';
 import { statusCommand } from '../../src/cli/commands/status.js';
 import { stopCommand } from '../../src/cli/commands/stop.js';
+import { changeCommand } from '../../src/cli/commands/change.js';
 import { adoptCommand } from '../../src/cli/commands/adopt.js';
 import { abandonCommand } from '../../src/cli/commands/abandon.js';
 import { acceptRiskCommand } from '../../src/cli/commands/accept-risk.js';
@@ -528,5 +529,76 @@ describe('adopt', () => {
     const h = harness();
     expect(await adoptCommand(await repo('dup'), {}, h.deps)).toBe(0);
     expect((await getProject('dup-2')).name).toBe('dup-2');
+  });
+});
+
+describe('anton change', () => {
+  const spec: SpecDoc = {
+    title: 'T', summary: 's', outOfScope: [], kit: 'fallback', tech: [],
+    acceptanceChecks: [{ id: 'AC-1', text: 'keeps working' }],
+  };
+  async function adopted(dirty = false): Promise<string> {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'anton-change-')));
+    const git = (...a: string[]) => execa('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: dir });
+    await git('init', '-q');
+    await writeFile(join(dir, 'a.txt'), 'a');
+    await git('add', '-A');
+    await git('commit', '-qm', 'init');
+    await registerProject('app', dir);
+    if (dirty) await writeFile(join(dir, 'a.txt'), 'changed');
+    return dir;
+  }
+
+  it('change runs spec in change mode on branch anton/2-x', async () => {
+    const dir = await adopted();
+    // an earlier finished job makes the next one number 2
+    await mkdir(jobDirOf(dir, '1-old'), { recursive: true });
+    await saveState(jobDirOf(dir, '1-old'), {
+      jobId: '1-old', project: 'app', stage: 'done', round: 0, maxRounds: 3, budgetUsd: 10, spentUsd: 0,
+      warned80: false, completedTasks: [], updatedAt: '',
+    });
+    const modes: unknown[] = [];
+    const order: string[] = [];
+    const stopped: string[] = [];
+    const h = harness({
+      ensureImage: async () => 'img',
+      startContainer: async (slug) => { order.push('start'); return `anton-${slug}`; },
+      stopContainer: async (n) => { stopped.push(n); },
+      ensureRepoMap: async (ctx) => { order.push('map'); return ctx.state; },
+      runSpec: async (ctx, _d, _a, _deps, mode) => { order.push('spec'); modes.push(mode); return { spec, state: ctx.state }; },
+    });
+    expect(await changeCommand('app', 'x', { budget: '5' }, h.deps)).toBe(0);
+    expect(modes).toEqual(['change']);
+    expect(order).toEqual(['start', 'map', 'spec']);
+    const d = jobDirOf(dir, '2-x');
+    expect(await loadState(d)).toMatchObject({ stage: 'awaiting_spec_approval', branch: 'anton/2-x', budgetUsd: 5 });
+    expect((await execa('git', ['branch', '--show-current'], { cwd: dir })).stdout).toBe('anton/2-x');
+    expect(h.text()).toContain(`Spec ready: ${join(d, 'spec.md')}. Edit the acceptance checks if you like, then run: anton approve app. Work happens on branch anton/2-x.`);
+    expect(stopped).toEqual(['anton-app']);
+  });
+
+  it('change on dirty repo → exit 1 "Commit or stash your changes first", runSpec not called', async () => {
+    await adopted(true);
+    const runSpec = vi.fn();
+    const h = harness({ ensureImage: async () => 'img', startContainer: async () => 'c', runSpec });
+    expect(await changeCommand('app', 'x', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('Commit or stash your changes first');
+    expect(runSpec).not.toHaveBeenCalled();
+  });
+
+  it('change on an unknown project → exit 1', async () => {
+    const h = harness({ ensureImage: async () => 'img' });
+    expect(await changeCommand('nope', 'x', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('nope');
+  });
+
+  it('change spec failure → exit 1 with an anton change abandon hint', async () => {
+    await adopted();
+    const h = harness({
+      ensureImage: async () => 'img', startContainer: async () => 'c',
+      runSpec: async () => { throw new Error('boom'); },
+    });
+    expect(await changeCommand('app', 'x', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('then run anton change again');
   });
 });

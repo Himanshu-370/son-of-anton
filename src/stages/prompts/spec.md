@@ -39,3 +39,7 @@ If the project has logins or accounts, stores user data, handles payments, or ex
 - "A request with malformed or oversized input returns a 4xx error and does not crash the server."
 
 Skip these only for projects with no accounts, no user data, no payments and no network exposure (for example a pure local command-line tool).
+
+## Changing existing code
+
+When the description is a change to an existing codebase (you will be told), the spec covers the change only. `.anton/repo-map.md` describes the repo: read it and the relevant code before writing. Acceptance checks must include what must keep working after the change. If the repo has few or no tests, propose characterization acceptance checks that pin current behaviour.

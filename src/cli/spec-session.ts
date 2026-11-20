@@ -1,0 +1,55 @@
+import { join } from 'node:path';
+import type { StageCtx } from '../agent/host-runner.js';
+import { loadState, saveState, transition } from '../core/state.js';
+import { writeSpec } from '../stages/spec.js';
+import type { Resolved } from './deps.js';
+
+/** Container + spec loop + approval hint, shared by `anton new` and `anton change`. Returns the exit code. */
+export async function runSpecSession(
+  d: Resolved,
+  p: { name: string; repoPath: string; jobDir: string; description: string; image: string; jobId: string },
+  mode: 'new' | 'change',
+): Promise<number> {
+  const container = await d.startContainer(p.name, p.repoPath, p.image);
+  const hint = `anton abandon ${p.name}, then run anton ${mode} again.`;
+  // Ctrl-C during the interactive spec stage would otherwise leave the container running.
+  let interrupted = false;
+  const removeSigint = d.onSigint(async () => {
+    if (interrupted) return d.exit(130); // second Ctrl-C: don't wait for the stop
+    interrupted = true;
+    try {
+      await d.stopContainer(container);
+    } catch {
+      // best effort; abandon also stops it
+    }
+    d.err(`\nInterrupted. Clean up with: ${hint}`);
+    d.exit(130);
+  });
+  try {
+    const state = await loadState(p.jobDir);
+    const ctx: StageCtx = { project: p.name, repo: p.repoPath, container, jobDir: p.jobDir, state, stage: 'spec' };
+    if (mode === 'change') ctx.state = await d.ensureRepoMap(ctx);
+    const r = await d.runSpec(ctx, p.description, d.ask, {}, mode);
+    await writeSpec(p.jobDir, r.spec);
+    await saveState(p.jobDir, transition(r.state, 'awaiting_spec_approval'));
+  } catch (e) {
+    // `spec` has no paused edge, so the job can't be resumed: point at abandon + a fresh run.
+    const msg = e instanceof Error ? e.message : String(e);
+    d.err(`Spec stage failed: ${msg}. Clean up with: ${hint}`);
+    return 1;
+  } finally {
+    removeSigint();
+    await d.stopContainer(container);
+  }
+
+  const spec = join(p.jobDir, 'spec.md');
+  d.out('');
+  if (mode === 'change') {
+    d.out(`Spec ready: ${spec}. Edit the acceptance checks if you like, then run: anton approve ${p.name}. Work happens on branch anton/${p.jobId}.`);
+  } else {
+    d.out(`Spec written: ${spec}`);
+    d.out(`Edit the title and acceptance checks in spec.md if you like, then run: anton approve ${p.name}`);
+    d.out('(Other sections of spec.md are informational; the remaining structured fields come from spec.json.)');
+  }
+  return 0;
+}
