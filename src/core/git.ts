@@ -61,6 +61,17 @@ export async function commitAll(repo: string, message: string): Promise<string |
   return headSha(repo);
 }
 
+/** True when the work tree has no changes (`.anton/` is excluded, so it does not count). */
+export async function isClean(repo: string): Promise<boolean> {
+  await ensureAntonIgnored(repo);
+  return (await git(repo, ['status', '--porcelain'])).trim() === '';
+}
+
+/** Create and switch to a new branch; git's error surfaces if it already exists. */
+export async function createBranch(repo: string, name: string): Promise<void> {
+  await git(repo, ['switch', '-c', name]);
+}
+
 export async function tag(repo: string, name: string): Promise<void> {
   await git(repo, ['tag', name]);
 }

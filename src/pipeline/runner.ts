@@ -25,7 +25,7 @@ import { runVerify as defaultRunVerify, type VerifyDeps, type VerifyResult } fro
 export const containerName = (slug: string) => `anton-${slug}`;
 
 /** Stages the runner drives on its own; anything else is a waiting/paused/terminal stage. */
-export const ACTIVE_STAGES: readonly JobState['stage'][] = ['plan', 'build', 'verify', 'deliver'];
+export const ACTIVE_STAGES: readonly JobState['stage'][] = ['plan', 'baseline', 'build', 'verify', 'deliver'];
 
 export type RunnerDeps = {
   acquireLock?: (repo: string) => Promise<() => Promise<void>>;
@@ -152,6 +152,8 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
             await saveState(jobDir, state);
             break;
           }
+          case 'baseline':
+            throw new Error('baseline stage not implemented yet');
           case 'build':
             state = await runBuild(ctx('build'), await getSpec(), await getPlan());
             break;

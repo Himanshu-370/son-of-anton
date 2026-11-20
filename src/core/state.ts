@@ -6,6 +6,7 @@ export const STAGES = [
   'spec',
   'awaiting_spec_approval',
   'plan',
+  'baseline',
   'build',
   'verify',
   'deliver',
@@ -21,6 +22,8 @@ export type PauseReason = (typeof PAUSE_REASONS)[number];
 
 export const JobStateSchema = z.object({
   jobId: z.string(),
+  kind: z.enum(['new', 'change']).default('new'),
+  branch: z.string().optional(),
   project: z.string(),
   stage: z.enum(STAGES),
   pausedFrom: z.enum(STAGES).optional(),
@@ -58,7 +61,8 @@ export class InvalidTransition extends Error {
 const EDGES: Record<Stage, Stage[]> = {
   spec: ['awaiting_spec_approval', 'abandoned'],
   awaiting_spec_approval: ['plan', 'abandoned'],
-  plan: ['build', 'paused', 'abandoned'],
+  plan: ['baseline', 'build', 'paused', 'abandoned'],
+  baseline: ['build', 'paused', 'abandoned'],
   build: ['verify', 'paused', 'abandoned'],
   verify: ['build', 'deliver', 'paused', 'abandoned'],
   deliver: ['awaiting_final_review', 'paused', 'abandoned'],

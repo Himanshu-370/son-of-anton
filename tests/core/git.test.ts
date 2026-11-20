@@ -3,7 +3,7 @@ import { access, chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
-import { commitAll, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse, changedFilesSince } from '../../src/core/git.js';
+import { commitAll, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse, changedFilesSince, isClean, createBranch } from '../../src/core/git.js';
 
 const git = (repo: string, ...args: string[]) =>
   execa('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo });
@@ -184,5 +184,24 @@ describe('git helper', () => {
     expect(await revParse(repo, 'anton/j1/spec-approved')).toBe(sha);
     await expect(revParse(repo, 'anton/j1/missing')).rejects.toThrow();
     await expect(revParse(repo, '--output=/tmp/x')).rejects.toThrow(/invalid ref/);
+  });
+});
+
+describe('isClean / createBranch', () => {
+  it('isClean ignores .anton/ and flags real changes', async () => {
+    await writeFile(join(repo, 'a.txt'), 'a');
+    await commitAll(repo, 'first');
+    await mkdir(join(repo, '.anton'));
+    await writeFile(join(repo, '.anton', 'x'), 'x');
+    expect(await isClean(repo)).toBe(true);
+    await writeFile(join(repo, 'a.txt'), 'b');
+    expect(await isClean(repo)).toBe(false);
+  });
+  it('createBranch switches, and fails if the branch exists', async () => {
+    await writeFile(join(repo, 'a.txt'), 'a');
+    await commitAll(repo, 'first');
+    await createBranch(repo, 'anton/1-x');
+    expect((await git(repo, 'branch', '--show-current')).stdout).toBe('anton/1-x');
+    await expect(createBranch(repo, 'anton/1-x')).rejects.toThrow(/already exists/);
   });
 });
