@@ -36,6 +36,10 @@ RUN python3 -m venv /opt/venv \
  && ln -s /opt/venv/bin/semgrep /usr/local/bin/semgrep
 ENV PATH="/opt/venv/bin:${PATH}"
 
+# The repo is bind-mounted at /workspace and owned by the host user, not root: without this, git
+# (and gitleaks, which reads history through git) refuses it as a "dubious ownership" repository.
+RUN git config --system --add safe.directory /workspace
+
 # Production deps are installed inside the image from the lockfile, not copied from the host:
 # the Agent SDK pulls a platform-specific Claude Code binary (linux-*) via optionalDependencies.
 WORKDIR /opt/anton
