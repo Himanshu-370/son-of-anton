@@ -342,12 +342,13 @@ describe('runner log redaction', () => {
 describe('startOrReuseContainer', () => {
   beforeEach(async () => { await setup(); });
 
-  function fakeExec(image: string) {
+  function fakeExec(image: string, mounts = '2') {
     const calls: string[][] = [];
     const exec: ExecFn = async (_cmd, args) => {
       calls.push(args);
       if (args[0] === 'inspect' && args[2] === '{{.State.Running}}') return { exitCode: 0, stdout: 'true\n', stderr: '' };
       if (args[0] === 'inspect' && args[2] === '{{.Config.Image}}') return { exitCode: 0, stdout: `${image}\n`, stderr: '' };
+      if (args[0] === 'inspect' && args[2] === '{{index .Config.Labels "anton.mounts"}}') return { exitCode: 0, stdout: `${mounts}\n`, stderr: '' };
       return { exitCode: 0, stdout: '', stderr: '' };
     };
     return { exec, calls };
@@ -367,11 +368,59 @@ describe('startOrReuseContainer', () => {
     expect(f.calls.some((a) => a[0] === 'run' || a[0] === 'rm')).toBe(false);
   });
 
+  it('container without the plugins mount label is replaced', async () => {
+    for (const mounts of ['<no value>', '1', '']) {
+      const f = fakeExec('anton/kit-web:1', mounts);
+      expect(await startOrReuseContainer('p', repo, { ...kit, name: 'web' }, f.exec, ensure)).toBe('anton-p');
+      expect(f.calls).toContainEqual(['rm', '-f', 'anton-p']);
+      expect(f.calls.find((a) => a[0] === 'run')).toContain('anton.mounts=2');
+    }
+  });
+
+  it('stage contexts carry the approved spec\'s kit', async () => {
+    await writeFile(join(dir, 'spec.approved.json'), JSON.stringify({ ...spec, kit: 'web' }));
+    const kits: unknown[] = [];
+    const f = fakes({ runPlan: async (ctx: StageCtx) => { kits.push(ctx.kit); return { plan, state: ctx.state }; } });
+    await runUnattended('p', f.deps);
+    expect(kits).toEqual(['web']);
+  });
+
   it('runner starts the container with the approved spec\'s kit', async () => {
     await writeFile(join(dir, 'spec.approved.json'), JSON.stringify({ ...spec, kit: 'web' }));
     const seen: string[] = [];
     const f = fakes({ kit: undefined, startContainer: async (s, _r, k) => { seen.push(k.name); return `anton-${s}`; } });
     await runUnattended('p', f.deps);
     expect(seen).toEqual(['web']);
+  });
+});
+
+describe('run record', () => {
+  beforeEach(async () => { await setup(); });
+
+  const entry = (name: string, version: string, c: string) => ({
+    name, marketplace: 'acme/mkt', url: 'https://github.com/acme/mkt.git', version,
+    commit: c.repeat(40), sha256: c.repeat(64), dir: `acme-mkt/${name}/${c.repeat(12)}`,
+  });
+
+  it('run-record lists the plugin versions', async () => {
+    const home = process.env.ANTON_HOME!;
+    await writeFile(join(home, 'config.yaml'), 'stages:\n  build: [cave]\nkits:\n  web: [webby]\nroles:\n  code_reviewer: [revy]\n');
+    await writeFile(join(home, 'plugins.lock'), JSON.stringify([entry('cave', '1.0.0', 'a'), entry('webby', '2.0.0', 'b'), entry('unused', '3.0.0', 'c')]));
+    await writeFile(join(dir, 'run-record.json'), JSON.stringify({ other: 1 }));
+    await runUnattended('p', fakes().deps);
+    // fallback kit: the web kit's plugin and a read-only role's plugin are not loadable for this job.
+    expect(JSON.parse(await readFile(join(dir, 'run-record.json'), 'utf8'))).toEqual({
+      other: 1,
+      plugins: [{ name: 'cave', version: '1.0.0', commit: 'a'.repeat(40), sha256: 'a'.repeat(64) }],
+    });
+  });
+
+  it('a listed plugin that is not installed pauses the job before any container starts', async () => {
+    await writeFile(join(process.env.ANTON_HOME!, 'config.yaml'), 'stages:\n  plan: [ghost]\n');
+    const started = vi.fn(async (s: string) => `anton-${s}`);
+    await runUnattended('p', fakes({ startContainer: started }).deps);
+    expect(started).not.toHaveBeenCalled();
+    expect((await loadState(dir)).stage).toBe('paused');
+    expect(await readFile(join(dir, 'logs', 'error.log'), 'utf8')).toContain('anton plugins add ghost@<marketplace>');
   });
 });

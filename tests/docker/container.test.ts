@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
+import { beforeEach, describe, it, expect } from 'vitest';
+import { mkdtemp, mkdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ExecFn } from '../../src/core/exec.js';
@@ -167,17 +167,24 @@ describe('ensureImage with a base kit', () => {
 });
 
 describe('startContainer', () => {
-  it('startContainer passes exactly one -v mount: <repo>:/workspace', async () => {
+  let home: string;
+  beforeEach(async () => {
+    home = await mkdtemp(join(tmpdir(), 'anton-home-'));
+    process.env.ANTON_HOME = home;
+  });
+
+  it('startContainer mounts the repo read-write and the plugin store read-only, with the mounts label', async () => {
     const { exec, calls } = fake();
     const name = await startContainer('s1', '/repo', 'img:1', exec);
     expect(name).toBe('anton-s1');
     const run = calls.find((c) => c.args[0] === 'run')!;
-    expect(run.args.filter((a) => a === '-v')).toHaveLength(1);
-    expect(run.args[run.args.indexOf('-v') + 1]).toBe('/repo:/workspace');
     expect(run.args).toEqual([
-      'run', '-d', '--name', 'anton-s1', '-v', '/repo:/workspace', '-w', '/workspace',
+      'run', '-d', '--name', 'anton-s1', '--label', 'anton.mounts=2',
+      '-v', '/repo:/workspace', '-v', `${home}/plugins:/opt/anton/plugins:ro`, '-w', '/workspace',
       '-e', 'ANTHROPIC_API_KEY', 'img:1', 'sleep', 'infinity',
     ]);
+    // The store folder exists before docker run, so Docker does not create it root-owned.
+    expect((await stat(join(home, 'plugins'))).isDirectory()).toBe(true);
   });
 
   it('startContainer adds --env-file only when given; values never appear in argv', async () => {

@@ -76,7 +76,7 @@ describe('runSpec cost accounting across resumed turns', () => {
     let call = 0;
     const spawn = (): ChildLike => {
       const t = turns[call++]!;
-      const line = JSON.stringify({ type: 'result', ok: true, output: t.output, sessionId: 'sess', totalUsd: t.totalUsd, protocolVersion: 2 }) + '\n';
+      const line = JSON.stringify({ type: 'result', ok: true, output: t.output, sessionId: 'sess', totalUsd: t.totalUsd, protocolVersion: 3 }) + '\n';
       return {
         stdout: (async function* () { yield line; })(),
         kill: () => undefined,
@@ -85,7 +85,7 @@ describe('runSpec cost accounting across resumed turns', () => {
     };
     const run = (async (c: StageCtx, req: AgentRequest) => {
       reqs.push(req);
-      return runAgent(c, req, { spawn, notify: async () => undefined });
+      return runAgent(c, req, { spawn, notify: async () => undefined, plugins: async () => ({ plugins: [], skills: [], mcpServers: {} }) });
     }) as typeof runAgent;
     const r = await runSpec(ctx, 'habit app', async (q) => q.map(() => 'yes'), { runAgent: run });
     expect(r.state.spentUsd).toBeCloseTo(2.0, 10);

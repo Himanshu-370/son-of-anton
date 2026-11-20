@@ -1,10 +1,15 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
 import { defaultExec, type ExecFn } from '../core/exec.js';
+import { antonHome } from '../core/paths.js';
+import { CONTAINER_PLUGINS } from '../plugins/session.js';
+
+/** Value of the `anton.mounts` container label: 2 = workspace + read-only plugin store. */
+export const MOUNTS_VERSION = '2';
 
 export class PreflightError extends Error {
   constructor(message: string) {
@@ -114,18 +119,25 @@ export async function ensureImage(
   return tag;
 }
 
+/** Run a kit container: the repo at /workspace and `<home>/plugins` read-only at /opt/anton/plugins. */
 export async function startContainer(
   slug: string,
   repoPath: string,
   image: string,
   exec: ExecFn = defaultExec,
-  opts: { envFile?: string } = {},
+  opts: { envFile?: string; home?: string } = {},
 ): Promise<string> {
   const name = `anton-${slug}`;
+  // Created first so Docker does not create it (root-owned) for the bind mount.
+  const plugins = join(opts.home ?? antonHome(), 'plugins');
+  await mkdir(plugins, { recursive: true });
   await exec('docker', ['rm', '-f', name]).catch(() => undefined);
   const r = await exec('docker', [
     'run', '-d', '--name', name,
+    // Bumped when the mount set changes; the runner replaces a running container without it.
+    '--label', `anton.mounts=${MOUNTS_VERSION}`,
     '-v', `${repoPath}:/workspace`,
+    '-v', `${plugins}:${CONTAINER_PLUGINS}:ro`,
     '-w', '/workspace',
     '-e', 'ANTHROPIC_API_KEY',
     // Docker reads the file itself, so secret values never appear in argv.

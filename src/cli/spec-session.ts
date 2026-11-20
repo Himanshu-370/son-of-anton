@@ -34,7 +34,7 @@ export async function runSpecSession(
   let kit: KitName = 'fallback';
   try {
     const state = await loadState(p.jobDir);
-    const ctx: StageCtx = { project: p.name, repo: p.repoPath, container, jobDir: p.jobDir, state, stage: 'spec', secrets };
+    const ctx: StageCtx = { project: p.name, repo: p.repoPath, container, jobDir: p.jobDir, state, stage: 'spec', secrets, kit: 'fallback' };
     if (mode === 'change') ctx.state = await d.ensureRepoMap(ctx);
     const r = await d.runSpec(ctx, p.description, d.ask, {}, mode);
     services = r.spec.services ?? [];

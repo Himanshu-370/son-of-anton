@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll } from 'vitest';
+import { describe, it, expect, afterAll, beforeAll } from 'vitest';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -15,6 +15,10 @@ const name = `anton-${slug}`;
 let repo: string | undefined;
 
 describe.skipIf(!process.env.ANTON_E2E)('docker e2e', () => {
+  beforeAll(async () => {
+    // startContainer mounts <home>/plugins; keep it off the real ~/anton.
+    process.env.ANTON_HOME = await mkdtemp(join(tmpdir(), 'anton-e2e-home-'));
+  });
   afterAll(async () => {
     await stopContainer(name);
     if (repo) await rm(repo, { recursive: true, force: true });
@@ -61,10 +65,17 @@ describe.skipIf(!process.env.ANTON_E2E)('docker e2e', () => {
       const st = await runIn(kitName, 'git -C /workspace status --porcelain');
       expect(st.exitCode, st.stderr).toBe(0);
 
-      // The image's entry speaks the current protocol (echoes protocolVersion 2), no API needed.
+      // The plugin store is mounted read-only, and the container carries the mounts label.
+      await writeFile(join(process.env.ANTON_HOME!, 'plugins', 'marker'), 'x');
+      expect((await runIn(kitName, 'cat /opt/anton/plugins/marker')).stdout).toBe('x');
+      expect((await runIn(kitName, 'touch /opt/anton/plugins/new')).exitCode).not.toBe(0);
+      const label = await execa('docker', ['inspect', '-f', '{{index .Config.Labels "anton.mounts"}}', kitName]);
+      expect(label.stdout.trim()).toBe('2');
+
+      // The image's entry speaks the current protocol (echoes protocolVersion 3), no API needed.
       await writeFile(join(kitRepo, 'bad-request.json'), '{"role": 1}');
       const ev = await runIn(kitName, 'node /opt/anton/entry.js /workspace/bad-request.json');
-      expect(JSON.parse(ev.stdout.trim().split('\n').at(-1)!)).toMatchObject({ type: 'error', protocolVersion: 2 });
+      expect(JSON.parse(ev.stdout.trim().split('\n').at(-1)!)).toMatchObject({ type: 'error', protocolVersion: 3 });
     } finally {
       await stopContainer(kitName);
       await rm(kitRepo, { recursive: true, force: true });
