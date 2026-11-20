@@ -113,6 +113,22 @@ describe('runUnattended', () => {
     expect(n.calls.slice(0, 2)).toEqual(['plan', 'build']);
   });
 
+  it('change job on the wrong branch: nothing runs; on the job branch it runs; new jobs skip the check', async () => {
+    await setup({ kind: 'change', branch: 'anton/1-init', fromBranch: 'main' });
+    const f = fakes();
+    await expect(runUnattended('p', { ...f.deps, currentBranch: async () => 'main' })).rejects.toThrow('git switch anton/1-init');
+    expect(f.calls).toEqual([]);
+    expect(f.stopped).toEqual([]);
+    expect(await isRunning(repo)).toEqual({ running: false });
+    const g = fakes();
+    await runUnattended('p', { ...g.deps, currentBranch: async () => 'anton/1-init', runBaseline: async (c: StageCtx) => transition(c.state, 'build', { round: 1 }) });
+    expect(g.calls[0]).toBe('plan');
+    await setup();
+    const h = fakes();
+    await runUnattended('p', { ...h.deps, currentBranch: async () => { throw new Error('should not be asked'); } });
+    expect(h.calls[0]).toBe('plan');
+  });
+
   it('crash during baseline resumes at baseline without re-running plan', async () => {
     await setup({ kind: 'change' });
     let boom = true;

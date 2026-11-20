@@ -2,7 +2,7 @@ import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import { BudgetExceeded, type StageCtx } from '../agent/host-runner.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
-import { currentJobId } from '../core/job.js';
+import { assertOnJobBranch, currentJobId } from '../core/job.js';
 import { acquireLock as defaultAcquireLock } from '../core/lock.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { jobDir as jobDirOf } from '../core/paths.js';
@@ -44,6 +44,7 @@ export type RunnerDeps = {
   verifyDeps?: VerifyDeps;
   runDeliver?: (ctx: StageCtx, spec: SpecDoc, plan: Plan, input: DeliverInput) => Promise<JobState>;
   log?: (line: string) => void;
+  currentBranch?: (repo: string) => Promise<string>;
 };
 
 /** Reuse a running `anton-<slug>` container, else ensure the kit image and start a fresh one. */
@@ -141,6 +142,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       log(`nothing to run (stage: ${state.stage})`);
       return;
     }
+    await assertOnJobBranch(repo, state, deps.currentBranch);
     try {
       startedContainer = true;
       const container = await startContainer(project, repo);

@@ -18,6 +18,7 @@ import { stopCommand } from '../../src/cli/commands/stop.js';
 import { changeCommand } from '../../src/cli/commands/change.js';
 import { adoptCommand } from '../../src/cli/commands/adopt.js';
 import { secretsEditCommand } from '../../src/cli/commands/secrets.js';
+import { secretsPath } from '../../src/core/secrets.js';
 import { runSpecSession } from '../../src/cli/spec-session.js';
 import { defaultOpenEditor, resolveDeps } from '../../src/cli/deps.js';
 import { abandonCommand } from '../../src/cli/commands/abandon.js';
@@ -360,6 +361,66 @@ describe('anton abandon', () => {
       expect(await abandonCommand('p', harness().deps)).toBe(0);
       expect(await cur()).toBe('anton/1-init');
     });
+  });
+});
+
+describe('change job branch guard', () => {
+  async function changeJob(over: Partial<JobState>) {
+    const { repo, dir } = await project('p', { kind: 'change', branch: 'anton/1-init', fromBranch: 'main', ...over });
+    const g = (...a: string[]) => execa('git', a, { cwd: repo });
+    await g('init', '-q', '-b', 'main');
+    await g('config', 'user.email', 't@t'); await g('config', 'user.name', 't');
+    await writeFile(join(repo, '.gitignore'), '.anton/\n');
+    await writeFile(join(repo, 'a.txt'), 'a');
+    await g('add', '-A'); await g('commit', '-qm', 'first');
+    const cur = async () => (await g('branch', '--show-current')).stdout;
+    return { repo, dir, g, cur };
+  }
+  it('approve (spec) on the wrong branch: refuses, commits nothing, spawns nothing', async () => {
+    const { repo, dir, g } = await changeJob({ stage: 'awaiting_spec_approval' });
+    await g('branch', 'anton/1-init'); // exists, but HEAD stays on main
+    await writeFile(join(repo, 'user-edit.txt'), 'mine');
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(1);
+    expect(h.errText()).toContain('git switch anton/1-init');
+    expect((await g('log', '--oneline')).stdout.split('\n')).toHaveLength(1);
+    expect((await loadState(dir)).stage).toBe('awaiting_spec_approval');
+    expect(h.spawned).toEqual([]);
+  });
+  it('approve (final) on the wrong branch: refuses and stays awaiting_final_review', async () => {
+    const { dir } = await changeJob({ stage: 'awaiting_final_review', round: 1 });
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(1);
+    expect(h.errText()).toContain('Switch back to the job branch first');
+    expect((await loadState(dir)).stage).toBe('awaiting_final_review');
+  });
+  it('resume on the wrong branch: refuses and spawns nothing', async () => {
+    await changeJob({ stage: 'paused', pausedFrom: 'build', pauseReason: 'error', round: 1 });
+    const h = harness();
+    expect(await resumeCommand('p', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('git switch anton/1-init');
+    expect(h.spawned).toEqual([]);
+  });
+  it('final accept on the job branch with a clean tree switches back to fromBranch', async () => {
+    const { dir, g, cur } = await changeJob({ stage: 'awaiting_final_review', round: 1 });
+    await g('switch', '-qc', 'anton/1-init');
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(0);
+    expect((await loadState(dir)).stage).toBe('done');
+    expect(await cur()).toBe('main');
+    expect(h.text()).toContain('Switched back to main');
+  });
+  it('final accept with a failing switch prints the hint instead of throwing', async () => {
+    const { cur, g } = await changeJob({ stage: 'awaiting_final_review', round: 1, fromBranch: 'no-such-branch' });
+    await g('switch', '-qc', 'anton/1-init');
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(0);
+    expect(h.text()).toContain('git switch no-such-branch');
+    expect(await cur()).toBe('anton/1-init');
+  });
+  it('new jobs are unaffected by the branch guard', async () => {
+    await project('p', { stage: 'awaiting_final_review', round: 1 });
+    expect(await approveCommand('p', harness().deps)).toBe(0);
   });
 });
 
@@ -716,6 +777,18 @@ describe('anton change', () => {
     expect(await changeCommand('app', 'x', {}, h.deps)).toBe(1);
     expect(h.errText()).toContain('Commit or stash your changes first');
     expect(runSpec).not.toHaveBeenCalled();
+  });
+
+  it('bad secrets file → exit 1 before any branch or job is created', async () => {
+    const dir = await adopted();
+    await mkdir(join(home, 'secrets'), { recursive: true });
+    await writeFile(secretsPath('app'), 'K=FAKE_SECRET_VALUE_123\n');
+    await chmod(secretsPath('app'), 0o644);
+    const h = harness({ ensureImage: async () => 'img', startContainer: async () => 'c' });
+    expect(await changeCommand('app', 'x', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('must be private');
+    expect((await execa('git', ['branch', '--list', 'anton/*'], { cwd: dir })).stdout).toBe('');
+    await expect(access(jobDirOf(dir, '1-x'))).rejects.toThrow();
   });
 
   it('change on an unknown project → exit 1', async () => {

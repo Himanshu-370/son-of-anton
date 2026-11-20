@@ -71,6 +71,19 @@ export class DirtyRepo extends Error {
   }
 }
 
+/**
+ * Change jobs only ever touch their own branch. Throws unless the repo is on it (no-op for new jobs),
+ * so a user who switched branches never gets anton commits or resets on their own branch.
+ */
+export async function assertOnJobBranch(
+  repo: string,
+  state: Pick<JobState, 'kind' | 'branch'>,
+  current: (repo: string) => Promise<string> = currentBranch,
+): Promise<void> {
+  if (state.kind !== 'change' || !state.branch) return;
+  if ((await current(repo)) !== state.branch) throw new Error(`Switch back to the job branch first: git switch ${state.branch}`);
+}
+
 export class NoCommits extends Error {
   constructor() {
     super('Make an initial commit first');

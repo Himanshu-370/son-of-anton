@@ -1,3 +1,4 @@
+import { assertOnJobBranch } from '../../core/job.js';
 import { saveState, transition, unpause } from '../../core/state.js';
 import { ACTIVE_STAGES } from '../../pipeline/runner.js';
 import { guard, parseBudget, resolveDeps, resolveJob, usd, type CliDeps } from '../deps.js';
@@ -17,6 +18,7 @@ export async function resumeCommand(
     const budget = parseBudget(opts.budget);
     const job = await resolveJob(project);
     if ((await refuseIfRunning(d, job.repo, project)) !== 0) return 1;
+    await assertOnJobBranch(job.repo, job.state);
     let state = job.state;
     const paused = state.stage === 'paused';
 

@@ -40,7 +40,7 @@ const scanners = async () => ({ findings: [finding], unavailable: ['semgrep'] })
 describe('runBaseline', () => {
   it('baseline records passing test names and scanner refs', async () => {
     const c = await ctx();
-    const s = await runBaseline(c, kit(0), plan, { runScanners: scanners, resetWorktree: reset });
+    const s = await runBaseline(c, kit(0), plan, { runScanners: scanners, resetWorktree: reset, isClean: async () => true });
     const out = JSON.parse(await readFile(join(c.jobDir, 'evidence', 'baseline.json'), 'utf8'));
     expect(out).toEqual({ passingTests: ['a::adds'], ran: true, scannerRefs: [scannerRef(finding)], unavailable: ['semgrep'] });
     expect(order).toEqual(['reset']);
@@ -49,7 +49,7 @@ describe('runBaseline', () => {
   });
   it('install failure → ran false, still transitions to build', async () => {
     const c = await ctx();
-    const s = await runBaseline(c, kit(1), plan, { runScanners: scanners, resetWorktree: reset });
+    const s = await runBaseline(c, kit(1), plan, { runScanners: scanners, resetWorktree: reset, isClean: async () => true });
     const out = JSON.parse(await readFile(join(c.jobDir, 'evidence', 'baseline.json'), 'utf8'));
     expect(out).toMatchObject({ passingTests: [], ran: false });
     expect(order).toEqual(['reset', 'reset']);
@@ -58,8 +58,31 @@ describe('runBaseline', () => {
   it('resets only after baseline.json is written', async () => {
     const c = await ctx();
     let existed = false;
-    await runBaseline(c, kit(0), plan, { runScanners: scanners, resetWorktree: async () => { existed = !!(await readFile(join(c.jobDir, 'evidence', 'baseline.json'), 'utf8')); } });
+    await runBaseline(c, kit(0), plan, { runScanners: scanners, isClean: async () => true, resetWorktree: async () => { existed = !!(await readFile(join(c.jobDir, 'evidence', 'baseline.json'), 'utf8')); } });
     expect(existed).toBe(true);
+  });
+});
+
+describe('runBaseline guard', () => {
+  it('refuses a tree that was dirty before the kit ran; no kit call, no reset', async () => {
+    const c = await ctx();
+    let kitCalled = false;
+    let resets = 0;
+    const k: Kit = { ...kit(0), baseline: async () => { kitCalled = true; return { passingTests: [], ran: true }; } };
+    await expect(
+      runBaseline(c, k, plan, { runScanners: scanners, isClean: async () => false, resetWorktree: async () => { resets++; } }),
+    ).rejects.toThrow(/uncommitted changes/);
+    expect(kitCalled).toBe(false);
+    expect(resets).toBe(0);
+  });
+  it('resets even when the kit throws', async () => {
+    const c = await ctx();
+    let resets = 0;
+    const k: Kit = { ...kit(0), baseline: async () => { throw new Error('kit boom'); } };
+    await expect(
+      runBaseline(c, k, plan, { runScanners: scanners, isClean: async () => true, resetWorktree: async () => { resets++; } }),
+    ).rejects.toThrow('kit boom');
+    expect(resets).toBe(1);
   });
 });
 
@@ -71,7 +94,7 @@ describe('runBaseline redaction', () => {
     const run = async (_c: string, cmd: string) =>
       cmd.startsWith('cat ') ? { exitCode: 0, stdout: leaky, stderr: '' } : { exitCode: 0, stdout: '', stderr: '' };
     const k: Kit = { ...fallbackKit, baseline: (x) => fallbackKit.baseline(x, { runIn: run }) };
-    await runBaseline(c, k, plan, { runScanners: scanners, resetWorktree: reset });
+    await runBaseline(c, k, plan, { runScanners: scanners, resetWorktree: reset, isClean: async () => true });
     const t = await readFile(join(c.jobDir, 'evidence', 'baseline.json'), 'utf8');
     expect(t).not.toContain('FAKE_SECRET_VALUE_123');
     expect(JSON.parse(t).passingTests).toEqual(['t [REDACTED:TOKEN]']);

@@ -82,6 +82,8 @@ The image also holds the agent code itself (the in-container entry the reviewers
 
 `anton change` needs a clean repo with at least one commit and no active job. It creates the branch `anton/<jobId>` and works only there; your original branch is never touched, and merging is up to you. `REPORT.md` says `Branch to merge: anton/<jobId>` and has a `## Regressions` section.
 
+Don't edit files or switch branches in the repo while a change job runs: the working tree is shared. `approve`, `resume` and the runner refuse to act unless the repo is on the job branch, and the baseline refuses a tree with uncommitted changes. Accepting a change job switches the repo back to the branch you started from when it is clean.
+
 Before the first build, the baseline stage runs the repo's tests and the scanners on the untouched code and saves what passed to `evidence/baseline.json`. Later, a baseline test that no longer passes is a regression and blocks the job like a failing check. Scanner findings that were already in the baseline are shown separately as `Pre-existing` in the report and do not block.
 
 ## Outside services: real or stand-in

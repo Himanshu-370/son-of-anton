@@ -1,3 +1,4 @@
+import { loadSecrets } from '../../core/secrets.js';
 import { createChangeJob } from '../../core/job.js';
 import { guard, parseBudget, resolveDeps, type CliDeps } from '../deps.js';
 import { runSpecSession } from '../spec-session.js';
@@ -10,6 +11,8 @@ export async function changeCommand(project: string, description: string, opts: 
     const budgetUsd = parseBudget(opts.budget);
     const code = await preflightOr2(d);
     if (code !== 0) return code;
+    // A bad secrets file must fail before createChangeJob creates and switches the branch.
+    await loadSecrets(project);
     const image = await d.ensureImage();
     // Throws UnknownProject / JobActive / NoCommits / DirtyRepo; guard prints the message and exits 1.
     const p = await createChangeJob(project, description, budgetUsd === undefined ? {} : { budgetUsd });

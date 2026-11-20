@@ -1,8 +1,10 @@
 import { commitAll, tag } from '../../core/git.js';
+import { assertOnJobBranch } from '../../core/job.js';
+import { loadSecrets } from '../../core/secrets.js';
 import { saveState, transition } from '../../core/state.js';
 import { readApprovedSpec } from '../../stages/spec.js';
 import { guard, resolveDeps, resolveJob, type CliDeps } from '../deps.js';
-import { preflightOr2 } from './shared.js';
+import { preflightOr2, switchBackFromJob } from './shared.js';
 
 /** `anton approve <project>`: approve the spec (start the background run) or the final delivery. */
 export async function approveCommand(project: string, deps: CliDeps = {}): Promise<number> {
@@ -10,11 +12,12 @@ export async function approveCommand(project: string, deps: CliDeps = {}): Promi
   return guard(d, async () => {
     const job = await resolveJob(project);
     const { state } = job;
+    if (state.stage === 'awaiting_spec_approval' || state.stage === 'awaiting_final_review') await assertOnJobBranch(job.repo, state);
     if (state.stage === 'awaiting_spec_approval') {
       const code = await preflightOr2(d);
       if (code !== 0) return code;
       await readApprovedSpec(job.jobDir);
-      await commitAll(job.repo, 'chore: spec approved');
+      await commitAll(job.repo, 'chore: spec approved', await loadSecrets(project));
       await tag(job.repo, `anton/${job.jobId}/spec-approved`);
       await saveState(job.jobDir, transition(state, 'plan'));
       d.spawnRun(project, job.jobDir);
@@ -25,6 +28,7 @@ export async function approveCommand(project: string, deps: CliDeps = {}): Promi
     if (state.stage === 'awaiting_final_review') {
       await saveState(job.jobDir, transition(state, 'done'));
       d.out(`${project}: delivery approved. Done.`);
+      await switchBackFromJob(d, job.repo, state);
       return 0;
     }
     d.err(`Nothing to approve (stage: ${state.stage})`);
