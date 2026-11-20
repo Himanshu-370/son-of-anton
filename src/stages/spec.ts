@@ -23,7 +23,7 @@ const specShape = {
   tech: z.array(z.string()),
   acceptanceChecks: z.array(AcceptanceCheckSchema).min(1),
   /** Outside services the project calls, with the env var names each needs. Default [] keeps older spec.json files parsing. */
-  services: z.array(z.object({ name: z.string().min(1), envVars: z.array(z.string()) })).default([]),
+  services: z.array(z.object({ name: z.string().min(1), envVars: z.array(z.string().regex(/^[A-Z_][A-Z0-9_]*$/, 'env var names only, never values')) })).default([]),
 };
 
 /** Structure without the id-sequence rule; used when reading human-edited specs. */

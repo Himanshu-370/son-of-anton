@@ -1,7 +1,7 @@
 import { XMLParser } from 'fast-xml-parser';
 import type { AcceptanceCheck, CheckResult } from '../kits/types.js';
 
-type Case = { label: string; classname: string; name: string; ok: boolean; error?: string };
+type Case = { label: string; classname: string; name: string; ok: boolean; error?: string; skipped?: boolean };
 
 const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', textNodeName: '#text' });
 
@@ -47,14 +47,16 @@ function parseCases(xml: string): Case[] | null {
       const skipped = tc.skipped;
       let ok = true;
       let error: string | undefined;
+      let wasSkipped = false;
       if (failure !== undefined) {
         ok = false;
         error = text(failure) || 'test failed';
       } else if (skipped !== undefined) {
         ok = false;
         error = 'test skipped';
+        wasSkipped = true;
       }
-      cases.push({ label: name || classname, classname, name, ok, error });
+      cases.push({ label: name || classname, classname, name, ok, error, skipped: wasSkipped });
     }
   }
   return cases;
@@ -74,7 +76,10 @@ export function evidenceFor(tests: { label: string; name?: string; ok: boolean }
 export function mapJUnit(xml: string, checks: AcceptanceCheck[]): CheckResult[] {
   const cases = parseCases(xml) ?? [];
   return checks.map((c) => {
-    const mine = cases.filter((t) => mentions(t.name, c.id) || mentions(t.classname, c.id));
+    // A skipped [real] test is the expected default without secrets: it neither passes nor fails the check.
+    const mine = cases
+      .filter((t) => mentions(t.name, c.id) || mentions(t.classname, c.id))
+      .filter((t) => !(t.skipped && (t.label.includes('[real]') || t.name.includes('[real]'))));
     if (mine.length === 0) return { id: c.id, status: 'fail', reason: 'no_test', tests: [] };
     const tests = mine.map((t) => t.label);
     const bad = mine.find((t) => !t.ok);

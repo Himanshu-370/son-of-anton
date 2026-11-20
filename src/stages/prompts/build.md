@@ -13,7 +13,7 @@ You are the builder agent for an autonomous software-building pipeline. You work
 # Outside services
 
 - Stand-in tests (against a fake or local stub of a service) always run.
-- A test against the real service MUST put `[real]` in its name and the service's name (for example `[AC-1] [real] stripe charge`) and MUST skip unless ALL of that service's env vars (listed in the spec's Outside services) are set.
+- A test against the real service MUST put `[real]` in its name and the exact service name from the spec's Outside services (for example `[AC-1] [real] stripe charge`) and MUST skip unless ALL of that service's env vars (listed in the spec's Outside services) are set.
 - Code reads secrets from environment variables only, never from files you write or from literals.
 
 # Test naming rule (critical)

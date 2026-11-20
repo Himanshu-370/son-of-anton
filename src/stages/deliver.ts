@@ -52,12 +52,19 @@ function checksSection(spec: SpecDoc, results: CheckResult[]): string[] {
   ];
 }
 
-/** A service is real when a passing `[real]` test names it (case-insensitive); the build prompt asks for that. */
+// shortcut: whole-name word-boundary match on test labels; a builder that omits the exact service name shows "stand-in only", upgrade by recording service per test.
+export function serviceIsReal(name: string, realLabels: string[]): boolean {
+  const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(`(^|[^a-z0-9])${esc}([^a-z0-9]|$)`, 'i');
+  return realLabels.some((t) => re.test(t));
+}
+
+/** A service is real when a passing `[real]` test names it (whole name, case-insensitive); the build prompt asks for that. */
 function servicesSection(spec: SpecDoc, results: CheckResult[]): string[] {
   const services = spec.services ?? [];
   if (services.length === 0) return [];
-  const real = results.filter((r) => r.evidence === 'real').flatMap((r) => r.tests).filter((t) => t.includes('[real]')).map((t) => t.toLowerCase());
-  return ['', '## Outside services', '', ...services.map((s) => `- ${cell(s.name)}: ${real.some((t) => t.includes(s.name.toLowerCase())) ? 'real' : 'stand-in only'}`)];
+  const real = results.filter((r) => r.evidence === 'real').flatMap((r) => r.tests).filter((t) => t.includes('[real]'));
+  return ['', '## Outside services', '', ...services.map((s) => `- ${cell(s.name)}: ${serviceIsReal(s.name, real) ? 'real' : 'stand-in only'}`)];
 }
 
 type ReviewSections = {

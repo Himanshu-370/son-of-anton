@@ -74,13 +74,25 @@ describe('allTests', () => {
     </testsuite>`;
     const [r1, r2] = mapJUnit(xml, checks);
     expect(r1!.evidence).toBe('real');
-    expect(r2!.evidence).toBe('stand-in'); // the [real] test was skipped, so not passing
-    expect(r2!.status).toBe('fail');
+    expect(r2!.evidence).toBe('stand-in'); // the skipped [real] test is ignored
+    expect(r2!.status).toBe('pass');
     expect(mapJUnit(xml, [{ id: 'AC-9', text: 'x' }])[0]!.evidence).toBeUndefined();
   });
 
   it('evidenceFor is pure: no tests → undefined', () => {
     expect(evidenceFor([])).toBeUndefined();
     expect(evidenceFor([{ label: 'x [real]', ok: false }])).toBe('stand-in');
+  });
+
+  it('skipped [real] tests are ignored for status; skipped stand-ins still fail', () => {
+    const xml = `<testsuite>
+      <testcase name="AC-1 stub"/><testcase name="AC-1 [real] x"><skipped/></testcase>
+      <testcase name="AC-2 [real] only"><skipped/></testcase>
+      <testcase name="AC-3 stub"><skipped/></testcase>
+    </testsuite>`;
+    const [r1, r2, r3] = mapJUnit(xml, checks);
+    expect(r1).toMatchObject({ status: 'pass', evidence: 'stand-in' });
+    expect(r2).toMatchObject({ status: 'fail', reason: 'no_test', tests: [] });
+    expect(r3).toMatchObject({ status: 'fail', reason: 'failing' });
   });
 });

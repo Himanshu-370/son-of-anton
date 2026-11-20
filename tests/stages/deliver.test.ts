@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import type { StageCtx } from '../../src/agent/host-runner.js';
 import { loadState, type JobState } from '../../src/core/state.js';
 import type { CheckResult } from '../../src/kits/types.js';
-import { runDeliver } from '../../src/stages/deliver.js';
+import { runDeliver, serviceIsReal } from '../../src/stages/deliver.js';
 import type { Plan } from '../../src/stages/plan.js';
 import type { SpecDoc } from '../../src/stages/spec.js';
 
@@ -213,5 +213,12 @@ describe('runDeliver redaction', () => {
     expect(md).toContain('| pass | stand-in | AC-2 mailgun stub |');
     expect(md).toContain('- Stripe: real');
     expect(md).toContain('- Mailgun: stand-in only');
+  });
+
+  it('serviceIsReal matches the whole name on word boundaries', () => {
+    expect(serviceIsReal('API', ['AC-1 [real] rapid send'])).toBe(false);
+    expect(serviceIsReal('S3', ['AC-1 [real] stripe charge'])).toBe(false);
+    expect(serviceIsReal('stripe', ['AC-1 [real] Stripe charge'])).toBe(true);
+    expect(serviceIsReal('Mailgun API', ['AC-1 [real] Mailgun API send'])).toBe(true);
   });
 });

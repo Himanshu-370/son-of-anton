@@ -111,6 +111,14 @@ describe('services', () => {
     expect((await readApprovedSpec(ctx.jobDir)).services).toEqual([]);
   });
 
+  it('rejects value-like strings in envVars', async () => {
+    await writeSpec(ctx.jobDir, withSvc);
+    const j = JSON.parse(await readFile(join(ctx.jobDir, 'spec.json'), 'utf8'));
+    j.services[0].envVars = ['KEY=abc123'];
+    await writeFile(join(ctx.jobDir, 'spec.json'), JSON.stringify(j));
+    await expect(readApprovedSpec(ctx.jobDir)).rejects.toThrow();
+  });
+
   it('PM prompt requires services and stand-in default', async () => {
     const p = await loadPrompt('spec.md');
     expect(p).toMatch(/`services`.*EVERY outside service/);
