@@ -44,9 +44,9 @@ export type SecurityReviewDeps = {
   diffSince?: typeof defaultDiffSince;
 };
 
-/** Host-computed handle for a scanner finding: SCN-<sha8(tool \n ruleId \n file)>. */
-export function scannerRef(f: Pick<ScannerFinding, 'tool' | 'ruleId' | 'file'>): string {
-  return `SCN-${sha8(`${f.tool}\n${f.ruleId}\n${f.file}`)}`;
+/** Host-computed handle for a scanner finding: SCN-<sha8(tool \n ruleId \n file \n key)>. */
+export function scannerRef(f: Pick<ScannerFinding, 'tool' | 'ruleId' | 'file' | 'key'>): string {
+  return `SCN-${sha8(`${f.tool}\n${f.ruleId}\n${f.file}\n${f.key}`)}`;
 }
 
 /**
@@ -180,6 +180,8 @@ export async function runSecurityReview(
     let finding: SecurityFinding;
     if (hit) {
       finding = { id: scannerFindingId(hit.ref), ...f, source: 'scanner', tool: hit.tool, file: hit.file };
+      // The scanner's rating is a floor: the model may raise it, never lower it.
+      if (SEVERITY_RANK[hit.severity] < SEVERITY_RANK[finding.severity]) finding.severity = hit.severity;
       if (finding.line === undefined && hit.line !== undefined) finding.line = hit.line;
     } else {
       const { tool: _tool, ...rest } = f;

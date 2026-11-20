@@ -290,4 +290,13 @@ describe('runVerify', () => {
       accepted: ['SEC-1'],
     });
   });
+
+  it('a corrupt results-verify copy is skipped, not fatal', async () => {
+    const calls: Calls = [];
+    await runVerify(ctx, allPass(), spec, plan, fakeDeps({ security: [sec('SEC-1', 'low')] }));
+    await writeFile(join(ctx.jobDir, 'evidence', 'results-verify-2.json'), '{not json');
+    ctx.state = st({ round: 2 });
+    await runVerify(ctx, allPass(), spec, plan, fakeDeps({}, calls));
+    expect(calls[1]!.prior!.previous).toEqual([{ id: 'SEC-1', title: 'title SEC-1', file: 'src/db.ts' }]);
+  });
 });

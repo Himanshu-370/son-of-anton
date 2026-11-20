@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runScanners } from '../../src/security/scanners.js';
+import { scannerRef } from '../../src/security/review.js';
 
 const fx = (n: string): string =>
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'fixtures', n), 'utf8');
@@ -42,9 +43,35 @@ describe('runScanners', () => {
       severity: 'high',
       file: 'config.js',
       line: 1,
+      key: '0000000000000000000000000000000000000000:config.js:aws-access-token:1',
       message: expect.stringContaining('AWS'),
     });
     expect(f.cmds.some((c) => c.includes('timeout 300') && c.includes('--report-path /tmp/gitleaks.json'))).toBe(true);
+  });
+
+  it('two gitleaks hits of the same rule in the same file get different refs', async () => {
+    const [a] = JSON.parse(fx('gitleaks.json'));
+    const b = { ...a, StartLine: 9, Fingerprint: 'other-fingerprint' };
+    const out = await runScanners('c', { runIn: fake({ gitleaks: r(1), report: r(0, JSON.stringify([a, b])) }).runIn });
+    const refs = out.findings.map(scannerRef);
+    expect(refs).toHaveLength(2);
+    expect(new Set(refs).size).toBe(2);
+  });
+
+  it('the same semgrep match on a shifted line keeps its ref', async () => {
+    const withLine = (line: number): string => {
+      const sg = JSON.parse(fx('semgrep.json'));
+      sg.results = [{ ...sg.results[1], start: { line }, extra: { ...sg.results[1].extra, lines: 'eval(req.body.x)' } }];
+      return JSON.stringify(sg);
+    };
+    const ref = async (line: number) =>
+      scannerRef((await runScanners('c', { runIn: fake({ semgrep: r(0, withLine(line)) }).runIn })).findings.find((x) => x.tool === 'semgrep')!);
+    expect(await ref(3)).toBe(await ref(40));
+  });
+
+  it('osv key is the vulnerability id', async () => {
+    const out = await runScanners('c', { runIn: fake({ osv: r(1, fx('osv.json')) }).runIn });
+    expect(out.findings.find((x) => x.tool === 'osv-scanner')!.key).toBe('GHSA-29mw-wpgm-hmr9');
   });
 
   it('maps osv CVSS 9.8 to critical, 5.0 to medium', async () => {

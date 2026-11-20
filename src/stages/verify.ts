@@ -60,10 +60,13 @@ export async function listVerifyCopies(jobDir: string): Promise<{ n: number; nam
 async function previousSecurity(jobDir: string): Promise<PriorFinding[]> {
   const copies = await listVerifyCopies(jobDir);
   for (const { name } of copies.reverse()) {
-    const rec = JSON.parse(await readFile(join(jobDir, 'evidence', name), 'utf8')) as {
-      security?: { findings?: SecurityFinding[] };
-    };
-    if (rec.security) return (rec.security.findings ?? []).map((f) => ({ id: f.id, title: f.title, file: f.file }));
+    let rec: { security?: { findings?: SecurityFinding[] } };
+    try {
+      rec = JSON.parse(await readFile(join(jobDir, 'evidence', name), 'utf8'));
+    } catch {
+      continue; // corrupt or unreadable copy: fall back to an older one
+    }
+    if (rec?.security) return (rec.security.findings ?? []).map((f) => ({ id: f.id, title: f.title, file: f.file }));
   }
   return [];
 }

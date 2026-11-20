@@ -1,4 +1,5 @@
 import { runIn as defaultRunIn } from '../docker/container.js';
+import { sha8 } from '../review/shared.js';
 
 export type ScannerFinding = {
   tool: 'gitleaks' | 'osv-scanner' | 'semgrep';
@@ -6,6 +7,8 @@ export type ScannerFinding = {
   severity: 'critical' | 'high' | 'medium' | 'low';
   file: string;
   line?: number;
+  /** Occurrence identity independent of line numbers: gitleaks Fingerprint, semgrep hash of matched text, osv vuln id. */
+  key: string;
   message: string;
 };
 
@@ -69,6 +72,7 @@ async function gitleaks(container: string, run: RunIn): Promise<ScannerFinding[]
       severity: 'high' as const,
       file: normalizePath(str(o.File)),
       ...(typeof o.StartLine === 'number' ? { line: o.StartLine } : {}),
+      key: str(o.Fingerprint, `${str(o.File)}:${str(o.RuleID)}:${String(o.StartLine)}`),
       message: str(o.Description, 'Potential secret detected'),
     };
   });
@@ -111,6 +115,7 @@ async function osv(container: string, run: RunIn): Promise<ScannerFinding[]> {
           ruleId: id,
           severity: osvSeverity(typeof grp.max_severity === 'string' ? grp.max_severity : undefined),
           file,
+          key: id,
           message: `${str(info.name)}@${str(info.version)}: ${summary}`,
         });
       }
@@ -134,12 +139,18 @@ async function semgrep(container: string, run: RunIn, notes: string[]): Promise<
     const o = rec(x);
     const extra = rec(o.extra);
     const line = rec(o.start).line;
+    const lines = str(extra.lines);
+    const ruleId = str(o.check_id, 'semgrep');
+    const file = normalizePath(str(o.path));
+    // semgrep hides `lines` without login; fall back to rule+file so the key stays stable.
+    const key = sha8(lines && lines !== 'requires login' ? lines : `${ruleId}\n${file}`);
     return {
       tool: 'semgrep' as const,
-      ruleId: str(o.check_id, 'semgrep'),
+      ruleId,
       severity: SEMGREP_SEVERITY[str(extra.severity)] ?? 'low',
-      file: normalizePath(str(o.path)),
+      file,
       ...(typeof line === 'number' ? { line } : {}),
+      key,
       message: str(extra.message),
     };
   });
