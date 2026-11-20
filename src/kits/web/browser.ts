@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { runAgent as defaultRunAgent, type StageCtx } from '../../agent/host-runner.js';
@@ -28,7 +28,7 @@ export async function startApp(
   await runIn(container, STOP_APP); // an app left over from a crashed round would hold the port
   await runIn(container, `setsid sh -c ${shq(serve)} > ${shq(logPath)} 2>&1 & echo $! > ${PID}`);
   for (let i = 0; i < READY_TRIES; i++) {
-    if ((await runIn(container, `curl -fsS -o /dev/null ${shq(url)}`)).exitCode === 0) return true;
+    if ((await runIn(container, `curl -fsS --max-time 5 -o /dev/null ${shq(url)}`)).exitCode === 0) return true;
     // serve exited at once: no point waiting out the minute.
     if ((await runIn(container, `kill -0 $(cat ${PID})`)).exitCode !== 0) return false;
     await sleep(1000);
@@ -36,17 +36,22 @@ export async function startApp(
   return false;
 }
 
-/** Redacts the app log on disk (the container wrote it) and returns its last `lines` lines. */
-export async function appLogTail(path: string, secrets: Record<string, string> | undefined, lines = 40): Promise<string> {
-  let text = '';
-  try {
-    text = await readFile(path, 'utf8');
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+/**
+ * Last `lines` lines of the app log, read inside the container (a symlink planted at the log path can then
+ * reach only container files, never the host's), redacted. The on-disk copy is redacted too, but only
+ * when it is a regular file: host reads never follow a link the container could have placed.
+ */
+export async function appLogTail(
+  runIn: RunIn, container: string, boxPath: string, hostPath: string, secrets: Record<string, string> | undefined, lines = 40,
+): Promise<string> {
+  const st = await lstat(hostPath).catch(() => undefined);
+  if (st?.isFile()) {
+    const text = await readFile(hostPath, 'utf8');
+    const red = redact(text, secrets);
+    if (red !== text) await writeFileAtomic(hostPath, red);
   }
-  const red = redact(text, secrets);
-  if (red !== text) await writeFileAtomic(path, red);
-  return red.trimEnd().split('\n').slice(-lines).join('\n');
+  const r = await runIn(container, `tail -n ${lines} ${shq(boxPath)}`);
+  return redact(r.exitCode === 0 ? r.stdout.trimEnd() : '(no app.log)', secrets);
 }
 
 const BrowserOutputSchema = z.object({

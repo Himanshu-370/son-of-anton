@@ -66,7 +66,7 @@ async function verify(ctx: VerifyContext, deps: WebVerifyDeps = {}): Promise<Ver
     }
   } finally {
     await runIn(ctx.container, STOP_APP);
-    tail = await appLogTail(join(evidence, 'app.log'), ctx.secrets);
+    tail = await appLogTail(runIn, ctx.container, `${boxEvidence}/app.log`, join(evidence, 'app.log'), ctx.secrets);
   }
 
   if (!ready) {

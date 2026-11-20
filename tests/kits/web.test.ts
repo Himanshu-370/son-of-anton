@@ -1,11 +1,12 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import type { StageCtx } from '../../src/agent/host-runner.js';
 import { porcelainStatus, restorePaths } from '../../src/core/git.js';
 import type { JobState } from '../../src/core/state.js';
+import { STOP_APP } from '../../src/kits/web/browser.js';
 import { webKit } from '../../src/kits/web/index.js';
 
 const checks = [
@@ -21,7 +22,7 @@ const st = (): JobState => ({
   warned80: false, completedTasks: [], updatedAt: 'x',
 });
 
-function setup(opts: { xml?: string; ready?: boolean; alive?: boolean; repo?: string; jobDir?: string } = {}) {
+function setup(opts: { xml?: string; ready?: boolean; alive?: boolean; repo?: string; jobDir?: string; tail?: string } = {}) {
   const repo = opts.repo ?? '/r';
   const jobDir = opts.jobDir ?? mkdtempSync(join(tmpdir(), 'web-job-'));
   const stage: StageCtx = { project: 'p', repo, container: 'c', jobDir, stage: 'verify', state: st() };
@@ -30,6 +31,11 @@ function setup(opts: { xml?: string; ready?: boolean; alive?: boolean; repo?: st
     calls.push(cmd);
     const ok = { exitCode: 0, stdout: '', stderr: '' };
     if (cmd.startsWith('cat ')) return { ...ok, stdout: opts.xml ?? passXml };
+    if (cmd.startsWith('tail -n 40 ')) {
+      if (opts.tail !== undefined) return { ...ok, stdout: opts.tail };
+      const f = join(jobDir, 'evidence', 'app.log');
+      return existsSync(f) ? { ...ok, stdout: readFileSync(f, 'utf8').trimEnd().split('\n').slice(-40).join('\n') } : { ...ok, exitCode: 1 };
+    }
     if (cmd.startsWith('curl ')) return { ...ok, exitCode: opts.ready === false ? 7 : 0 };
     if (cmd.startsWith('kill -0')) return { ...ok, exitCode: opts.alive === false ? 1 : 0 };
     return ok;
@@ -47,7 +53,11 @@ function agent(out: AgentOut | (() => Promise<AgentOut>), seen: unknown[] = []) 
   };
 }
 const noGit = { porcelainStatus: async () => new Map<string, string>(), restorePaths: async () => {}, sleep: async () => {} };
-const killed = (calls: string[]) => calls.some((c) => c.includes('kill -TERM -- -'));
+// The stop that counts is one sent after the app was started (startApp also stops a leftover app first).
+const killed = (calls: string[]) => {
+  const start = calls.findIndex((c) => c.includes('setsid '));
+  return start >= 0 && calls.slice(start + 1).some((c) => c === STOP_APP);
+};
 const allPass: AgentOut = { checks: [{ id: 'AC-1', status: 'pass', note: 'ok' }, { id: 'AC-2', status: 'pass', note: 'ok' }] };
 
 describe('webKit.verify', () => {
@@ -169,6 +179,47 @@ describe('webKit.verify', () => {
       expect(r.browser?.note).toBe('Browser agent changed project files: a.txt, b.txt');
     }
     expect((await porcelainStatus(repo)).size).toBe(0);
+  });
+
+  it('an edit to an already-dirty file is caught and reported', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'web-repo-'));
+    const g = (...a: string[]) => execFileSync('git', a, { cwd: repo });
+    g('init', '-q');
+    writeFileSync(join(repo, 'a.txt'), 'original\n');
+    g('add', '.');
+    g('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'init');
+    writeFileSync(join(repo, 'a.txt'), 'builder edit\n');
+    writeFileSync(join(repo, 'u.txt'), 'untracked v1\n');
+    const jobDir = join(repo, '.anton', 'jobs', 'j1');
+    mkdirSync(jobDir, { recursive: true });
+    const s = setup({ repo, jobDir });
+    const out = await webKit.verify(s.ctx, {
+      runIn: s.runIn,
+      runAgent: agent(async () => {
+        writeFileSync(join(repo, 'a.txt'), 'agent edit\n');
+        writeFileSync(join(repo, 'u.txt'), 'untracked v2\n');
+        return allPass;
+      }),
+      sleep: async () => {},
+    });
+    for (const r of out.results) expect(r.browser?.note).toBe('Browser agent changed project files: a.txt, u.txt');
+    // Reverted to HEAD (the pre-agent builder edit cannot be told apart, so it goes too).
+    expect(readFileSync(join(repo, 'a.txt'), 'utf8')).toBe('original\n');
+    expect(existsSync(join(repo, 'u.txt'))).toBe(false);
+  });
+
+  it('app.log tail comes from the container; a symlinked log is never read on the host', async () => {
+    const s = setup({ ready: false, alive: false, tail: 'container says hi' });
+    const hostFile = join(mkdtempSync(join(tmpdir(), 'host-')), 'private.txt');
+    writeFileSync(hostFile, 'HOST-ONLY-CONTENT\n');
+    mkdirSync(join(s.jobDir, 'evidence'), { recursive: true });
+    symlinkSync(hostFile, join(s.jobDir, 'evidence', 'app.log'));
+    const out = await webKit.verify(s.ctx, { runIn: s.runIn, runAgent: agent(allPass), ...noGit });
+    expect(out.results[0]!.error).toContain('container says hi');
+    expect(out.failureReport).not.toContain('HOST-ONLY-CONTENT');
+    expect(out.results.every((r) => !r.error?.includes('HOST-ONLY-CONTENT'))).toBe(true);
+    expect(readFileSync(hostFile, 'utf8')).toBe('HOST-ONLY-CONTENT\n');
+    expect(s.calls.some((c) => c.startsWith('curl -fsS --max-time 5 '))).toBe(true);
   });
 
   it('app process is killed even when the agent throws', async () => {

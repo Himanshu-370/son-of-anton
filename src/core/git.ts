@@ -1,4 +1,5 @@
-import { readFile, rm } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { lstat, readFile, readlink, rm } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { execa } from 'execa';
 import { writeFileAtomic } from './atomic.js';
@@ -101,8 +102,21 @@ export async function resetWorktree(repo: string): Promise<void> {
   await git(repo, ['clean', '-fd']);
 }
 
+/** sha1 of a work-tree path's content (a symlink's target text, not what it points to); 'missing' if absent. */
+async function contentId(repo: string, p: string): Promise<string> {
+  const abs = resolve(repo, p);
+  const st = await lstat(abs).catch(() => undefined);
+  if (!st) return 'missing';
+  const h = createHash('sha1');
+  if (st.isSymbolicLink()) h.update(`link:${await readlink(abs)}`);
+  else if (st.isFile()) h.update(await readFile(abs));
+  else h.update(`type:${st.mode}`);
+  return h.digest('hex');
+}
+
 /**
- * `git status --porcelain` as path -> XY code, untracked files listed one by one, `.anton/` left out.
+ * `git status --porcelain` as path -> "XY <content sha1>", untracked files listed one by one, `.anton/`
+ * left out. The content id makes a further edit to an already-dirty path show up as a change.
  * A rename/copy entry contributes both its new and its old path.
  */
 export async function porcelainStatus(repo: string): Promise<Map<string, string>> {
@@ -115,7 +129,7 @@ export async function porcelainStatus(repo: string): Promise<Map<string, string>
     const code = e.slice(0, 2);
     const paths = [e.slice(3)];
     if (code[0] === 'R' || code[0] === 'C') paths.push(parts[++i] ?? '');
-    for (const p of paths) if (p && !p.startsWith('.anton/')) out.set(p, code);
+    for (const p of paths) if (p && !p.startsWith('.anton/')) out.set(p, `${code} ${await contentId(repo, p)}`);
   }
   return out;
 }
