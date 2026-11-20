@@ -176,7 +176,7 @@ describe('webKit.verify', () => {
     for (const r of out.results) {
       expect(r.status).toBe('fail');
       expect(r.browser?.status).toBe('fail');
-      expect(r.browser?.note).toBe('Browser agent changed project files: a.txt, b.txt');
+      expect(r.browser?.note).toBe('The browser session (agent or app) changed project files: a.txt, b.txt. If the app writes these at runtime, add them to .gitignore.');
     }
     expect((await porcelainStatus(repo)).size).toBe(0);
   });
@@ -202,7 +202,7 @@ describe('webKit.verify', () => {
       }),
       sleep: async () => {},
     });
-    for (const r of out.results) expect(r.browser?.note).toBe('Browser agent changed project files: a.txt, u.txt');
+    for (const r of out.results) expect(r.browser?.note).toBe('The browser session (agent or app) changed project files: a.txt, u.txt. If the app writes these at runtime, add them to .gitignore.');
     // Reverted to HEAD (the pre-agent builder edit cannot be told apart, so it goes too).
     expect(readFileSync(join(repo, 'a.txt'), 'utf8')).toBe('original\n');
     expect(existsSync(join(repo, 'u.txt'))).toBe(false);

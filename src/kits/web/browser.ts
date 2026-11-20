@@ -103,7 +103,7 @@ export function mergeBrowser(results: CheckResult[], agent: BrowserCheck[], chan
   for (const c of agent) if (!verdicts.has(c.id) || c.status === 'fail') verdicts.set(c.id, c);
   return results.map((r) => {
     const v = changed.length
-      ? { status: 'fail' as const, note: `Browser agent changed project files: ${changed.join(', ')}` }
+      ? { status: 'fail' as const, note: `The browser session (agent or app) changed project files: ${changed.join(', ')}. If the app writes these at runtime, add them to .gitignore.` }
       : verdicts.get(r.id) ?? { status: 'fail' as const, note: 'not exercised' };
     const shot = join(screensDir, `${r.id}.png`);
     const browser: NonNullable<CheckResult['browser']> = { status: v.status, note: v.note, ...(existsSync(shot) ? { screenshot: shot } : {}) };
