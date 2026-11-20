@@ -251,4 +251,11 @@ describe('runVerify', () => {
     expect(saved.review).toEqual({ findings: review });
     expect(saved.security).toEqual({ findings: security, unavailable: ['semgrep'] });
   });
+
+  it('writes evidence/results-round-<round>.json identical to results.json', async () => {
+    await runVerify(ctx, allPass(), spec, plan, fakeDeps({ review: [], security: [sec('SEC-l', 'low')] }));
+    const main = await readFile(join(ctx.jobDir, 'evidence', 'results.json'), 'utf8');
+    const copy = await readFile(join(ctx.jobDir, 'evidence', `results-round-${ctx.state.round}.json`), 'utf8');
+    expect(copy).toBe(main);
+  });
 });

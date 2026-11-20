@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import type { CliDeps } from './deps.js';
 import { abandonCommand } from './commands/abandon.js';
+import { acceptRiskCommand } from './commands/accept-risk.js';
 import { approveCommand } from './commands/approve.js';
 import { logsCommand } from './commands/logs.js';
 import { newCommand } from './commands/new.js';
@@ -43,6 +44,13 @@ export function buildProgram(deps: CliDeps = {}): Command {
     .option('--budget <usd>', 'new total spend cap in USD (required after a budget cap)')
     .option('--accept-as-is', 'deliver what was built even though checks fail')
     .action(async (p: string, o: { budget?: string; acceptAsIs?: boolean }) => exit(await resumeCommand(p, o, deps)));
+  program
+    .command('accept-risk')
+    .description('Accept a security finding so it no longer blocks delivery')
+    .argument('<project>')
+    .argument('<findingId>')
+    .requiredOption('--reason <text>', 'why the risk is acceptable')
+    .action(async (p: string, id: string, o: { reason: string }) => exit(await acceptRiskCommand(p, id, o, deps)));
   program
     .command('abandon')
     .description('Abandon the current job and stop its container')

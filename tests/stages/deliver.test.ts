@@ -85,4 +85,64 @@ describe('runDeliver', () => {
     expect(listTags).toHaveBeenCalledWith('/r', 'anton/j1/delivered-*');
     expect(tag).toHaveBeenCalledWith('/r', 'anton/j1/delivered-2');
   });
+
+  describe('code review and security sections', () => {
+    const sec = (id: string, severity: string, title: string) => ({
+      id, severity, area: 'backend', file: 'src/a.ts', title, detail: 'd', source: 'review',
+    });
+    async function put(name: string, body: unknown) {
+      await mkdir(join(ctx.jobDir, 'evidence'), { recursive: true });
+      await writeFile(join(ctx.jobDir, 'evidence', name), JSON.stringify(body));
+    }
+    const deliver = async () => {
+      await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag: async () => {}, listTags: async () => [] });
+      return readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    };
+
+    it('Code review section lists findings or No findings.', async () => {
+      let md = await deliver();
+      expect(md).toMatch(/## Code review\n\nNo findings\./);
+      await put('results.json', {
+        round: 2, results, runOk: true,
+        review: { findings: [{ id: 'CR-1', severity: 'non_blocking', area: 'frontend', file: 'ui.ts', line: 4, summary: 'Rename x' }] },
+      });
+      md = await deliver();
+      expect(md).toContain('CR-1');
+      expect(md).toContain('non_blocking');
+      expect(md).toContain('frontend');
+      expect(md).toContain('ui.ts');
+      expect(md).toContain('Rename x');
+      expect(md.indexOf('## Acceptance checks')).toBeLessThan(md.indexOf('## Code review'));
+      expect(md.indexOf('## Security')).toBeLessThan(md.indexOf('## How to run'));
+    });
+
+    it('Security section lists accepted risk with reason', async () => {
+      await put('results.json', {
+        round: 2, results, runOk: true,
+        security: { findings: [sec('SEC-aaaaaaaa', 'high', 'Weak hash'), sec('SEC-bbbbbbbb', 'low', 'Verbose errors')], unavailable: [] },
+      });
+      await put('accepted-risks.json', { risks: [{ id: 'SEC-aaaaaaaa', reason: 'internal tool only', acceptedAt: 'x' }] });
+      const md = await deliver();
+      expect(md).toContain('### high');
+      expect(md).toContain('accepted — internal tool only');
+      expect(md.indexOf('### high')).toBeLessThan(md.indexOf('### low'));
+      const low = md.slice(md.indexOf('SEC-bbbbbbbb'));
+      expect(low.split('\n')[0]).not.toContain('accepted');
+    });
+
+    it('finding present in round 1, absent in round 2 is listed as fixed', async () => {
+      await put('results-round-1.json', { round: 1, security: { findings: [sec('SEC-11111111', 'critical', 'SQL injection')], unavailable: [] } });
+      await put('results-round-2.json', { round: 2, security: { findings: [], unavailable: [] } });
+      await put('results.json', { round: 2, results, runOk: true, review: { findings: [] }, security: { findings: [], unavailable: [] } });
+      const md = await deliver();
+      expect(md).toMatch(/fixed[^\n]*SEC-11111111[^\n]*SQL injection|SEC-11111111[^\n]*SQL injection[^\n]*fixed/);
+    });
+
+    it('unavailable scanner noted', async () => {
+      await put('results.json', { round: 1, results, runOk: true, security: { findings: [], unavailable: ['semgrep'] } });
+      const md = await deliver();
+      expect(md).toMatch(/Scanners unavailable[^\n]*semgrep/);
+      expect(md).toContain('No findings.');
+    });
+  });
 });

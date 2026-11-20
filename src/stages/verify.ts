@@ -110,7 +110,10 @@ export async function runVerify(
     ];
   }
 
-  await writeFileAtomic(join(ctx.jobDir, 'evidence', 'results.json'), JSON.stringify(record, null, 2) + '\n');
+  const resultsText = JSON.stringify(record, null, 2) + '\n';
+  await writeFileAtomic(join(ctx.jobDir, 'evidence', 'results.json'), resultsText);
+  // Per-round copy: lets the report tell which security findings were fixed in a later round.
+  await writeFileAtomic(join(ctx.jobDir, 'evidence', `results-round-${s.round}.json`), resultsText);
 
   const passed = failures.length === 0;
   let report = '';

@@ -3,6 +3,9 @@ import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
 import { writeFileAtomic } from '../core/atomic.js';
 import { listTags as defaultListTags, tag as defaultTag } from '../core/git.js';
+import type { ReviewFinding } from '../review/code-review.js';
+import { loadAcceptedRisks } from '../security/risks.js';
+import type { SecurityFinding } from '../security/review.js';
 import { saveState, transition, type JobState } from '../core/state.js';
 import type { CheckResult } from '../kits/types.js';
 import type { Plan } from './plan.js';
@@ -45,6 +48,72 @@ function checksSection(spec: SpecDoc, results: CheckResult[]): string[] {
     '|---|---|---|---|---|',
     ...rows,
   ];
+}
+
+type ReviewSections = {
+  review?: { findings?: ReviewFinding[] };
+  security?: { findings?: SecurityFinding[]; unavailable?: string[] };
+};
+
+async function readSections(path: string): Promise<ReviewSections> {
+  const raw = await readOptional(path);
+  return raw ? (JSON.parse(raw) as ReviewSections) : {};
+}
+
+function codeReviewSection(sections: ReviewSections): string[] {
+  const findings = sections.review?.findings ?? [];
+  const lines = ['## Code review', ''];
+  if (findings.length === 0) return [...lines, 'No findings.'];
+  lines.push('| ID | Severity | Area | File | Summary |', '|---|---|---|---|---|');
+  for (const f of findings) {
+    const file = f.line ? `${f.file}:${f.line}` : f.file;
+    lines.push(`| ${f.id} | ${f.severity} | ${f.area} | ${cell(file)} | ${cell(f.summary)} |`);
+  }
+  return lines;
+}
+
+const SEVERITIES = ['critical', 'high', 'medium', 'low'] as const;
+
+async function securitySection(jobDir: string, sections: ReviewSections): Promise<string[]> {
+  const lines = ['## Security', ''];
+  const sec = sections.security;
+  if (!sec) return [...lines, 'Security review did not run for this delivery.'];
+  const findings = sec.findings ?? [];
+  const accepted = new Map((await loadAcceptedRisks(jobDir)).map((r) => [r.id, r.reason]));
+  const line = (f: SecurityFinding): string => {
+    const where = f.line ? `${f.file}:${f.line}` : f.file;
+    const base = `- ${f.id} (${f.area}, ${where}): ${cell(f.title)}`;
+    const reason = accepted.get(f.id);
+    return reason === undefined ? base : `${base} — accepted — ${cell(reason)}`;
+  };
+  if (findings.length === 0) lines.push('No findings.');
+  for (const sev of SEVERITIES) {
+    const group = findings.filter((f) => f.severity === sev);
+    if (group.length) lines.push(`### ${sev}`, '', ...group.map(line), '');
+  }
+
+  // Fixed: reported in an earlier round's results, gone from the latest.
+  const current = new Set(findings.map((f) => f.id));
+  const fixed = new Map<string, SecurityFinding>();
+  let names: string[] = [];
+  try {
+    names = (await fsp.readdir(join(jobDir, 'evidence'))).filter((n) => /^results-round-\d+\.json$/.test(n));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+  }
+  names.sort((a, b) => Number(a.match(/\d+/)![0]) - Number(b.match(/\d+/)![0]));
+  for (const n of names) {
+    for (const f of (await readSections(join(jobDir, 'evidence', n))).security?.findings ?? []) {
+      if (!current.has(f.id)) fixed.set(f.id, f);
+    }
+  }
+  if (fixed.size) {
+    lines.push('### Fixed in earlier rounds', '', ...[...fixed.values()].map((f) => `- ${f.id} (${f.severity}): ${cell(f.title)} — fixed`), '');
+  }
+  const unavailable = sec.unavailable ?? [];
+  if (unavailable.length) lines.push(`Scanners unavailable: ${unavailable.join(', ')}.`, '');
+  while (lines[lines.length - 1] === '') lines.pop();
+  return lines;
 }
 
 function runSection(plan: Plan): string[] {
@@ -92,6 +161,7 @@ export async function runDeliver(
   }
   const costRaw = await readOptional(join(ctx.jobDir, 'cost.json'));
   const costs = costRaw ? (JSON.parse(costRaw) as Record<string, number>) : undefined;
+  const sections = await readSections(join(ctx.jobDir, 'evidence', 'results.json'));
   const questions = (await readOptional(join(ctx.jobDir, 'questions.md')))?.trim();
 
   const md = [
@@ -102,6 +172,10 @@ export async function runDeliver(
     `Job \`${ctx.state.jobId}\`, delivered after ${ctx.state.round} round(s).`,
     '',
     ...checksSection(spec, outcome.results),
+    '',
+    ...codeReviewSection(sections),
+    '',
+    ...(await securitySection(ctx.jobDir, sections)),
     '',
     ...runSection(plan),
     '',
