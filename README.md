@@ -31,11 +31,15 @@ npm link              # puts `anton` on your PATH
 
 ## How a job flows
 
-spec -> you approve -> plan -> build <-> verify (at most 3 rounds) -> report -> you approve or reject.
+spec -> you approve -> plan -> build <-> verify (checks, then code and security review; at most 3 rounds) -> report -> you approve or reject.
+
+Rejecting returns the job to build with your notes. If a job pauses (round cap, budget cap, no progress, error), use `anton resume`.
+
+Jobs started before Phase 2 (a `plan.json` whose tasks have no `area`) can't continue: run `anton abandon <project>` and start the job again.
 
 ## The team
 
-Each role is a separate agent session with its own model and effort.
+Each agent role is a separate agent session with its own model and effort. QA is code-only in Phase 2: it runs no agent (the model listed is reserved for later). Coach is reserved and not used yet.
 
 | Role | Does | Model | Effort |
 |---|---|---|---|
@@ -44,7 +48,7 @@ Each role is a separate agent session with its own model and effort.
 | Infra developer | Builds the infra tasks | claude-sonnet-5-5 | medium |
 | Backend developer | Builds the backend tasks | claude-sonnet-5-5 | medium |
 | Frontend developer | Builds the frontend tasks | claude-sonnet-5-5 | medium |
-| QA | Attributes failing checks to areas | claude-sonnet-5-5 | medium |
+| QA | Attributes failing checks to areas (code only in Phase 2, no agent) | claude-sonnet-5-5 (reserved) | medium |
 | Code reviewer | Reviews the diff for correctness and design | claude-sonnet-5-5 | medium |
 | Security reviewer | Reviews the diff and the scanner output | claude-sonnet-5-5 | high |
 | Coach | Reserved, not used yet | claude-haiku-5-5 | low |
@@ -61,8 +65,9 @@ Verify first runs the acceptance checks and the smoke run. If any of them fail, 
 
 - Code review: a `blocking` finding sends the job back to build. `non_blocking` findings are only listed in the report.
 - Security: `critical` and `high` findings block. `medium` and `low` are only listed.
-- `anton accept-risk <project> <findingId> --reason "<text>"` marks a security finding (an id like `SEC-1a2b3c4d`) as an accepted risk, with your reason. Accepted findings no longer block and the report shows them as accepted with the reason. Use it when a job pauses at the round cap or with no progress because of a security finding you decide to live with, then `anton resume <project> --accept-as-is`. If you accept a risk after the report was written, it shows up after the next delivery.
-- Finding ids are stable between rounds, so a risk you accept stays accepted.
+- `anton accept-risk <project> <findingId> --reason "<text>"` marks a security finding (an id like `SEC-1a2b3c4d`) as an accepted risk, with your reason. Accepted findings no longer block and the report shows them as accepted with the reason. Use it when a job pauses at the round cap or with no progress because of a security finding you decide to live with. The normal next step is `anton resume <project>`: it re-runs verify, the reviewers run again, and the accepted finding no longer blocks. `anton resume <project> --accept-as-is` instead delivers right away and ships any other blockers (failing checks, blocking code-review findings, other security findings) along with it. If you accept a risk after the report was written, it shows up after the next delivery.
+- Scanner finding ids are computed from the scanner, rule and file, so they stay the same between rounds and an accepted scanner finding stays accepted. Ids of findings the security reviewer raises itself come from the file and the finding's title; the reviewer is shown the previous titles and told to reuse them, but if it rewords a title the finding gets a new id and has to be accepted again.
+- gitleaks scans the whole git history, so a secret that was committed keeps being reported after the code is fixed. The fix is to rotate the secret, then accept the finding with `accept-risk`.
 
 ## Security scanners
 
@@ -70,12 +75,10 @@ The scanners (gitleaks, osv-scanner and semgrep) are installed in the Docker ima
 
 The image also holds the agent code itself (the in-container entry the reviewers and builders run through). After pulling an update, re-run `npm run build:image`: a stale image means old agent code, not just missing scanners, and old agent code would ignore the reviewers' read-only tool restriction. Anton fails closed on this: it refuses to start with `Kit image files are out of date — run: npm run build:image` when the staged files differ from `dist/agent/`, and stops an agent call with `agent entry is out of date (protocol …)` when the image's entry does not speak the current protocol.
 
-Rejecting returns the job to build with your notes. If a job pauses (round cap, budget cap, no progress, error), use `anton resume`.
-
 ## Where things live
 
 - Projects: `~/anton/projects/<name>/` (override the root with `ANTON_HOME`), each a git repo with one commit per plan task.
-- Job files: `<repo>/.anton/jobs/<id>/` holding `state.json`, `spec.md`, `plan.json`, `logs/`, `evidence/results.json` and `REPORT.md`.
+- Job files: `<repo>/.anton/jobs/<id>/` holding `state.json`, `spec.md`, `plan.json`, `logs/`, `evidence/results.json` (plus one `results-verify-<n>.json` copy per verify) and `REPORT.md`.
 
 ## Budgets
 

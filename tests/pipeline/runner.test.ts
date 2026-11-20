@@ -153,6 +153,24 @@ describe('runUnattended', () => {
       expect(await msg('no_progress')).toContain('anton accept-risk');
     });
 
+    it('security pause guidance: accept-risk then plain resume re-verifies; --accept-as-is delivers now', async () => {
+      await setup({ stage: 'verify', round: 3 });
+      await put(JSON.stringify([{ area: 'backend', kind: 'security', id: 'SEC-1', text: 't' }]));
+      const m = await msg('no_progress');
+      expect(m).toContain('then: anton resume p (re-verifies; the reviewers run again)');
+      expect(m).toContain('anton resume p --accept-as-is delivers now and ships any other blockers too');
+      expect(m).not.toContain('Other blockers remain');
+    });
+
+    it('security pause with other blockers says accepting risks alone will not pass', async () => {
+      await setup({ stage: 'verify', round: 3 });
+      await put(JSON.stringify([
+        { area: 'backend', kind: 'security', id: 'SEC-1', text: 't' },
+        { area: 'frontend', kind: 'review', id: 'CR-1', text: 't' },
+      ]));
+      expect(await msg('round_cap')).toContain('Other blockers remain, so accepting risks alone will not pass verify.');
+    });
+
     it('does not mention accept-risk without security failures, or when failures.json is missing or corrupt', async () => {
       await setup({ stage: 'verify', round: 3 });
       await put(JSON.stringify([{ area: 'backend', kind: 'check', id: 'AC-1', text: 't' }]));

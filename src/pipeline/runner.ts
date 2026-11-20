@@ -56,18 +56,28 @@ async function readJson(path: string): Promise<unknown> {
   return JSON.parse(await fsp.readFile(path, 'utf8'));
 }
 
-/** True when the latest failures.json holds a security item. Missing or corrupt means no. */
-async function hasSecurityFailures(jobDir: string): Promise<boolean> {
+/** Which kinds of blockers the latest failures.json holds. Missing or corrupt means none. */
+async function failureKinds(jobDir: string): Promise<{ security: boolean; other: boolean }> {
   try {
     const items: unknown = JSON.parse(await fsp.readFile(failuresPath(jobDir), 'utf8'));
-    return Array.isArray(items) && items.some((i) => (i as { kind?: unknown } | null)?.kind === 'security');
+    if (!Array.isArray(items)) return { security: false, other: false };
+    const kinds = items.map((i) => (i as { kind?: unknown } | null)?.kind);
+    return { security: kinds.includes('security'), other: kinds.some((k) => k !== 'security') };
   } catch {
-    return false;
+    return { security: false, other: false };
   }
 }
 
-function pauseMessage(project: string, reason: PauseReason | undefined, security = false): string {
-  const risk = security ? ` Security findings can be accepted with: anton accept-risk ${project} <id> --reason "<text>".` : '';
+function pauseMessage(
+  project: string,
+  reason: PauseReason | undefined,
+  kinds: { security: boolean; other: boolean } = { security: false, other: false },
+): string {
+  const risk = kinds.security
+    ? ` Security findings can be accepted with: anton accept-risk ${project} <id> --reason "<text>", then: anton resume ${project} (re-verifies; the reviewers run again).` +
+      ` Or: anton resume ${project} --accept-as-is delivers now and ships any other blockers too.` +
+      (kinds.other ? ' Other blockers remain, so accepting risks alone will not pass verify.' : '')
+    : '';
   switch (reason) {
     case 'budget_cap':
       return `${project}: paused, budget cap reached. Resume with: anton resume ${project} --budget <usd>`;
@@ -157,7 +167,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
         }
       }
       log(`stopped at stage: ${state.stage}`);
-      if (state.stage === 'paused') final = pauseMessage(project, state.pauseReason, await hasSecurityFailures(jobDir));
+      if (state.stage === 'paused') final = pauseMessage(project, state.pauseReason, await failureKinds(jobDir));
       else if (state.stage === 'awaiting_final_review') {
         final = `${project}: ready for review. See REPORT.md, then: anton approve ${project}`;
       }
