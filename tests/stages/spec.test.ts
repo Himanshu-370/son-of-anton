@@ -166,6 +166,19 @@ describe('writeSpec / readApprovedSpec', () => {
     expect((await readApprovedSpec(ctx.jobDir)).kit).toBe('fallback');
   });
 
+  it('only the Kit line before the first ## heading counts', async () => {
+    await writeSpec(ctx.jobDir, { ...spec, kit: 'web' });
+    const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');
+    await writeFile(join(ctx.jobDir, 'spec.md'), `${md}\n## Notes\n\nKit: rails\n`);
+    expect((await readApprovedSpec(ctx.jobDir)).kit).toBe('web');
+    // No header Kit line: a body one is ignored too (spec.json's value stands).
+    await writeFile(join(ctx.jobDir, 'spec.md'), `${md.replace('Kit: web\n\n', '')}\n## Notes\n\nKit: rails\n`);
+    expect((await readApprovedSpec(ctx.jobDir)).kit).toBe('web');
+    // `\s*` must not cross a newline: "Kit:" followed by a blank line is an empty value, not the next line.
+    await writeFile(join(ctx.jobDir, 'spec.md'), md.replace('Kit: web', 'Kit:'));
+    await expect(readApprovedSpec(ctx.jobDir)).rejects.toThrow('Unknown kit ""');
+  });
+
   it('unknown kit in spec.md throws', async () => {
     await writeSpec(ctx.jobDir, spec);
     const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');
