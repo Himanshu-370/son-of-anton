@@ -99,9 +99,19 @@ describe('runDeliver', () => {
       return readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
     };
 
-    it('Code review section lists findings or No findings.', async () => {
-      let md = await deliver();
+    it('Code review section says it did not run when results.json has no review section', async () => {
+      const md = await deliver();
+      expect(md).toMatch(/## Code review\n\nCode review did not run for this delivery\./);
+    });
+
+    it('Code review section says No findings. when the review ran and found nothing', async () => {
+      await put('results.json', { round: 1, results, runOk: true, review: { findings: [] } });
+      const md = await deliver();
       expect(md).toMatch(/## Code review\n\nNo findings\./);
+    });
+
+    it('Code review section lists findings', async () => {
+      let md: string;
       await put('results.json', {
         round: 2, results, runOk: true,
         review: { findings: [{ id: 'CR-1', severity: 'non_blocking', area: 'frontend', file: 'ui.ts', line: 4, summary: 'Rename x' }] },

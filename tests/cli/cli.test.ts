@@ -355,6 +355,14 @@ describe('anton accept-risk', () => {
     await withResults('awaiting_final_review');
     const h = harness();
     expect(await acceptRiskCommand('p', 'SEC-abc12345', { reason: 'ok' }, h.deps)).toBe(0);
+    expect(h.text()).toContain('Note: REPORT.md was written before this acceptance; it will show it after the next delivery.');
+  });
+
+  it('does not print the REPORT.md note when paused', async () => {
+    await withResults('paused');
+    const h = harness();
+    expect(await acceptRiskCommand('p', 'SEC-abc12345', { reason: 'ok' }, h.deps)).toBe(0);
+    expect(h.text()).not.toContain('REPORT.md was written');
   });
 });
 

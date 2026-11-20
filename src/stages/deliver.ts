@@ -61,8 +61,9 @@ async function readSections(path: string): Promise<ReviewSections> {
 }
 
 function codeReviewSection(sections: ReviewSections): string[] {
-  const findings = sections.review?.findings ?? [];
   const lines = ['## Code review', ''];
+  if (!sections.review) return [...lines, 'Code review did not run for this delivery.'];
+  const findings = sections.review.findings ?? [];
   if (findings.length === 0) return [...lines, 'No findings.'];
   lines.push('| ID | Severity | Area | File | Summary |', '|---|---|---|---|---|');
   for (const f of findings) {

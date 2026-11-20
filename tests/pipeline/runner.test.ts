@@ -6,7 +6,7 @@ import { BudgetExceeded, type StageCtx } from '../../src/agent/host-runner.js';
 import { isRunning } from '../../src/core/lock.js';
 import { jobDir as jobDirOf } from '../../src/core/paths.js';
 import { registerProject } from '../../src/core/registry.js';
-import { loadState, saveState, transition, type JobState } from '../../src/core/state.js';
+import { loadState, pause, saveState, transition, type JobState } from '../../src/core/state.js';
 import type { CheckResult, Kit } from '../../src/kits/types.js';
 import { runUnattended, type RunnerDeps } from '../../src/pipeline/runner.js';
 import type { Plan } from '../../src/stages/plan.js';
@@ -107,6 +107,62 @@ describe('runUnattended', () => {
       await runUnattended('p', f.deps);
       expect(order).toEqual(['stop', 'release', 'notify']);
     }
+  });
+
+  it('verify deps are forwarded', async () => {
+    const verifyDeps = { headSha: async () => 'abc' };
+    const seen: unknown[] = [];
+    const f = fakes({
+      verifyDeps,
+      runVerify: async (ctx: StageCtx, _k, _s, _p, d): Promise<VerifyResult> => {
+        seen.push(d);
+        const s = transition(ctx.state, 'deliver');
+        await saveState(ctx.jobDir, s);
+        return { state: s, passed: true, results: [f.pass], runOk: true, failureReport: '' };
+      },
+    });
+    await runUnattended('p', f.deps);
+    expect(seen).toEqual([verifyDeps]);
+  });
+
+  describe('pause message', () => {
+    const pausing = (reason: 'round_cap' | 'no_progress') => ({
+      runVerify: async (ctx: StageCtx): Promise<VerifyResult> => {
+        const s = pause(ctx.state, reason);
+        await saveState(ctx.jobDir, s);
+        return { state: s, passed: false, results: [], runOk: true, failureReport: 'x' };
+      },
+    });
+    const put = async (body: string) => {
+      await writeFile(join(dir, 'plan.json'), JSON.stringify(plan));
+      await mkdir(join(dir, 'evidence'), { recursive: true });
+      await writeFile(join(dir, 'evidence', 'failures.json'), body);
+    };
+    const msg = async (reason: 'round_cap' | 'no_progress') => {
+      const f = fakes(pausing(reason));
+      await runUnattended('p', f.deps);
+      return String(f.notify.mock.calls[0]![1]);
+    };
+
+    it('round_cap pause with security failures mentions accept-risk', async () => {
+      await setup({ stage: 'verify', round: 3 });
+      await put(JSON.stringify([{ area: 'backend', kind: 'security', id: 'SEC-1', text: 't' }]));
+      expect(await msg('round_cap')).toContain('anton accept-risk');
+      await setup({ stage: 'verify', round: 3 });
+      await put(JSON.stringify([{ area: 'backend', kind: 'security', id: 'SEC-1', text: 't' }]));
+      expect(await msg('no_progress')).toContain('anton accept-risk');
+    });
+
+    it('does not mention accept-risk without security failures, or when failures.json is missing or corrupt', async () => {
+      await setup({ stage: 'verify', round: 3 });
+      await put(JSON.stringify([{ area: 'backend', kind: 'check', id: 'AC-1', text: 't' }]));
+      expect(await msg('round_cap')).not.toContain('accept-risk');
+      await setup({ stage: 'verify', round: 3 });
+      expect(await msg('round_cap')).not.toContain('accept-risk');
+      await setup({ stage: 'verify', round: 3 });
+      await put('{not json');
+      expect(await msg('no_progress')).not.toContain('accept-risk');
+    });
   });
 
   it('plan → build sets round 1', async () => {

@@ -33,6 +33,9 @@ export async function acceptRiskCommand(
     if (!finding) throw new UsageError(`Unknown security finding ${findingId}`);
     await acceptRisk(job.jobDir, finding.id, reason);
     d.out(`${finding.id}: ${finding.title} — accepted`);
+    if (stage === 'awaiting_final_review') {
+      d.out('Note: REPORT.md was written before this acceptance; it will show it after the next delivery.');
+    }
     return 0;
   });
 }

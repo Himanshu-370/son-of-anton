@@ -82,6 +82,9 @@ describe.skipIf(!process.env.ANTON_E2E || !process.env.ANTHROPIC_API_KEY)('new p
     expect(state.spentUsd).toBeLessThanOrEqual(3);
 
     expect(await exists(join(jobDir, 'REPORT.md'))).toBe(true);
+    const report = await readFile(join(jobDir, 'REPORT.md'), 'utf8');
+    expect(report).toContain('## Code review');
+    expect(report).toContain('## Security');
     const evidence = JSON.parse(await readFile(join(jobDir, 'evidence', 'results.json'), 'utf8'));
     expect(evidence.results.length).toBeGreaterThan(0);
     for (const r of evidence.results) expect(r.status).toBe('pass');
