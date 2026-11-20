@@ -55,6 +55,9 @@
  *   filesystem settings are loaded). Builder sessions (no tools) are unchanged.
  * - SDK budget stop: an `error_max_budget_usd` result becomes an error event with `code: 'budget'`,
  *   which the host maps to BudgetExceeded (job pauses as budget_cap) rather than a generic error.
+ * - Protocol version: result/error events carry `protocolVersion: PROTOCOL_VERSION`; the host refuses
+ *   a terminal event without it (an image built from older entry code), and this entry refuses a
+ *   request stamped with a different version.
  * - Structured output is native, and we also validate the returned value against req.outputSchema
  *   with zod's `z.fromJSONSchema`, falling back to an "is a JSON object" check if zod can't convert
  *   the schema. If `structured_output` is absent, the final text is parsed as JSON.
@@ -64,7 +67,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { estimateUsd } from './pricing.js';
-import { AgentRequestSchema, type AgentEvent, type AgentRequest } from './protocol.js';
+import { AgentRequestSchema, PROTOCOL_VERSION, type AgentEvent, type AgentRequest } from './protocol.js';
 
 export type EntryDeps = {
   query?: typeof import('@anthropic-ai/claude-agent-sdk').query;
@@ -148,13 +151,19 @@ function terminalFromResult(req: AgentRequest, msg: Extract<SDKMessage, { type: 
 
 export async function main(requestPath: string, deps: EntryDeps = {}): Promise<void> {
   const write = deps.write ?? ((line: string) => void process.stdout.write(line));
-  const emit = (e: AgentEvent) => write(JSON.stringify(e) + '\n');
+  // Terminal events echo the protocol version so the host can detect a stale image.
+  const emit = (e: AgentEvent) =>
+    write(JSON.stringify(e.type === 'result' || e.type === 'error' ? { ...e, protocolVersion: PROTOCOL_VERSION } : e) + '\n');
 
   let req: AgentRequest;
   try {
     req = AgentRequestSchema.parse(JSON.parse(await readFile(requestPath, 'utf8')));
   } catch (e) {
     emit({ type: 'error', message: `invalid request: ${errMessage(e)}`, totalUsd: 0 });
+    return;
+  }
+  if (req.protocolVersion !== undefined && req.protocolVersion !== PROTOCOL_VERSION) {
+    emit({ type: 'error', message: `request protocol ${req.protocolVersion} does not match entry protocol ${PROTOCOL_VERSION}`, totalUsd: 0 });
     return;
   }
 
@@ -214,7 +223,7 @@ async function isEntryScript(): Promise<boolean> {
 if (await isEntryScript()) {
   const requestPath = process.argv[2];
   if (!requestPath) {
-    process.stdout.write(JSON.stringify({ type: 'error', message: 'usage: entry.js <requestPath>', totalUsd: 0 }) + '\n');
+    process.stdout.write(JSON.stringify({ type: 'error', message: 'usage: entry.js <requestPath>', totalUsd: 0, protocolVersion: PROTOCOL_VERSION }) + '\n');
     process.exitCode = 2;
   } else {
     await main(requestPath);

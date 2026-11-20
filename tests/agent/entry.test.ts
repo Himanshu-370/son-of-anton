@@ -67,7 +67,7 @@ describe('entry main', () => {
     expect(c[1]).toBeCloseTo(0.023, 10);
     const firstCost = events.findIndex((e) => e.type === 'cost');
     expect(firstCost).toBeLessThan(events.findIndex((e) => e.type === 'log' && e.text === 'step 2'));
-    expect(events.at(-1)).toEqual({ type: 'result', ok: true, output: 'done', sessionId: 'sess-1', totalUsd: 0.42 });
+    expect(events.at(-1)).toEqual({ type: 'result', ok: true, output: 'done', sessionId: 'sess-1', totalUsd: 0.42, protocolVersion: 2 });
   });
 
   it('emits no cost event for the result message, even when its total exceeds the estimates (R4)', async () => {
@@ -186,7 +186,7 @@ describe('entry main', () => {
     const { events } = await run(baseReq, async function* () {
       yield { type: 'result', subtype: 'error_max_turns', is_error: true, session_id: 's', total_cost_usd: 0.1, errors: [] };
     });
-    expect(events.at(-1)).toEqual({ type: 'error', message: 'error_max_turns', totalUsd: 0.1 });
+    expect(events.at(-1)).toEqual({ type: 'error', message: 'error_max_turns', totalUsd: 0.1, protocolVersion: 2 });
   });
 
   it('uncaught SDK exception becomes an error event with totalUsd so far', async () => {
@@ -195,7 +195,7 @@ describe('entry main', () => {
       yield assistant('step', 'm1', { input_tokens: 1000, output_tokens: 500 });
       throw new Error('kaboom');
     });
-    expect(events.at(-1)).toEqual({ type: 'error', message: 'kaboom', totalUsd: expect.closeTo(0.014, 10) });
+    expect(events.at(-1)).toEqual({ type: 'error', message: 'kaboom', totalUsd: expect.closeTo(0.014, 10), protocolVersion: 2 });
 
     // A crash result (error_during_execution) carries the total seen; a later throw adds nothing.
     const { events: ev2 } = await run(baseReq, async function* () {
@@ -203,7 +203,7 @@ describe('entry main', () => {
       throw new Error('process exited');
     });
     expect(ev2.filter((e) => e.type === 'error' || e.type === 'result')).toEqual([
-      { type: 'error', message: 'error_during_execution: socket hang up', totalUsd: 0.09 },
+      { type: 'error', message: 'error_during_execution: socket hang up', totalUsd: 0.09, protocolVersion: 2 },
     ]);
   });
 
@@ -211,7 +211,7 @@ describe('entry main', () => {
     const { events } = await run(baseReq, async function* () {
       yield success(0, { is_error: true, result: 'Not logged in · Please run /login' });
     });
-    expect(events.at(-1)).toEqual({ type: 'error', message: 'Not logged in · Please run /login', totalUsd: 0 });
+    expect(events.at(-1)).toEqual({ type: 'error', message: 'Not logged in · Please run /login', totalUsd: 0, protocolVersion: 2 });
   });
 
   it('a stream that ends without a result emits an error', async () => {
@@ -225,7 +225,25 @@ describe('entry main', () => {
     const lines: string[] = [];
     await main(path, { query: (() => { throw new Error('unused'); }) as unknown as QueryFn, write: (l) => lines.push(l) });
     expect(lines).toHaveLength(1);
-    expect(AgentEventSchema.parse(JSON.parse(lines[0]))).toMatchObject({ type: 'error', totalUsd: 0 });
+    expect(AgentEventSchema.parse(JSON.parse(lines[0]))).toMatchObject({ type: 'error', totalUsd: 0, protocolVersion: 2 });
+  });
+
+  it('result and error events echo protocolVersion 2; log and cost events do not carry it', async () => {
+    const ok = await run(baseReq, async function* () {
+      yield assistant('step', 'm1', { input_tokens: 1000, output_tokens: 0 });
+      yield success(0.1);
+    });
+    expect(ok.events.at(-1)).toMatchObject({ type: 'result', protocolVersion: 2 });
+    expect(ok.events.filter((e) => e.type === 'log' || e.type === 'cost').every((e) => !('protocolVersion' in e))).toBe(true);
+    const bad = await run(baseReq, async function* () { yield assistant('hm'); });
+    expect(bad.events.at(-1)).toMatchObject({ type: 'error', protocolVersion: 2 });
+  });
+
+  it('a request for a different protocolVersion is refused', async () => {
+    const { events, calls } = await run({ ...baseReq, protocolVersion: 3 } as AgentRequest, async function* () { yield success(0); });
+    expect(calls).toHaveLength(0);
+    expect(events.at(-1)).toMatchObject({ type: 'error', protocolVersion: 2 });
+    expect((events.at(-1) as { message: string }).message).toContain('protocol');
   });
 
   it('tools restricts the session to exactly the listed tools', async () => {

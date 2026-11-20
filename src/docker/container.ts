@@ -52,6 +52,33 @@ async function kitContentHash(dockerfile: string, stageDir: string): Promise<str
   return h.digest('hex').slice(0, 12);
 }
 
+/** Compiled agent files that `npm run build:image` copies into `.stage/`. */
+const AGENT_FILES = ['entry.js', 'pricing.js', 'protocol.js'] as const;
+
+/** Repo `dist/agent/` (resolves the same from src/docker and dist/docker). */
+const DEFAULT_AGENT_DIR = fileURLToPath(new URL('../../dist/agent/', import.meta.url));
+
+async function readOrUndefined(path: string): Promise<Buffer | undefined> {
+  try {
+    return await readFile(path);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Fail closed on a stale stage: a `.stage/` built from older agent code would, for example, strip the
+ * reviewers' `tools` field and give them every tool. Each staged agent file must equal the compiled one.
+ */
+async function assertStageCurrent(stageDir: string, agentDir: string): Promise<void> {
+  for (const f of AGENT_FILES) {
+    const [staged, built] = await Promise.all([readOrUndefined(join(stageDir, f)), readOrUndefined(join(agentDir, f))]);
+    if (!staged || !built || !staged.equals(built)) {
+      throw new Error('Kit image files are out of date — run: npm run build:image');
+    }
+  }
+}
+
 /**
  * Tag: `anton/kit-<name>:<version>-<hash>`. The content hash means a changed entry or Dockerfile
  * gets a new tag, so a stale image is never reused.
@@ -59,11 +86,13 @@ async function kitContentHash(dockerfile: string, stageDir: string): Promise<str
 export async function ensureImage(
   kit: { name: string; dockerfile: string },
   exec: ExecFn = defaultExec,
+  opts: { agentDir?: string } = {},
 ): Promise<string> {
   const context = dirname(kit.dockerfile);
   const stageDir = join(context, '.stage');
   const staged = await stat(stageDir).then((s) => s.isDirectory(), () => false);
   if (!staged) throw new Error('Kit image files not staged — run: npm run build:image');
+  await assertStageCurrent(stageDir, opts.agentDir ?? DEFAULT_AGENT_DIR);
   const tag = `anton/kit-${kit.name}:${packageVersion()}-${await kitContentHash(kit.dockerfile, stageDir)}`;
   const have = await exec('docker', ['image', 'inspect', tag]);
   if (have.exitCode === 0) return tag;

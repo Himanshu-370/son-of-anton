@@ -4,7 +4,7 @@ import { appendStageCost, recordCost, remainingUsd } from '../core/budget.js';
 import { execIn } from '../docker/container.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { saveState, type JobState } from '../core/state.js';
-import { AgentEventSchema, type AgentRequest } from './protocol.js';
+import { AgentEventSchema, PROTOCOL_VERSION, type AgentRequest } from './protocol.js';
 
 export type StageCtx = {
   project: string;
@@ -42,6 +42,16 @@ export class AgentError extends Error {
   }
 }
 
+/**
+ * Fail closed on a stale image: an entry built from older code does not echo PROTOCOL_VERSION (and,
+ * for example, silently drops a reviewer's `tools` restriction), so its result must not be used.
+ */
+function checkProtocol(version: number | undefined): void {
+  if (version !== PROTOCOL_VERSION) {
+    throw new AgentError(`agent entry is out of date (protocol ${version ?? 'none'}) — run: npm run build:image`);
+  }
+}
+
 async function nextRequestFile(jobDir: string, stage: string): Promise<string> {
   const dir = join(jobDir, 'requests');
   await fsp.mkdir(dir, { recursive: true });
@@ -60,7 +70,10 @@ export async function runAgent(
   const notify = deps.notify ?? defaultNotify;
 
   const file = await nextRequestFile(ctx.jobDir, ctx.stage);
-  await fsp.writeFile(join(ctx.jobDir, 'requests', file), JSON.stringify(req, null, 2) + '\n');
+  await fsp.writeFile(
+    join(ctx.jobDir, 'requests', file),
+    JSON.stringify({ ...req, protocolVersion: PROTOCOL_VERSION }, null, 2) + '\n',
+  );
   const containerPath = `/workspace/.anton/jobs/${basename(ctx.jobDir)}/requests/${file}`;
   await fsp.mkdir(join(ctx.jobDir, 'logs'), { recursive: true });
   const logPath = join(ctx.jobDir, 'logs', `${ctx.stage}.log`);
@@ -109,9 +122,11 @@ export async function runAgent(
         return undefined;
       case 'result':
         await applyTotal(ev.totalUsd, child, false);
+        checkProtocol(ev.protocolVersion);
         return { output: ev.output, sessionId: ev.sessionId };
       case 'error':
         await applyTotal(ev.totalUsd, child, false);
+        checkProtocol(ev.protocolVersion);
         // The SDK's own budget stop pauses the job as budget_cap, like the host-side kill.
         if (ev.code === 'budget') throw new BudgetExceeded(ev.message);
         throw new AgentError(ev.message);

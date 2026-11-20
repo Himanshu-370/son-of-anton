@@ -66,7 +66,9 @@ Verify first runs the acceptance checks and the smoke run. If any of them fail, 
 
 ## Security scanners
 
-The scanners (gitleaks, osv-scanner and semgrep) are installed in the Docker image. After pulling an update that changes them, re-run `npm run build:image` or the reviewers will run without them; the report then lists them under "Scanners unavailable".
+The scanners (gitleaks, osv-scanner and semgrep) are installed in the Docker image. A scanner that fails to run is listed in the report under "Scanners unavailable".
+
+The image also holds the agent code itself (the in-container entry the reviewers and builders run through). After pulling an update, re-run `npm run build:image`: a stale image means old agent code, not just missing scanners, and old agent code would ignore the reviewers' read-only tool restriction. Anton fails closed on this: it refuses to start with `Kit image files are out of date — run: npm run build:image` when the staged files differ from `dist/agent/`, and stops an agent call with `agent entry is out of date (protocol …)` when the image's entry does not speak the current protocol.
 
 Rejecting returns the job to build with your notes. If a job pauses (round cap, budget cap, no progress, error), use `anton resume`.
 

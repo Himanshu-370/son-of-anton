@@ -43,7 +43,9 @@ describe('preflight', () => {
   });
 });
 
-async function makeKit(stageFiles: Record<string, string> | null = { 'entry.js': 'e', 'sub/x.json': '{}' }) {
+const AGENT = { 'entry.js': 'e', 'pricing.js': 'p', 'protocol.js': 'v' };
+
+async function makeKit(stageFiles: Record<string, string> | null = { ...AGENT, 'sub/x.json': '{}' }) {
   const dir = await mkdtemp(join(tmpdir(), 'anton-kit-'));
   await writeFile(join(dir, 'Dockerfile'), 'FROM scratch\n');
   if (stageFiles) {
@@ -52,14 +54,18 @@ async function makeKit(stageFiles: Record<string, string> | null = { 'entry.js':
       await writeFile(join(dir, '.stage', rel), body);
     }
   }
-  return { dir, dockerfile: join(dir, 'Dockerfile') };
+  // The compiled agent files the staged copies must match (stands in for dist/agent).
+  const agentDir = join(dir, 'dist-agent');
+  await mkdir(agentDir);
+  for (const [f, body] of Object.entries(AGENT)) await writeFile(join(agentDir, f), body);
+  return { dir, dockerfile: join(dir, 'Dockerfile'), agentDir };
 }
 
 describe('ensureImage', () => {
   it('skips build when image exists and returns a versioned, content-hashed tag', async () => {
     const kit = await makeKit();
     const { exec, calls } = fake();
-    const tag = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    const tag = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec, { agentDir: kit.agentDir });
     expect(tag).toMatch(/^anton\/kit-node:\d+\.\d+\.\d+-[0-9a-f]{12}$/);
     expect(calls).toHaveLength(1);
     expect(calls[0].args).toEqual(['image', 'inspect', tag]);
@@ -68,29 +74,55 @@ describe('ensureImage', () => {
   it('tag hash changes when a staged file or the Dockerfile changes, and is stable otherwise', async () => {
     const kit = await makeKit();
     const { exec } = fake();
-    const t1 = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
-    expect(await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec)).toBe(t1);
+    const t1 = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec, { agentDir: kit.agentDir });
+    expect(await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec, { agentDir: kit.agentDir })).toBe(t1);
     await writeFile(join(kit.dir, '.stage', 'sub', 'x.json'), '{"a":1}');
-    const t2 = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    const t2 = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec, { agentDir: kit.agentDir });
     expect(t2).not.toBe(t1);
     await writeFile(kit.dockerfile, 'FROM scratch\nRUN true\n');
-    const t3 = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    const t3 = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec, { agentDir: kit.agentDir });
     expect(t3).not.toBe(t2);
   });
 
   it('throws a clear error when .stage/ is missing', async () => {
     const kit = await makeKit(null);
     const { exec, calls } = fake();
-    await expect(ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec)).rejects.toThrow(
+    await expect(ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec, { agentDir: kit.agentDir })).rejects.toThrow(
       'Kit image files not staged — run: npm run build:image',
     );
     expect(calls).toHaveLength(0);
   });
 
+  it('refuses when a staged agent file differs from the compiled one (stale .stage)', async () => {
+    const kit = await makeKit({ ...AGENT, 'entry.js': 'old phase-1 entry' });
+    const { exec, calls } = fake();
+    await expect(ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec, { agentDir: kit.agentDir })).rejects.toThrow(
+      'Kit image files are out of date — run: npm run build:image',
+    );
+    expect(calls).toHaveLength(0);
+  });
+
+  it('refuses when a staged agent file is missing', async () => {
+    const { 'protocol.js': _omit, ...rest } = AGENT;
+    const kit = await makeKit(rest);
+    const { exec } = fake();
+    await expect(ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec, { agentDir: kit.agentDir })).rejects.toThrow(
+      'Kit image files are out of date — run: npm run build:image',
+    );
+  });
+
+  it('refuses when the compiled agent file is missing', async () => {
+    const kit = await makeKit();
+    const { exec } = fake();
+    await expect(
+      ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec, { agentDir: join(kit.dir, 'nope') }),
+    ).rejects.toThrow('Kit image files are out of date — run: npm run build:image');
+  });
+
   it('builds with -t, -f and the dockerfile dir when missing', async () => {
     const kit = await makeKit();
     const { exec, calls } = fake((c) => (c.args[0] === 'image' ? { exitCode: 1 } : {}));
-    const tag = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec);
+    const tag = await ensureImage({ name: 'node', dockerfile: kit.dockerfile }, exec, { agentDir: kit.agentDir });
     expect(calls[1].args).toEqual(['build', '-t', tag, '-f', kit.dockerfile, kit.dir]);
   });
 
@@ -99,7 +131,7 @@ describe('ensureImage', () => {
     const { exec } = fake((c) =>
       c.args[0] === 'image' ? { exitCode: 1 } : { exitCode: 1, stderr: '  boom\n' },
     );
-    await expect(ensureImage({ name: 'n', dockerfile: kit.dockerfile }, exec)).rejects.toThrow(/boom$/);
+    await expect(ensureImage({ name: 'n', dockerfile: kit.dockerfile }, exec, { agentDir: kit.agentDir })).rejects.toThrow(/boom$/);
   });
 });
 
