@@ -70,7 +70,7 @@ describe('runBuild', () => {
     await runBuild(ctx, spec, plan, undefined, f.deps);
     expect(f.commitAll).toHaveBeenCalledTimes(3);
     expect(f.commitAll.mock.calls.map((c) => c)).toEqual([
-      ['/r', 'T1: scaffold'], ['/r', 'T2: sum args'], ['/r', 'T3: polish'],
+      ['/r', 'T1: scaffold', undefined], ['/r', 'T2: sum args', undefined], ['/r', 'T3: polish', undefined],
     ]);
     // commit happens after the session, before the next one; completedTasks grows after the commit
     expect(f.events).toEqual([
@@ -96,7 +96,7 @@ describe('runBuild', () => {
     expect(p).toContain('line 299');
     expect(f.reqs[0]!.resumeSessionId).toBeUndefined();
     expect(f.commitAll).toHaveBeenCalledTimes(1);
-    expect(f.commitAll).toHaveBeenCalledWith('/r', 'fix: round 2 (backend)');
+    expect(f.commitAll).toHaveBeenCalledWith('/r', 'fix: round 2 (backend)', undefined);
     expect(f.reqs.every((r) => r.systemPromptMode === 'append')).toBe(true);
     expect(state.stage).toBe('verify');
   });
@@ -109,7 +109,7 @@ describe('runBuild', () => {
     const state = await runBuild(ctx, spec, plan, undefined, f.deps);
     expect(f.reqs).toHaveLength(1);
     expect(f.reqs[0]!.prompt).toContain('### AC-1 — persisted failure');
-    expect(f.commitAll).toHaveBeenCalledWith('/r', 'fix: round 2 (backend)');
+    expect(f.commitAll).toHaveBeenCalledWith('/r', 'fix: round 2 (backend)', undefined);
     expect(state.stage).toBe('verify');
   });
 
@@ -129,7 +129,7 @@ describe('runBuild', () => {
       return { output: 'ok', sessionId: 's', state: { ...c.state, spentUsd: c.state.spentUsd + 1 } };
     });
     await expect(runBuild(ctx, spec, plan, undefined, { runAgent: runAgent as never, commitAll: f.commitAll })).rejects.toBeInstanceOf(BudgetExceeded);
-    expect(f.commitAll.mock.calls).toEqual([['/r', 'T1: scaffold']]);
+    expect(f.commitAll.mock.calls).toEqual([['/r', 'T1: scaffold', undefined]]);
     expect(await loadState(ctx.jobDir)).toMatchObject({ stage: 'build', completedTasks: ['T1'] });
   });
 
@@ -238,7 +238,7 @@ describe('runBuild', () => {
       await setup();
       const f = fakes();
       await runBuild(ctx, spec, multi, undefined, f.deps);
-      expect(f.commitAll.mock.calls).toEqual([['/r', 'fix: round 2 (backend)'], ['/r', 'fix: round 2 (frontend)']]);
+      expect(f.commitAll.mock.calls).toEqual([['/r', 'fix: round 2 (backend)', undefined], ['/r', 'fix: round 2 (frontend)', undefined]]);
     });
 
     it('routes an item to its area even when the plan has no tasks there', async () => {
@@ -281,5 +281,17 @@ describe('runBuild', () => {
       await runBuild(ctx, spec, multi, undefined, f.deps);
       expect(f.commitAll.mock.calls.map((c) => c[1])).toEqual(['T2: api', 'T1: ui']);
     });
+  });
+});
+
+describe('runBuild secret guard', () => {
+  it('passes the job secrets to the commit, and a SecretInDiff aborts the build before completing the task', async () => {
+    ctx.secrets = { TOKEN: 'FAKE_SECRET_VALUE_123' };
+    await saveState(ctx.jobDir, ctx.state);
+    const f = fakes();
+    f.commitAll.mockRejectedValueOnce(new Error('Refusing to commit: TOKEN'));
+    await expect(runBuild(ctx, spec, plan, undefined, f.deps)).rejects.toThrow('Refusing to commit');
+    expect(f.commitAll.mock.calls[0]![2]).toEqual({ TOKEN: 'FAKE_SECRET_VALUE_123' });
+    expect((await loadState(ctx.jobDir)).completedTasks).toEqual([]);
   });
 });

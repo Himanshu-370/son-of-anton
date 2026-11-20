@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { execa } from 'execa';
 import { writeFileAtomic } from './atomic.js';
+import { redact } from './secrets.js';
 
 /**
  * Host git runs on the Mac, outside Docker, inside a repo the agent can write to. So every
@@ -48,15 +49,37 @@ async function git(repo: string, args: string[]): Promise<string> {
   return String(r.stdout);
 }
 
+/** Thrown by `commitAll` when the staged diff holds a secret value. Names keys only, never values. */
+export class SecretInDiff extends Error {
+  constructor(public keys: string[]) {
+    super(`Refusing to commit: the change contains the value of secret(s) ${keys.join(', ')}. Remove it from the code (read it from the environment instead).`);
+    this.name = 'SecretInDiff';
+  }
+}
+
+/** The staged diff (`git diff --cached`). */
+export async function stagedDiff(repo: string): Promise<string> {
+  return git(repo, ['diff', '--cached', '--no-color', '--no-ext-diff']);
+}
+
 /**
  * Stage everything and commit as Son of Anton. Returns the sha, or null if nothing to commit.
  * Re-asserts the `.anton/` exclusion first (cheap, idempotent), so job files never enter history.
+ * With `secrets`, a staged diff that contains a secret value is unstaged (work tree kept) and rejected
+ * with SecretInDiff instead of committed.
  */
-export async function commitAll(repo: string, message: string): Promise<string | null> {
+export async function commitAll(repo: string, message: string, secrets?: Record<string, string>): Promise<string | null> {
   await ensureAntonIgnored(repo);
   await git(repo, ['add', '-A']);
   const status = await git(repo, ['status', '--porcelain']);
   if (status.trim() === '') return null;
+  if (Object.keys(secrets ?? {}).length) {
+    const diff = await stagedDiff(repo);
+    if (redact(diff, secrets) !== diff) {
+      await git(repo, ['reset', '-q']);
+      throw new SecretInDiff(Object.entries(secrets!).filter(([k, v]) => redact(diff, { [k]: v }) !== diff).map(([k]) => k));
+    }
+  }
   await git(repo, ['commit', '-q', '--no-verify', '-m', message]);
   return headSha(repo);
 }

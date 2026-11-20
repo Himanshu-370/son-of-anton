@@ -3,7 +3,7 @@ import { access, chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
-import { commitAll, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse, changedFilesSince, isClean, createBranch, resetWorktree } from '../../src/core/git.js';
+import { commitAll, SecretInDiff, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse, changedFilesSince, isClean, createBranch, resetWorktree } from '../../src/core/git.js';
 
 const git = (repo: string, ...args: string[]) =>
   execa('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo });
@@ -223,5 +223,28 @@ describe('isClean / createBranch', () => {
     await expect(access(join(repo, 'new.txt'))).rejects.toThrow();
     await access(join(repo, 'node_modules', 'x'));
     await access(join(repo, '.anton', 'keep'));
+  });
+});
+
+describe('commitAll secret guard', () => {
+  it('blocks a staged secret value: nothing committed, file kept, unstaged, error names key only', async () => {
+    await writeFile(join(repo, 'a.txt'), 'a');
+    await commitAll(repo, 'first');
+    await writeFile(join(repo, 'conf.ts'), 'const k = "FAKE_SECRET_VALUE_123";\n');
+    const before = await headSha(repo);
+    const err = await commitAll(repo, 'leak', { API_TOKEN: 'FAKE_SECRET_VALUE_123', OTHER: 'FAKE_OTHER_VALUE_456' }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(SecretInDiff);
+    expect((err as Error).message).toContain('API_TOKEN');
+    expect((err as Error).message).not.toContain('OTHER');
+    expect((err as Error).message).not.toContain('FAKE_SECRET_VALUE_123');
+    expect(await headSha(repo)).toBe(before);
+    expect(await readFile(join(repo, 'conf.ts'), 'utf8')).toContain('FAKE_SECRET_VALUE_123');
+    expect((await git(repo, 'diff', '--cached', '--name-only')).stdout).toBe('');
+  });
+  it('commits clean changes with secrets set, and with no secrets', async () => {
+    await writeFile(join(repo, 'a.txt'), 'a');
+    expect(await commitAll(repo, 'one', { API_TOKEN: 'FAKE_SECRET_VALUE_123' })).toMatch(/^[0-9a-f]{40}$/);
+    await writeFile(join(repo, 'b.txt'), 'FAKE_SECRET_VALUE_123');
+    expect(await commitAll(repo, 'two', {})).toMatch(/^[0-9a-f]{40}$/);
   });
 });
