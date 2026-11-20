@@ -17,6 +17,7 @@ import {
 } from '../docker/container.js';
 import { fallbackKit } from '../kits/fallback/index.js';
 import { runUnattended as defaultRunUnattended } from '../pipeline/runner.js';
+import { ensureRepoMap as defaultEnsureRepoMap } from '../stages/repo-map.js';
 import { runSpec as defaultRunSpec } from '../stages/spec.js';
 
 /** Every external effect a command has, injectable for tests. */
@@ -30,7 +31,7 @@ export type CliDeps = {
   startContainer?: (slug: string, repo: string, image: string) => Promise<string>;
   stopContainer?: (name: string) => Promise<void>;
   runSpec?: typeof defaultRunSpec;
-  /** Builds or refreshes the repo map before a change's spec (real one lands with the repo-map task). */
+  /** Builds or refreshes the repo map before a change's spec . */
   ensureRepoMap?: (ctx: StageCtx) => Promise<JobState>;
   ask?: (questions: string[]) => Promise<string[]>;
   /** Start the detached background run for a project. */
@@ -94,7 +95,7 @@ export function resolveDeps(d: CliDeps = {}): Resolved {
     startContainer: d.startContainer ?? ((s, r, i) => dockerStartContainer(s, r, i, exec)),
     stopContainer: d.stopContainer ?? ((n) => dockerStopContainer(n, exec)),
     runSpec: d.runSpec ?? defaultRunSpec,
-    ensureRepoMap: d.ensureRepoMap ?? (async (ctx) => ctx.state),
+    ensureRepoMap: d.ensureRepoMap ?? ((ctx) => defaultEnsureRepoMap(ctx)),
     ask: d.ask ?? readlineAsk,
     spawnRun: d.spawnRun ?? defaultSpawnRun,
     kill: d.kill ?? ((pid, sig) => { process.kill(pid, sig); }),
