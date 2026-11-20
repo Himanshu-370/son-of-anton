@@ -24,7 +24,8 @@ function registryFile(): string {
 
 /** Project names become file paths (secrets), so only slug-shaped names are allowed. */
 export function assertProjectName(name: string): void {
-  if (slugify(name) !== name) throw new Error('Project names may only use a-z, 0-9 and -');
+  // Charset check, not slugify(name) === name: uniqueName may append -N past slugify's 40-char cap.
+  if (!/^[a-z0-9]+(-[a-z0-9]+)*$/.test(name)) throw new Error('Project names may only use a-z, 0-9 and -');
 }
 
 export function slugify(text: string): string {

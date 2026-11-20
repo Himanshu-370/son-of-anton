@@ -61,9 +61,14 @@ describe('secrets', () => {
     expect(await loadSecrets('app')).toEqual({});
   });
 
+  it('secretsPath accepts a 42-char uniqueName result (40-char base plus -2)', () => {
+    const name = `${'a'.repeat(40)}-2`;
+    expect(secretsPath(name)).toBe(join(home, 'secrets', `${name}.env`));
+  });
+
   it('secretsPath rejects names that are not slugs (no traversal)', () => {
     expect(secretsPath('my-app')).toBe(join(home, 'secrets', 'my-app.env'));
-    for (const bad of ['../x', 'a/b', 'My App', '']) {
+    for (const bad of ['../x', 'a/b', 'My App', '', '-a', 'a-', 'a--b', '.', 'a.b']) {
       expect(() => secretsPath(bad)).toThrow('Project names may only use a-z, 0-9 and -');
     }
   });
