@@ -71,11 +71,15 @@ export function defaultOnSigint(handler: () => Promise<void> | void): () => void
 }
 
 export async function defaultOpenEditor(path: string): Promise<void> {
-  const editor = process.env.EDITOR;
-  const [cmd, args] = editor ? [editor, [path]] : process.platform === 'darwin' ? ['open', ['-t', path]] : [undefined, []];
-  if (!cmd) throw new Error(`Set $EDITOR, or edit ${path} yourself.`);
-  // shortcut: $EDITOR is run without a shell, so "code --wait" style values with args won't work; wrap in a script if needed.
-  await new Promise<void>((res, rej) => spawn(cmd, args, { stdio: 'inherit' }).on('error', rej).on('exit', () => res()));
+  const editor = process.env.EDITOR || process.env.VISUAL;
+  // Via a shell so values with arguments ("code --wait") work; the path is a positional arg, never interpolated.
+  const [cmd, args] = editor
+    ? ['sh', ['-c', `${editor} "$1"`, 'sh', path]]
+    : process.platform === 'darwin' ? ['open', ['-t', path]] : ['vi', [path]];
+  await new Promise<void>((res, rej) =>
+    spawn(cmd, args, { stdio: 'inherit' })
+      .on('error', rej)
+      .on('exit', (code) => (code === 0 ? res() : rej(new Error(`Editor exited with code ${code}`)))));
 }
 
 /** Interactive question loop on the terminal. */

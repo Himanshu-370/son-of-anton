@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { access, mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,7 +19,7 @@ import { changeCommand } from '../../src/cli/commands/change.js';
 import { adoptCommand } from '../../src/cli/commands/adopt.js';
 import { secretsEditCommand } from '../../src/cli/commands/secrets.js';
 import { runSpecSession } from '../../src/cli/spec-session.js';
-import { resolveDeps } from '../../src/cli/deps.js';
+import { defaultOpenEditor, resolveDeps } from '../../src/cli/deps.js';
 import { abandonCommand } from '../../src/cli/commands/abandon.js';
 import { acceptRiskCommand } from '../../src/cli/commands/accept-risk.js';
 import { loadAcceptedRisks } from '../../src/security/risks.js';
@@ -524,6 +524,47 @@ describe('secrets', () => {
     expect(h.text()).toContain('Secrets this job will receive: ALPHA, BETA');
     expect(h.text() + h.errText()).not.toMatch(/FAKE_VALUE_1|not-a-secret/);
     expect(opts).toEqual([{ envFile: join(home, 'secrets', 'app.env') }]);
+  });
+});
+
+describe('secrets hardening', () => {
+  it.each([0o644, 0o640])('spec session refuses a %o secrets file; startContainer never called', async (mode) => {
+    await mkdir(join(home, 'secrets'), { recursive: true });
+    const f = join(home, 'secrets', 'app.env');
+    await writeFile(f, 'ALPHA=FAKE_VALUE_1\n');
+    await chmod(f, mode);
+    const startContainer = vi.fn(async () => 'c');
+    const runSpec = vi.fn();
+    const h = harness({ startContainer, runSpec, onSigint: () => () => undefined });
+    await expect(
+      runSpecSession(resolveDeps(h.deps), { name: 'app', repoPath: home, jobDir: home, description: 'd', image: 'img', jobId: '1-x' }, 'new'),
+    ).rejects.toThrow(`Secrets file must be private: chmod 600 ${f}`);
+    expect(startContainer).not.toHaveBeenCalled();
+    expect(runSpec).not.toHaveBeenCalled();
+  });
+
+  it('secrets edit warns when tightening a loose existing file', async () => {
+    await mkdir(join(home, 'secrets'), { recursive: true });
+    const f = join(home, 'secrets', 'app.env');
+    await writeFile(f, 'A=FAKE_VALUE_1\n');
+    await chmod(f, 0o644);
+    const h = harness({ openEditor: async () => undefined });
+    expect(await secretsEditCommand('app', h.deps)).toBe(0);
+    expect(h.errText()).toContain(`${f} was readable by others; tightened to 0600`);
+    expect((await stat(f)).mode & 0o777).toBe(0o600);
+  });
+
+  it('defaultOpenEditor supports editors with args, and rejects on non-zero exit', async () => {
+    const prev = process.env.EDITOR;
+    try {
+      process.env.EDITOR = 'test -n';
+      await expect(defaultOpenEditor('/some path/x.env')).resolves.toBeUndefined();
+      process.env.EDITOR = 'false';
+      await expect(defaultOpenEditor('/x.env')).rejects.toThrow('Editor exited with code 1');
+    } finally {
+      if (prev === undefined) delete process.env.EDITOR;
+      else process.env.EDITOR = prev;
+    }
   });
 });
 

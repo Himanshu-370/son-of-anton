@@ -48,11 +48,13 @@ export type RunnerDeps = {
 
 /** Reuse a running `anton-<slug>` container, else ensure the kit image and start a fresh one. */
 export async function startOrReuseContainer(slug: string, repo: string, exec: ExecFn = defaultExec): Promise<string> {
+  // Validate secrets before any docker call or API spend.
+  const envFile = await secretsEnvFile(slug);
   const name = containerName(slug);
   const r = await exec('docker', ['inspect', '-f', '{{.State.Running}}', name]);
   if (r.exitCode === 0 && r.stdout.trim() === 'true') return name;
   const image = await ensureImage(fallbackKit, exec);
-  return dockerStartContainer(slug, repo, image, exec, { envFile: secretsEnvFile(slug) });
+  return dockerStartContainer(slug, repo, image, exec, { envFile });
 }
 
 async function readJson(path: string): Promise<unknown> {

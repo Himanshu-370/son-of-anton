@@ -11,7 +11,9 @@ export async function runSpecSession(
   p: { name: string; repoPath: string; jobDir: string; description: string; image: string; jobId: string },
   mode: 'new' | 'change',
 ): Promise<number> {
-  const container = await d.startContainer(p.name, p.repoPath, p.image, { envFile: secretsEnvFile(p.name) });
+  // Validates the secrets file first: a bad one fails here, before any container or API spend.
+  const envFile = await secretsEnvFile(p.name);
+  const container = await d.startContainer(p.name, p.repoPath, p.image, { envFile });
   const hint = `anton abandon ${p.name}, then run anton ${mode} again.`;
   // Ctrl-C during the interactive spec stage would otherwise leave the container running.
   let interrupted = false;
