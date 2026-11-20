@@ -74,7 +74,8 @@ export async function commitAll(repo: string, message: string, secrets?: Record<
   const status = await git(repo, ['status', '--porcelain']);
   if (status.trim() === '') return null;
   if (Object.keys(secrets ?? {}).length) {
-    const diff = await stagedDiff(repo);
+    // shortcut: binary files are not inspected (git diff shows no text for them); upgrade if agents may write binaries.
+    const diff = (await stagedDiff(repo)).split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).join('\n');
     if (redact(diff, secrets) !== diff) {
       await git(repo, ['reset', '-q']);
       throw new SecretInDiff(Object.entries(secrets!).filter(([k, v]) => redact(diff, { [k]: v }) !== diff).map(([k]) => k));

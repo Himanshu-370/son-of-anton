@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { runIn as defaultRunIn } from '../docker/container.js';
 import { sha8 } from '../review/shared.js';
 
@@ -7,7 +8,7 @@ export type ScannerFinding = {
   severity: 'critical' | 'high' | 'medium' | 'low';
   file: string;
   line?: number;
-  /** Occurrence identity independent of line numbers: gitleaks Fingerprint, semgrep hash of matched text, osv vuln id. */
+  /** Occurrence identity independent of line numbers: gitleaks hash of file+rule+Secret (the Fingerprint embeds the line number), semgrep hash of matched text, osv vuln id. */
   key: string;
   message: string;
 };
@@ -72,7 +73,10 @@ async function gitleaks(container: string, run: RunIn): Promise<ScannerFinding[]
       severity: 'high' as const,
       file: normalizePath(str(o.File)),
       ...(typeof o.StartLine === 'number' ? { line: o.StartLine } : {}),
-      key: str(o.Fingerprint, `${str(o.File)}:${str(o.RuleID)}:${typeof o.StartLine === 'number' ? o.StartLine : '?'}`),
+      key:
+        typeof o.Secret === 'string' && o.Secret !== ''
+          ? sha8(`${normalizePath(str(o.File))}\n${str(o.RuleID, 'gitleaks')}\n${createHash('sha256').update(o.Secret).digest('hex')}`)
+          : str(o.Fingerprint, `${str(o.File)}:${str(o.RuleID)}:${typeof o.StartLine === 'number' ? o.StartLine : '?'}`),
       message: str(o.Description, 'Potential secret detected'),
     };
   });
