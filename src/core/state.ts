@@ -24,6 +24,8 @@ export const JobStateSchema = z.object({
   jobId: z.string(),
   kind: z.enum(['new', 'change']).default('new'),
   branch: z.string().optional(),
+  /** Branch (or sha) checked out when a change job started; `abandon` switches back to it. */
+  fromBranch: z.string().optional(),
   project: z.string(),
   stage: z.enum(STAGES),
   pausedFrom: z.enum(STAGES).optional(),

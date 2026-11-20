@@ -122,6 +122,7 @@ export async function createChangeJob(
       jobId: id,
       kind: 'change',
       branch,
+      fromBranch: back,
       project,
       stage: 'spec',
       round: 0,

@@ -318,6 +318,41 @@ describe('anton abandon', () => {
     expect((await loadState(dir)).stage).toBe('abandoned');
     expect(stopped).toEqual(['anton-p']);
   });
+
+  describe('change job restore', () => {
+    async function changeRepo(over: Partial<JobState> = {}) {
+      const { repo, dir } = await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'error', kind: 'change', branch: 'anton/1-init', fromBranch: 'main', ...over });
+      const g = (...a: string[]) => execa('git', a, { cwd: repo });
+      await g('init', '-q', '-b', 'main');
+      await g('config', 'user.email', 't@t'); await g('config', 'user.name', 't');
+      await writeFile(join(repo, '.gitignore'), '.anton/\n');
+      await writeFile(join(repo, 'a.txt'), 'a');
+      await g('add', '-A'); await g('commit', '-qm', 'first');
+      await g('switch', '-qc', 'anton/1-init');
+      const cur = async () => (await g('branch', '--show-current')).stdout;
+      return { repo, dir, g, cur };
+    }
+    it('clean repo: switches back to fromBranch and keeps the anton branch', async () => {
+      const { g, cur } = await changeRepo();
+      expect(await abandonCommand('p', harness().deps)).toBe(0);
+      expect(await cur()).toBe('main');
+      expect((await g('branch', '--list', 'anton/1-init')).stdout).toContain('anton/1-init');
+    });
+    it('dirty repo: prints the git switch hint and stays on the branch', async () => {
+      const { repo, dir, cur } = await changeRepo();
+      await writeFile(join(repo, 'a.txt'), 'dirty');
+      const h = harness();
+      expect(await abandonCommand('p', h.deps)).toBe(0);
+      expect(h.text()).toContain('git switch main');
+      expect(await cur()).toBe('anton/1-init');
+      expect((await loadState(dir)).stage).toBe('abandoned');
+    });
+    it('job without fromBranch: no git touched', async () => {
+      const { cur } = await changeRepo({ fromBranch: undefined });
+      expect(await abandonCommand('p', harness().deps)).toBe(0);
+      expect(await cur()).toBe('anton/1-init');
+    });
+  });
 });
 
 describe('anton accept-risk', () => {

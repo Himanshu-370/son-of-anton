@@ -68,7 +68,7 @@ describe('createChangeJob', () => {
     const c = await createChangeJob(p.name, 'Add auth');
     expect(c.jobId).toBe('2-add-auth');
     expect(c.branch).toBe('anton/2-add-auth');
-    expect(await loadState(c.jobDir)).toMatchObject({ kind: 'change', branch: c.branch, stage: 'spec', budgetUsd: 10 });
+    expect(await loadState(c.jobDir)).toMatchObject({ kind: 'change', branch: c.branch, fromBranch: 'main', stage: 'spec', budgetUsd: 10 });
   });
   it('branch anton/2-add-auth exists and is checked out', async () => {
     const p = await doneProject();

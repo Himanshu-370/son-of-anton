@@ -91,6 +91,11 @@ export async function currentBranch(repo: string): Promise<string> {
   }
 }
 
+/** Switch to an existing branch (or sha); git refuses if local changes would be lost. */
+export async function switchBranch(repo: string, name: string): Promise<void> {
+  await git(repo, ['checkout', '-q', name]);
+}
+
 /** Undo `createBranch`: switch back to `back` (a branch name or sha from `currentBranch`) and force-delete `name`. */
 export async function dropBranch(repo: string, name: string, back: string): Promise<void> {
   await git(repo, ['checkout', '-q', back]);
