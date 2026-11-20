@@ -5,6 +5,7 @@ import { Command } from 'commander';
 import type { CliDeps } from './deps.js';
 import { abandonCommand } from './commands/abandon.js';
 import { acceptRiskCommand } from './commands/accept-risk.js';
+import { adoptCommand } from './commands/adopt.js';
 import { approveCommand } from './commands/approve.js';
 import { logsCommand } from './commands/logs.js';
 import { newCommand } from './commands/new.js';
@@ -26,6 +27,12 @@ export function buildProgram(deps: CliDeps = {}): Command {
     .argument('<description>', 'what to build')
     .option('--budget <usd>', 'spend cap for this job in USD')
     .action(async (desc: string, o: { budget?: string }) => exit(await newCommand(desc, o, deps)));
+  program
+    .command('adopt')
+    .description('Register an existing git repository as a project')
+    .argument('<path>', 'the repository root')
+    .option('--name <name>', 'project name (default: the folder name)')
+    .action(async (p: string, o: { name?: string }) => exit(await adoptCommand(p, o, deps)));
   program
     .command('approve')
     .description('Approve the spec (starts the build) or the final delivery')

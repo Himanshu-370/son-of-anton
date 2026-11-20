@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, realpath, writeFile } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
 import type { ExecFn } from '../../src/core/exec.js';
 import { jobDir as jobDirOf } from '../../src/core/paths.js';
-import { registerProject } from '../../src/core/registry.js';
+import { getProject, listProjects, registerProject } from '../../src/core/registry.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
 import type { CliDeps } from '../../src/cli/deps.js';
 import { approveCommand } from '../../src/cli/commands/approve.js';
@@ -15,6 +15,7 @@ import { rejectCommand } from '../../src/cli/commands/reject.js';
 import { resumeCommand } from '../../src/cli/commands/resume.js';
 import { statusCommand } from '../../src/cli/commands/status.js';
 import { stopCommand } from '../../src/cli/commands/stop.js';
+import { adoptCommand } from '../../src/cli/commands/adopt.js';
 import { abandonCommand } from '../../src/cli/commands/abandon.js';
 import { acceptRiskCommand } from '../../src/cli/commands/accept-risk.js';
 import { loadAcceptedRisks } from '../../src/security/risks.js';
@@ -475,5 +476,51 @@ describe('anton new', () => {
     const h = harness();
     expect(await newCommand('x', { budget: 'lots' }, h.deps)).toBe(1);
     expect(h.errText()).toContain('--budget');
+  });
+});
+
+describe('adopt', () => {
+  async function repo(name: string): Promise<string> {
+    const dir = join(await mkdtemp(join(tmpdir(), 'anton-adopt-')), name);
+    await mkdir(dir, { recursive: true });
+    await execa('git', ['init', '-q'], { cwd: dir });
+    return dir;
+  }
+
+  it('adopt registers and excludes .anton', async () => {
+    const dir = await repo('My App');
+    const h = harness();
+    expect(await adoptCommand(dir, {}, h.deps)).toBe(0);
+    const { repoPath } = await getProject('my-app');
+    expect(repoPath).toBe(await realpath(dir));
+    expect(await readFile(join(dir, '.git', 'info', 'exclude'), 'utf8')).toContain('.anton/');
+    expect(h.text()).toContain('Start a change with: anton change my-app "<what to change>"');
+  });
+  it('not a repo → exit 1, nothing registered', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'anton-adopt-'));
+    const h = harness();
+    expect(await adoptCommand(dir, {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('is not the root of a git repository');
+    expect(await listProjects()).toEqual([]);
+  });
+  it('subfolder of a repo → exit 1', async () => {
+    const dir = await repo('top');
+    await mkdir(join(dir, 'sub'));
+    const h = harness();
+    expect(await adoptCommand(join(dir, 'sub'), {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('is not the root of a git repository');
+    expect(await listProjects()).toEqual([]);
+  });
+  it('explicit taken name → exit 1', async () => {
+    await project('taken');
+    const h = harness();
+    expect(await adoptCommand(await repo('x'), { name: 'taken' }, h.deps)).toBe(1);
+    expect(h.errText()).toContain('A project named taken already exists');
+  });
+  it('default name collision gets a suffix', async () => {
+    await project('dup');
+    const h = harness();
+    expect(await adoptCommand(await repo('dup'), {}, h.deps)).toBe(0);
+    expect((await getProject('dup-2')).name).toBe('dup-2');
   });
 });
