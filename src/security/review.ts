@@ -9,7 +9,7 @@ import { fenceDiff, sha8 } from '../review/shared.js';
 import { loadPrompt } from '../stages/prompts.js';
 import type { Plan } from '../stages/plan.js';
 import type { SpecDoc } from '../stages/spec.js';
-import { runScanners as defaultRunScanners } from './scanners.js';
+import { runScanners as defaultRunScanners, type ScannerFinding } from './scanners.js';
 
 export type SecurityFinding = {
   id: string;
@@ -32,6 +32,8 @@ const RawFindingSchema = z.object({
   detail: z.string().min(1),
   source: z.enum(['scanner', 'review']),
   tool: z.string().min(1).optional(),
+  /** For a kept scanner finding: the `ref` the host gave it in the prompt. */
+  ref: z.string().optional(),
 });
 const OutputSchema = z.object({ findings: z.array(RawFindingSchema) });
 const OUTPUT_JSON_SCHEMA = z.toJSONSchema(OutputSchema) as Record<string, unknown>;
@@ -42,16 +44,58 @@ export type SecurityReviewDeps = {
   diffSince?: typeof defaultDiffSince;
 };
 
-/** Stable across line shifts: SEC-<8 hex of sha256(source \n tool \n file \n title)>. */
+/** Host-computed handle for a scanner finding: SCN-<sha8(tool \n ruleId \n file)>. */
+export function scannerRef(f: Pick<ScannerFinding, 'tool' | 'ruleId' | 'file'>): string {
+  return `SCN-${sha8(`${f.tool}\n${f.ruleId}\n${f.file}`)}`;
+}
+
+/**
+ * Review-sourced findings: SEC-<sha8(source \n tool \n file \n title)>, stable across line shifts
+ * as long as the reviewer reuses the title (the prompt lists last round's titles for that).
+ * Scanner findings use scannerFindingId instead, which never depends on model text.
+ */
 export function securityFindingId(f: { source: string; tool?: string; file: string; title: string }): string {
   return `SEC-${sha8(`${f.source}\n${f.tool ?? ''}\n${f.file}\n${f.title}`)}`;
 }
+
+/** Scanner findings: SEC-<sha8(ref)>, so the id is stable however the model words the title. */
+export function scannerFindingId(ref: string): string {
+  return `SEC-${sha8(ref)}`;
+}
+
+/** A finding from an earlier round, passed back so the reviewer can reuse its exact title. */
+export type PriorFinding = { id: string; title: string; file: string };
+export type SecurityReviewContext = { previous?: PriorFinding[]; accepted?: string[] };
 
 export function blocking(findings: SecurityFinding[], accepted: Set<string>): SecurityFinding[] {
   return findings.filter((f) => (f.severity === 'critical' || f.severity === 'high') && !accepted.has(f.id));
 }
 
-function renderPrompt(spec: SpecDoc, plan: Plan, scanner: unknown[], unavailable: string[], diff: string): string {
+function priorSection(prior: SecurityReviewContext): string[] {
+  const previous = prior.previous ?? [];
+  const accepted = prior.accepted ?? [];
+  if (!previous.length && !accepted.length) return [];
+  const lines = ['## Earlier security findings', ''];
+  if (previous.length) {
+    lines.push(
+      'These were reported in the previous review. If you report the same problem again, reuse its exact title (and file) so it keeps its id; do not reword it.',
+      '',
+      ...previous.map((f) => `- ${f.id} | ${f.file} | ${f.title}`),
+      '',
+    );
+  }
+  lines.push(accepted.length ? `Accepted risks: ${accepted.join(', ')}.` : 'Accepted risks: none.', '');
+  return lines;
+}
+
+function renderPrompt(
+  spec: SpecDoc,
+  plan: Plan,
+  scanner: Array<ScannerFinding & { ref: string }>,
+  unavailable: string[],
+  diff: string,
+  prior: SecurityReviewContext,
+): string {
   const tasks = plan.tasks.map((t) => `- ${t.id} [${t.area}] ${t.title}`).join('\n');
   return [
     `# Spec: ${spec.title}`,
@@ -65,9 +109,11 @@ function renderPrompt(spec: SpecDoc, plan: Plan, scanner: unknown[], unavailable
     '## Scanner findings',
     '',
     unavailable.length ? `Scanners that did not run: ${unavailable.join(', ')}.` : 'All scanners ran.',
+    'Each finding has a `ref`. For every scanner finding you keep, copy its `ref` exactly into your output.',
     '',
     JSON.stringify(scanner, null, 2),
     '',
+    ...priorSection(prior),
     '## Diff of this round',
     '',
     'The full code is readable in `/workspace`; the diff below may be trimmed.',
@@ -83,17 +129,20 @@ export async function runSecurityReview(
   plan: Plan,
   baseSha: string,
   deps: SecurityReviewDeps = {},
+  prior: SecurityReviewContext = {},
 ): Promise<{ findings: SecurityFinding[]; unavailable: string[]; state: JobState }> {
   const run = deps.runAgent ?? defaultRunAgent;
   const { findings: scanned, unavailable } = await (deps.runScanners ?? defaultRunScanners)(ctx.container);
   const diff = await (deps.diffSince ?? defaultDiffSince)(ctx.repo, baseSha);
+  const withRefs = scanned.map((f) => ({ ref: scannerRef(f), ...f }));
+  const byRef = new Map(withRefs.map((f) => [f.ref, f]));
   const { model, effort } = ROLE_MODELS.security_reviewer;
   const req: AgentRequest = {
     role: 'security_reviewer',
     model,
     effort,
     systemPrompt: await loadPrompt('security-review.md'),
-    prompt: renderPrompt(spec, plan, scanned, unavailable, diff),
+    prompt: renderPrompt(spec, plan, withRefs, unavailable, diff, prior),
     outputSchema: OUTPUT_JSON_SCHEMA,
     tools: ['Read', 'Grep', 'Glob'],
     maxTurns: 30,
@@ -103,11 +152,22 @@ export async function runSecurityReview(
   const out = OutputSchema.parse(res.output);
   const seen = new Set<string>();
   const findings: SecurityFinding[] = [];
-  for (const f of out.findings) {
-    const id = securityFindingId(f);
-    if (seen.has(id)) continue;
-    seen.add(id);
-    findings.push({ id, ...f });
+  for (const { ref, ...f } of out.findings) {
+    // Ids never come from the model: a scanner finding's id derives from the host's ref (and its
+    // tool/file from the scanner record); a missing or unknown ref makes it a review finding.
+    const hit = f.source === 'scanner' && ref !== undefined ? byRef.get(ref) : undefined;
+    let finding: SecurityFinding;
+    if (hit) {
+      finding = { id: scannerFindingId(hit.ref), ...f, source: 'scanner', tool: hit.tool, file: hit.file };
+      if (finding.line === undefined && hit.line !== undefined) finding.line = hit.line;
+    } else {
+      const { tool: _tool, ...rest } = f;
+      const review = { ...rest, source: 'review' as const };
+      finding = { id: securityFindingId(review), ...review };
+    }
+    if (seen.has(finding.id)) continue;
+    seen.add(finding.id);
+    findings.push(finding);
   }
   return { findings, unavailable, state: res.state };
 }

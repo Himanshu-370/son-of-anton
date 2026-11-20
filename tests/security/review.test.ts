@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { StageCtx } from '../../src/agent/host-runner.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
-import { blocking, runSecurityReview, type SecurityFinding } from '../../src/security/review.js';
+import { blocking, runSecurityReview, scannerRef, type SecurityFinding } from '../../src/security/review.js';
+import { sha8 } from '../../src/review/shared.js';
 import type { ScannerFinding } from '../../src/security/scanners.js';
 import type { Plan } from '../../src/stages/plan.js';
 import type { SpecDoc } from '../../src/stages/spec.js';
@@ -20,8 +21,9 @@ beforeEach(() => {
 });
 
 const scanned: ScannerFinding = { tool: 'gitleaks', ruleId: 'aws-key', severity: 'high', file: 'src/a.ts', line: 3, message: 'AKIAFAKEFAKE' };
+const REF = `SCN-${sha8('gitleaks\naws-key\nsrc/a.ts')}`;
 const raw = (over: Record<string, unknown> = {}) => ({
-  severity: 'high', area: 'backend', file: 'src/a.ts', line: 3, title: 'Hard-coded key', detail: 'd', source: 'scanner', tool: 'gitleaks', ...over,
+  severity: 'high', area: 'backend', file: 'src/a.ts', line: 3, title: 'Hard-coded key', detail: 'd', source: 'scanner', tool: 'gitleaks', ref: REF, ...over,
 });
 
 const harness = (findings: unknown[], unavailable: string[] = []) => {
@@ -69,6 +71,63 @@ describe('runSecurityReview', () => {
   it('dedupes by id and distinguishes source/tool', async () => {
     const r = await runSecurityReview(ctx, spec, plan, 'abc', harness([raw(), raw({ line: 8 }), raw({ source: 'review', tool: undefined })]).deps);
     expect(r.findings).toHaveLength(2);
+  });
+
+  it('scannerRef is SCN- + sha8(tool \\n ruleId \\n file) and the prompt carries it', async () => {
+    expect(scannerRef(scanned)).toBe(REF);
+    const h = harness([]);
+    await runSecurityReview(ctx, spec, plan, 'abc', h.deps);
+    expect(h.reqs[0]!.prompt).toContain(REF);
+  });
+
+  it('a kept scanner finding gets its id from the host ref: SEC- + sha8(ref)', async () => {
+    const r = await runSecurityReview(ctx, spec, plan, 'abc', harness([raw()]).deps);
+    expect(r.findings[0]!.id).toBe(`SEC-${sha8(REF)}`);
+  });
+
+  it('a reworded title for the same scanner finding keeps the same id', async () => {
+    const a = await runSecurityReview(ctx, spec, plan, 'abc', harness([raw({ title: 'Hard-coded key' })]).deps);
+    const b = await runSecurityReview(ctx, spec, plan, 'abc', harness([raw({ title: 'AWS access key committed to source' })]).deps);
+    expect(a.findings[0]!.id).toBe(b.findings[0]!.id);
+  });
+
+  it('spoof: an id field in the model output is ignored; the host-computed id wins', async () => {
+    const r = await runSecurityReview(ctx, spec, plan, 'abc', harness([
+      raw({ id: 'SEC-00000000' }),
+      raw({ source: 'review', tool: undefined, ref: undefined, title: 'IDOR', id: 'SEC-11111111' }),
+    ]).deps);
+    expect(r.findings.map((f) => f.id)).not.toContain('SEC-00000000');
+    expect(r.findings.map((f) => f.id)).not.toContain('SEC-11111111');
+    expect(r.findings[0]!.id).toBe(`SEC-${sha8(REF)}`);
+  });
+
+  it('a ref not in the scanner set is ignored: the finding is kept as review-sourced with a title-based id', async () => {
+    const forged = `SEC-${sha8('SCN-deadbeef')}`;
+    const r = await runSecurityReview(ctx, spec, plan, 'abc', harness([raw({ ref: 'SCN-deadbeef', title: 'Odd' })]).deps);
+    expect(r.findings).toHaveLength(1);
+    expect(r.findings[0]!.id).not.toBe(forged);
+    expect(r.findings[0]!.source).toBe('review');
+    const again = await runSecurityReview(ctx, spec, plan, 'abc', harness([raw({ ref: undefined, source: 'review', tool: undefined, title: 'Odd' })]).deps);
+    expect(r.findings[0]!.id).toBe(again.findings[0]!.id);
+  });
+
+  it('scanner findings take tool and file from the scanner record, not model text', async () => {
+    const r = await runSecurityReview(ctx, spec, plan, 'abc', harness([raw({ tool: 'semgrep', file: 'other.ts' })]).deps);
+    expect(r.findings[0]).toMatchObject({ tool: 'gitleaks', file: 'src/a.ts', source: 'scanner' });
+  });
+
+  it('previous findings and accepted ids go into the prompt with a reuse-the-title instruction', async () => {
+    const h = harness([]);
+    await runSecurityReview(ctx, spec, plan, 'abc', h.deps, {
+      previous: [{ id: 'SEC-aaaaaaaa', title: 'SQL injection in search', file: 'src/db.ts' }],
+      accepted: ['SEC-aaaaaaaa'],
+    });
+    const p = h.reqs[0]!.prompt;
+    expect(p).toContain('SEC-aaaaaaaa');
+    expect(p).toContain('SQL injection in search');
+    expect(p).toContain('src/db.ts');
+    expect(p).toMatch(/reuse its exact title/i);
+    expect(p).toMatch(/Accepted risks: SEC-aaaaaaaa/);
   });
 
   it('unavailable scanners are returned unchanged', async () => {
