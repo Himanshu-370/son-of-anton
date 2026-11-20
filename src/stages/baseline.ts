@@ -22,8 +22,9 @@ export async function runBaseline(ctx: StageCtx, kit: Kit, plan: Plan, deps: Bas
   }
   await assertEvidenceDir(ctx.repo, ctx.jobDir);
   try {
-    const { passingTests, ran } = await kit.baseline({ container: ctx.container, jobDir: ctx.jobDir, commands: plan.commands, secrets: ctx.secrets });
+    const { passingTests, ran } = await kit.baseline({ container: ctx.container, jobDir: ctx.jobDir, repo: ctx.repo, commands: plan.commands, secrets: ctx.secrets });
     const { findings, unavailable } = await (deps.runScanners ?? defaultRunScanners)(ctx.container);
+    await assertEvidenceDir(ctx.repo, ctx.jobDir); // scanners ran in the container since the first check
     await writeFileAtomic(
       join(ctx.jobDir, 'evidence', 'baseline.json'),
       redact(JSON.stringify({ passingTests, ran, scannerRefs: findings.map(scannerRef), unavailable }, null, 2) + '\n', ctx.secrets),

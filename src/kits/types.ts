@@ -45,7 +45,7 @@ export type VerifyOutcome = { results: CheckResult[]; runOk: boolean; failureRep
   state?: JobState;
 };
 
-export type BaselineContext = { container: string; jobDir: string; commands: Commands; secrets?: Record<string, string> };
+export type BaselineContext = { container: string; jobDir: string; /** When set, the kit re-checks the evidence folder after the container went quiet. */ repo?: string; commands: Commands; secrets?: Record<string, string> };
 export type BaselineOutcome = { passingTests: string[]; ran: boolean };
 
 export interface Kit {

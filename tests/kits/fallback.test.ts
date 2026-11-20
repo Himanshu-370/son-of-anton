@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -61,6 +61,39 @@ describe('fallbackKit', () => {
     expect(kill).toBeGreaterThan(d.calls.findIndex((c) => c.includes('npm test')));
     expect(kill).toBeGreaterThan(d.calls.findIndex((c) => c.includes('npm start')));
     expect(kill).toBeLessThan(d.calls.findIndex((c) => c.startsWith('cat ')));
+  });
+
+  it('install failure kills container processes before writing evidence', async () => {
+    const d = fake(0, 2);
+    await fallbackKit.verify(mk({ install: 'npm i', test: 'npm test' }), d);
+    expect(d.calls).toEqual(['npm i', 'kill -s KILL -- -1 2>/dev/null; true']);
+  });
+
+  it('baseline install failure kills container processes', async () => {
+    const d = fake(0, 2);
+    const out = await fallbackKit.baseline(mk({ install: 'npm i', test: 'npm test' }), d);
+    expect(out.ran).toBe(false);
+    expect(d.calls).toEqual(['npm i', 'kill -s KILL -- -1 2>/dev/null; true']);
+  });
+
+  it('evidence dir swapped for a symlink during the tests: verify and baseline refuse the host write', async () => {
+    for (const which of ['verify', 'baseline'] as const) {
+      const repo = mkdtempSync(join(tmpdir(), 'repo-'));
+      const jobDir = join(repo, '.anton', 'jobs', 'j');
+      mkdirSync(join(jobDir, 'evidence'), { recursive: true });
+      const target = mkdtempSync(join(tmpdir(), 'host-target-'));
+      const runIn = async (_c: string, cmd: string) => {
+        if (cmd.includes('npm test')) {
+          rmSync(join(jobDir, 'evidence'), { recursive: true });
+          symlinkSync(target, join(jobDir, 'evidence'));
+        }
+        return { exitCode: 0, stdout: cmd.startsWith('cat ') ? xml : '', stderr: '' };
+      };
+      const ctx = { ...mk({ install: 'npm i', test: 'npm test' }), jobDir, repo, stage: { repo } as never };
+      const run = which === 'verify' ? fallbackKit.verify(ctx, { runIn }) : fallbackKit.baseline(ctx, { runIn });
+      await expect(run).rejects.toThrow(/symlink/);
+      expect(readdirSync(target)).toEqual([]);
+    }
   });
 
   it('install failure fails every check with run_failed and skips tests', async () => {

@@ -6,6 +6,7 @@ import { writeFileAtomic } from '../../core/atomic.js';
 import { redact } from '../../core/secrets.js';
 import { trimOutput } from '../../core/trim.js';
 import { allTests, isValidJUnit, mapJUnit, passingTests } from '../../verify/junit.js';
+import { assertEvidenceDir } from '../../stages/verify.js';
 import type { BaselineContext, CheckResult, Kit, VerifyContext } from '../types.js';
 
 type RunIn = (name: string, cmd: string) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
@@ -58,6 +59,7 @@ function buildReport(
 async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
   const rawRunIn: RunIn = deps.runIn ?? ((n, c) => dockerRunIn(n, c));
   const runIn = redactingRunIn(rawRunIn, ctx.secrets);
+  const repo = ctx.stage?.repo;
   const evidenceDir = join(ctx.jobDir, 'evidence');
   await mkdir(evidenceDir, { recursive: true });
   const outPath = join(evidenceDir, 'test-output.txt');
@@ -67,6 +69,7 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
   if (install.exitCode !== 0) {
     const output = `${install.stdout}\n${install.stderr}`.trim();
     await rawRunIn(ctx.container, KILL_ALL);
+    if (repo) await assertEvidenceDir(repo, ctx.jobDir);
     await writeFileAtomic(outPath, output);
     const error = trimOutput(output, { fullPath: outPath });
     const results: CheckResult[] = ctx.checks.map((c) => ({
@@ -86,6 +89,8 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
     if (!runOk) runFailure = { exitCode: r.exitCode, output: `${r.stdout}\n${r.stderr}`.trim() };
   }
   await rawRunIn(ctx.container, KILL_ALL);
+  // The container could have swapped evidence for a symlink while the tests ran; nothing runs now, so check again.
+  if (repo) await assertEvidenceDir(repo, ctx.jobDir);
   await writeFileAtomic(outPath, testOutput);
   const xml = await rawRunIn(ctx.container, `cat ${shq(junit)}`);
   const xmlText = xml.exitCode === 0 ? redact(xml.stdout, ctx.secrets) : '';
@@ -108,10 +113,14 @@ async function baseline(ctx: BaselineContext, deps: { runIn?: RunIn } = {}) {
   // Separate file so the baseline never collides with verify's junit.xml.
   const junit = `/workspace/.anton/jobs/${basename(ctx.jobDir)}/evidence/baseline-junit.xml`;
   await mkdir(join(ctx.jobDir, 'evidence'), { recursive: true });
-  if ((await runIn(ctx.container, ctx.commands.install)).exitCode !== 0) return { passingTests: [], ran: false };
+  if ((await runIn(ctx.container, ctx.commands.install)).exitCode !== 0) {
+    await rawRunIn(ctx.container, KILL_ALL);
+    return { passingTests: [], ran: false };
+  }
   await runIn(ctx.container, `rm -f ${shq(junit)}`);
   await runIn(ctx.container, `export ANTON_JUNIT=${shq(junit)}; ${ctx.commands.test}`);
   await rawRunIn(ctx.container, KILL_ALL);
+  if (ctx.repo) await assertEvidenceDir(ctx.repo, ctx.jobDir);
   const raw = await rawRunIn(ctx.container, `cat ${shq(junit)}`);
   const xml = { exitCode: raw.exitCode, stdout: redact(raw.stdout, ctx.secrets) };
   await redactJUnitFile(join(ctx.jobDir, 'evidence', 'baseline-junit.xml'), xml.exitCode === 0 ? xml.stdout : '', raw.stdout);

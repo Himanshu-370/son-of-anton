@@ -23,8 +23,9 @@ const st = (): JobState => ({
 });
 
 function setup(opts: { xml?: string; ready?: boolean; alive?: boolean; repo?: string; jobDir?: string; tail?: string } = {}) {
-  const repo = opts.repo ?? '/r';
-  const jobDir = opts.jobDir ?? mkdtempSync(join(tmpdir(), 'web-job-'));
+  const repo = opts.repo ?? mkdtempSync(join(tmpdir(), 'web-repo-'));
+  const jobDir = opts.jobDir ?? join(repo, '.anton', 'jobs', 'j1');
+  mkdirSync(jobDir, { recursive: true });
   const stage: StageCtx = { project: 'p', repo, container: 'c', jobDir, stage: 'verify', state: st() };
   const calls: string[] = [];
   const runIn = async (_c: string, cmd: string) => {
