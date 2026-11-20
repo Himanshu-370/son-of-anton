@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { execa } from 'execa';
 import { DEFAULTS } from './config.js';
 import { jobDir, projectDir } from './paths.js';
-import { createBranch, dropBranch, hasCommits, isClean } from './git.js';
+import { createBranch, currentBranch, dropBranch, hasCommits, isClean } from './git.js';
 import { getProject, registerProject, slugify, uniqueName } from './registry.js';
 import { loadState, saveState, type JobState } from './state.js';
 
@@ -106,13 +106,14 @@ export async function createChangeJob(
   } catch (e) {
     if (!(e instanceof NoJobs)) throw e; // adopted repo: no jobs yet
   }
-  if (!(await isClean(repoPath))) throw new DirtyRepo();
   if (!(await hasCommits(repoPath))) throw new NoCommits();
+  if (!(await isClean(repoPath))) throw new DirtyRepo();
   // `anton/<n>-` prefix plus slug must fit in 60 chars
   const slug = slugify(description).slice(0, 60 - `anton/${n}-`.length).replace(/-+$/, '');
   const id = `${n}-${slug}`;
   const branch = `anton/${id}`;
   const dir = jobDir(repoPath, id);
+  const back = await currentBranch(repoPath);
   await createBranch(repoPath, branch);
   try {
     await fsp.mkdir(dir, { recursive: true });
@@ -132,8 +133,8 @@ export async function createChangeJob(
       updatedAt: '',
     });
   } catch (e) {
-    await dropBranch(repoPath, branch);
     await fsp.rm(dir, { recursive: true, force: true });
+    await dropBranch(repoPath, branch, back).catch(() => undefined); // best effort; always surface the original error
     throw e;
   }
   return { name: project, repoPath, jobId: id, jobDir: dir, branch };

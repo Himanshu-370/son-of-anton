@@ -18,6 +18,16 @@ vi.mock('../../src/core/state.js', async (orig) => {
   };
 });
 
+const failDrop = vi.hoisted(() => ({ on: false }));
+vi.mock('../../src/core/git.js', async (orig) => {
+  const m = await orig<typeof import('../../src/core/git.js')>();
+  return {
+    ...m,
+    dropBranch: (...a: Parameters<typeof m.dropBranch>) =>
+      failDrop.on ? Promise.reject(new Error('branch gone')) : m.dropBranch(...a),
+  };
+});
+
 beforeEach(async () => {
   process.env.ANTON_HOME = await mkdtemp(join(tmpdir(), 'anton-job-'));
 });
@@ -115,6 +125,24 @@ describe('createChangeJob', () => {
     expect(await branch(p.repoPath)).toBe(before);
     expect((await execa('git', ['branch', '--list', 'anton/*'], { cwd: p.repoPath })).stdout).toBe('');
     await expect(stat(join(p.repoPath, '.anton', 'jobs', '2-add-auth'))).rejects.toThrow();
+  });
+  it('failing dropBranch still removes the job dir and rethrows the original error', async () => {
+    const p = await doneProject();
+    failSave.on = true;
+    failDrop.on = true;
+    try {
+      await expect(createChangeJob(p.name, 'Add auth')).rejects.toThrow('disk full');
+    } finally {
+      failSave.on = false;
+      failDrop.on = false;
+    }
+    await expect(stat(join(p.repoPath, '.anton', 'jobs', '2-add-auth'))).rejects.toThrow();
+  });
+  it('unborn repo with untracked files → NoCommits', async () => {
+    const p = await createNewProject('unborn thing');
+    await rm(join(p.repoPath, '.anton'), { recursive: true });
+    await writeFile(join(p.repoPath, 'a.txt'), 'x');
+    await expect(createChangeJob(p.name, 'x')).rejects.toBeInstanceOf(NoCommits);
   });
   it('leftover job dir without state.json does not block, and its number is not reused', async () => {
     const p = await doneProject();

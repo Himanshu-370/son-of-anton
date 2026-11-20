@@ -72,10 +72,28 @@ export async function createBranch(repo: string, name: string): Promise<void> {
   await git(repo, ['switch', '-c', name]);
 }
 
-/** Undo `createBranch`: switch back to the previously checked-out ref and force-delete `name`. */
-export async function dropBranch(repo: string, name: string): Promise<void> {
-  await git(repo, ['switch', '-']);
+/** The checked-out branch name, or the commit sha when HEAD is detached. Needs at least one commit. */
+export async function currentBranch(repo: string): Promise<string> {
+  try {
+    return (await git(repo, ['symbolic-ref', '--short', '-q', 'HEAD'])).trim();
+  } catch {
+    return headSha(repo);
+  }
+}
+
+/** Undo `createBranch`: switch back to `back` (a branch name or sha from `currentBranch`) and force-delete `name`. */
+export async function dropBranch(repo: string, name: string, back: string): Promise<void> {
+  await git(repo, ['checkout', '-q', back]);
   await git(repo, ['branch', '-D', name]);
+}
+
+/** The work tree's root as git sees it (`rev-parse --show-toplevel`), or null if `path` is not in a repo. */
+export async function repoRoot(path: string): Promise<string | null> {
+  try {
+    return (await git(path, ['rev-parse', '--show-toplevel'])).trim();
+  } catch {
+    return null;
+  }
 }
 
 /** False for a repo with no commits (unborn HEAD). */
