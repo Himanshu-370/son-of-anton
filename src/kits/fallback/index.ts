@@ -3,8 +3,8 @@ import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runIn as dockerRunIn } from '../../docker/container.js';
 import { trimOutput } from '../../core/trim.js';
-import { isValidJUnit, mapJUnit } from '../../verify/junit.js';
-import type { CheckResult, Kit, VerifyContext } from '../types.js';
+import { isValidJUnit, mapJUnit, passingTests } from '../../verify/junit.js';
+import type { BaselineContext, CheckResult, Kit, VerifyContext } from '../types.js';
 
 type RunIn = (name: string, cmd: string) => Promise<{ exitCode: number; stdout: string; stderr: string }>;
 
@@ -79,9 +79,23 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
   return { results, runOk, failureReport: buildReport(results, outPath, { testNote, runFailure }) };
 }
 
-export const fallbackKit: Kit & { verify: typeof verify } = {
+async function baseline(ctx: BaselineContext, deps: { runIn?: RunIn } = {}) {
+  const runIn: RunIn = deps.runIn ?? ((n, c) => dockerRunIn(n, c));
+  // Separate file so the baseline never collides with verify's junit.xml.
+  const junit = `/workspace/.anton/jobs/${basename(ctx.jobDir)}/evidence/baseline-junit.xml`;
+  await mkdir(join(ctx.jobDir, 'evidence'), { recursive: true });
+  if ((await runIn(ctx.container, ctx.commands.install)).exitCode !== 0) return { passingTests: [], ran: false };
+  await runIn(ctx.container, `rm -f ${shq(junit)}`);
+  await runIn(ctx.container, `export ANTON_JUNIT=${shq(junit)}; ${ctx.commands.test}`);
+  const xml = await runIn(ctx.container, `cat ${shq(junit)}`);
+  if (xml.exitCode !== 0 || !isValidJUnit(xml.stdout)) return { passingTests: [], ran: false };
+  return { passingTests: passingTests(xml.stdout), ran: true };
+}
+
+export const fallbackKit: Kit & { verify: typeof verify; baseline: typeof baseline } = {
   name: 'fallback',
   dockerfile: fileURLToPath(new URL('../../../src/kits/fallback/Dockerfile', import.meta.url)),
   detect: () => 0.1,
   verify,
+  baseline,
 };

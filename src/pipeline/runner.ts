@@ -15,6 +15,7 @@ import {
 } from '../docker/container.js';
 import { fallbackKit } from '../kits/fallback/index.js';
 import type { Kit } from '../kits/types.js';
+import { runBaseline as defaultRunBaseline } from '../stages/baseline.js';
 import { runBuild as defaultRunBuild } from '../stages/build.js';
 import { runDeliver as defaultRunDeliver, type DeliverInput } from '../stages/deliver.js';
 import { failuresPath } from '../stages/qa.js';
@@ -35,6 +36,7 @@ export type RunnerDeps = {
   notify?: (title: string, message: string) => Promise<void>;
   kit?: Kit;
   runPlan?: (ctx: StageCtx, spec: SpecDoc) => Promise<{ plan: Plan; state: JobState }>;
+  runBaseline?: (ctx: StageCtx, kit: Kit, plan: Plan) => Promise<JobState>;
   runBuild?: (ctx: StageCtx, spec: SpecDoc, plan: Plan) => Promise<JobState>;
   runVerify?: (ctx: StageCtx, kit: Kit, spec: SpecDoc, plan: Plan, deps?: VerifyDeps) => Promise<VerifyResult>;
   /** Injectable reviewers and git lookups, forwarded to runVerify. */
@@ -93,9 +95,9 @@ function pauseMessage(
 }
 
 /**
- * Background pipeline: loops on state.stage through plan → build ⇄ verify → deliver until a
+ * Background pipeline: loops on state.stage through plan → (baseline →) build ⇄ verify → deliver until a
  * waiting/paused stage. Stages persist and transition themselves (build→verify, verify→…,
- * deliver→awaiting_final_review); the runner only transitions plan→build (round 1, R1).
+ * deliver→awaiting_final_review); the runner only transitions plan→build (round 1, R1) or plan→baseline (change jobs; baseline then goes to build).
  * Build fix rounds read the persisted evidence/failure-report.md (R11); no report is passed in.
  */
 export async function runUnattended(project: string, deps: RunnerDeps = {}): Promise<void> {
@@ -113,6 +115,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
   const startContainer = deps.startContainer ?? ((s: string, r: string) => startOrReuseContainer(s, r));
   const kit = deps.kit ?? fallbackKit;
   const runPlan = deps.runPlan ?? defaultRunPlan;
+  const runBaseline = deps.runBaseline ?? defaultRunBaseline;
   const runBuild = deps.runBuild ?? defaultRunBuild;
   const runVerify = deps.runVerify ?? defaultRunVerify;
   const runDeliver = deps.runDeliver ?? defaultRunDeliver;
@@ -148,12 +151,14 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
           case 'plan': {
             const r = await runPlan(ctx('plan'), await getSpec());
             plan = r.plan;
-            state = transition(r.state, 'build', { round: 1 });
+            // Change jobs record a baseline first; it moves the job to build (round 1).
+            state = r.state.kind === 'change' ? transition(r.state, 'baseline') : transition(r.state, 'build', { round: 1 });
             await saveState(jobDir, state);
             break;
           }
           case 'baseline':
-            throw new Error('baseline stage not implemented yet');
+            state = await runBaseline(ctx('baseline'), kit, await getPlan());
+            break;
           case 'build':
             state = await runBuild(ctx('build'), await getSpec(), await getPlan());
             break;

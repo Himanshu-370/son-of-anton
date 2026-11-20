@@ -20,10 +20,15 @@ export type VerifyContext = {
 
 export type VerifyOutcome = { results: CheckResult[]; runOk: boolean; failureReport: string };
 
+export type BaselineContext = { container: string; jobDir: string; commands: Commands };
+export type BaselineOutcome = { passingTests: string[]; ran: boolean };
+
 export interface Kit {
   name: string;
   dockerfile: string;
   /** 0..1 confidence that this kit suits the job description. */
   detect(description: string): number;
   verify(ctx: VerifyContext): Promise<VerifyOutcome>;
+  /** Runs install and test on the untouched repo; ran is false when install fails or no valid JUnit comes back. */
+  baseline(ctx: BaselineContext): Promise<BaselineOutcome>;
 }

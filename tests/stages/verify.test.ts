@@ -34,7 +34,7 @@ beforeEach(async () => {
   ctx = { project: 'p', repo: '/r', container: 'c', jobDir, stage: 'verify', state: st() };
 });
 function kit(outcome: VerifyOutcome, seen: VerifyContext[] = []): Kit {
-  return { name: 'fake', dockerfile: '', detect: () => 1, verify: async (c) => { seen.push(c); return outcome; } };
+  return { name: 'fake', dockerfile: '', detect: () => 1, baseline: async () => ({ passingTests: [], ran: true }), verify: async (c) => { seen.push(c); return outcome; } };
 }
 
 const item = (kind: FailureItem['kind'], id: string, area: FailureItem['area'] = 'backend'): FailureItem => ({ area, kind, id, text: 't' });

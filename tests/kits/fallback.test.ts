@@ -102,4 +102,15 @@ describe('fallbackKit', () => {
   it('dockerfile path exists on disk', () => {
     expect(existsSync(fallbackKit.dockerfile)).toBe(true);
   });
+
+  it('baseline lists passing testcases from a separate junit file; install failure → ran false', async () => {
+    const cmds = { install: 'npm i', test: 'npm test' };
+    const ok = fake(0);
+    expect(await fallbackKit.baseline({ container: 'c', jobDir: mk(cmds).jobDir, commands: cmds }, ok)).toEqual({ passingTests: ['AC-1 ok'], ran: true });
+    expect(ok.calls.some((c) => c.includes('baseline-junit.xml'))).toBe(true);
+    const bad = fake(0, 1);
+    expect(await fallbackKit.baseline({ container: 'c', jobDir: mk(cmds).jobDir, commands: cmds }, bad)).toEqual({ passingTests: [], ran: false });
+    const none = fake(0, 0, null);
+    expect((await fallbackKit.baseline({ container: 'c', jobDir: mk(cmds).jobDir, commands: cmds }, none)).ran).toBe(false);
+  });
 });

@@ -82,7 +82,7 @@ export async function runPlan(
     model,
     effort,
     systemPrompt: await loadPrompt('plan.md'),
-    prompt: `Approved spec:\n\n${JSON.stringify(spec, null, 2)}`,
+    prompt: `${ctx.state.kind === 'change' ? 'This is a change to an existing codebase (see the Change jobs section).\n\n' : ''}Approved spec:\n\n${JSON.stringify(spec, null, 2)}`,
     outputSchema: z.toJSONSchema(PlanSchema) as Record<string, unknown>,
     maxTurns: 30,
     budgetUsd: remainingUsd(ctx.state),

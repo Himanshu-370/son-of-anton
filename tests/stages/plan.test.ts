@@ -85,6 +85,15 @@ describe('plan areas and contract', () => {
     expect(props).toContain('"area"');
     expect(props).toContain('"contract"');
   });
+  it('change jobs tell the tech lead to reuse the repo test runner', async () => {
+    const reqs: AgentRequest[] = [];
+    const output = { commands, tasks: [{ id: 'T1', title: 'o', acceptanceChecks: ['AC-1', 'AC-2'], instructions: 'do', area: 'backend' }] };
+    await runPlan({ ...ctx, state: { ...ctx.state, kind: 'change' } }, spec, { runAgent: run(output, reqs) });
+    expect(reqs[0]!.prompt).toContain('existing codebase');
+    const p = await loadPrompt('plan.md');
+    expect(p).toContain('command-line flags');
+    expect(p).toContain('$ANTON_JUNIT');
+  });
   it('tech lead prompt states the build order infra → backend → frontend and asks for an API/interface contract when more than one area is involved', async () => {
     const p = await loadPrompt('plan.md');
     expect(p).toContain('infra → backend → frontend');

@@ -81,3 +81,8 @@ export function mapJUnit(xml: string, checks: AcceptanceCheck[]): CheckResult[] 
 export function isValidJUnit(xml: string): boolean {
   return parseCases(xml) !== null;
 }
+
+/** Names of testcases that passed (skipped counts as not passing). Empty when the XML is invalid. */
+export function passingTests(xml: string): string[] {
+  return (parseCases(xml) ?? []).filter((t) => t.ok).map((t) => t.label);
+}
