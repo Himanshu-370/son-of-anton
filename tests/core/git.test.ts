@@ -262,6 +262,13 @@ describe('commitAll secret guard', () => {
     expect((err as Error).message).toContain('API_TOKEN');
     expect((err as Error).message).not.toContain('FAKE_SECRET_VALUE_123');
   });
+  it('added line whose content starts with ++ still blocks', async () => {
+    await writeFile(join(repo, 'conf.ts'), 'let count = 0;\n');
+    await commitAll(repo, 'first');
+    await writeFile(join(repo, 'conf.ts'), 'let count = 0;\n++count = "FAKE_SECRET_VALUE_123";\n');
+    const err = await commitAll(repo, 'leak', { API_TOKEN: 'FAKE_SECRET_VALUE_123' }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(SecretInDiff);
+  });
   it('commits clean changes with secrets set, and with no secrets', async () => {
     await writeFile(join(repo, 'a.txt'), 'a');
     expect(await commitAll(repo, 'one', { API_TOKEN: 'FAKE_SECRET_VALUE_123' })).toMatch(/^[0-9a-f]{40}$/);
