@@ -129,3 +129,7 @@ The last one builds a real project end to end with the API and costs up to about
 ## Limits
 
 Two kits (fallback and web), CLI only, no Slack yet. See the [roadmap](docs/superpowers/plans/2026-11-19-son-of-anton-roadmap.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
