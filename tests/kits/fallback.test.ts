@@ -153,3 +153,13 @@ describe('fallbackKit XML-escaped secrets and junit on disk', () => {
     expect(b.passingTests[0]).toContain('[REDACTED:TOKEN]');
   });
 });
+
+describe('fallbackKit testsRan', () => {
+  const cmds = { install: 'npm i', test: 'npm test' };
+  it('false on install failure, missing XML and invalid XML; true on valid XML', async () => {
+    expect((await fallbackKit.verify(mk(cmds), fake(0, 2))).testsRan).toBe(false);
+    expect((await fallbackKit.verify(mk(cmds), fake(0, 0, null))).testsRan).toBe(false);
+    expect((await fallbackKit.verify(mk(cmds), fake(0, 0, 'not xml'))).testsRan).toBe(false);
+    expect((await fallbackKit.verify(mk(cmds), fake(0))).testsRan).toBe(true);
+  });
+});

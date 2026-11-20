@@ -23,7 +23,10 @@ export type VerifyContext = {
 };
 
 /** `tests` lists every testcase (named as in BaselineOutcome.passingTests) so verify can compare with the baseline. */
-export type VerifyOutcome = { results: CheckResult[]; runOk: boolean; failureReport: string; tests: { name: string; passed: boolean }[] };
+export type VerifyOutcome = { results: CheckResult[]; runOk: boolean; failureReport: string; tests: { name: string; passed: boolean }[];
+  /** False when install failed or the test run left no valid JUnit XML (so `tests` says nothing); undefined counts as true. */
+  testsRan?: boolean;
+};
 
 export type BaselineContext = { container: string; jobDir: string; commands: Commands; secrets?: Record<string, string> };
 export type BaselineOutcome = { passingTests: string[]; ran: boolean };

@@ -68,7 +68,7 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
     const results: CheckResult[] = ctx.checks.map((c) => ({
       id: c.id, status: 'fail', reason: 'run_failed', tests: [], error,
     }));
-    return { results, runOk: false, failureReport: buildReport(results, outPath), tests: [] };
+    return { results, runOk: false, failureReport: buildReport(results, outPath), tests: [], testsRan: false };
   }
 
   await runIn(ctx.container, `rm -f ${shq(junit)}`);
@@ -80,7 +80,8 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
   await redactJUnitFile(join(evidenceDir, 'junit.xml'), xmlText, xml.stdout);
   let results = mapJUnit(xmlText, ctx.checks);
   let testNote: string | undefined;
-  if (!xmlText.trim() || !isValidJUnit(xmlText)) {
+  const testsRan = !!xmlText.trim() && isValidJUnit(xmlText);
+  if (!testsRan) {
     const error = trimOutput(testOutput.trim(), { fullPath: outPath });
     results = results.map((r) => ({ ...r, error }));
     testNote = `Test command exited ${test.exitCode} and produced no valid JUnit XML.`;
@@ -93,7 +94,7 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
     runOk = r.exitCode === 0 || r.exitCode === 124;
     if (!runOk) runFailure = { exitCode: r.exitCode, output: `${r.stdout}\n${r.stderr}`.trim() };
   }
-  return { results, runOk, failureReport: buildReport(results, outPath, { testNote, runFailure }), tests: allTests(xmlText) };
+  return { results, runOk, failureReport: buildReport(results, outPath, { testNote, runFailure }), tests: allTests(xmlText), testsRan };
 }
 
 async function baseline(ctx: BaselineContext, deps: { runIn?: RunIn } = {}) {

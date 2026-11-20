@@ -65,6 +65,16 @@ export function regressionItems(baselinePassing: string[], tests: { name: string
     }));
 }
 
+/** One item for a run that left no valid JUnit, instead of one per baseline test. */
+export function noRunRegression(baselineCount: number, plan: Plan): FailureItem {
+  return {
+    area: runArea(plan),
+    kind: 'regression',
+    id: 'REG-norun',
+    text: `Regression: the test run produced no results; ${baselineCount} baseline tests unverified. Make the install and test commands run again and write JUnit XML.`,
+  };
+}
+
 /** Markdown failure report: one `### <area>` section per area (AREA_ORDER), then the kit's check details. */
 export function renderFailureReport(items: FailureItem[], checkDetails: string): string {
   const out: string[] = ['# Verification failures'];

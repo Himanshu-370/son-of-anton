@@ -344,6 +344,17 @@ describe('runVerify: baseline regressions', () => {
     await writeBaseline({ ran: true });
     expect((await run([])).passed).toBe(true);
   });
+  it('test run produced no valid JUnit → ONE REG-norun item, not one per baseline test', async () => {
+    await writeBaseline(base({ passingTests: ['A::t1', 'A::t2', 'A::t3'] }));
+    const r = await runVerify(ctx, kit({ results: [pass('AC-1'), pass('AC-2')], runOk: true, failureReport: '', tests: [], testsRan: false }), spec, plan, fakeDeps());
+    expect(r.failures).toMatchObject([{ kind: 'regression', id: 'REG-norun', area: 'backend' }]);
+    expect(r.failures![0]!.text).toContain('3 baseline tests unverified');
+  });
+  it('valid but empty JUnit still gives per-test regression items', async () => {
+    await writeBaseline(base());
+    const r = await runVerify(ctx, kit({ results: [pass('AC-1'), pass('AC-2')], runOk: true, failureReport: '', tests: [], testsRan: true }), spec, plan, fakeDeps());
+    expect(r.failures?.map((f) => f.id)).toEqual([REG('A::t1'), REG('A::t2')]);
+  });
   it('passes the baseline scanner refs to the security reviewer', async () => {
     await writeBaseline(base());
     const calls: Calls = [];
