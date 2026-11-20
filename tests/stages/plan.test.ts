@@ -103,3 +103,36 @@ describe('plan areas and contract', () => {
   });
 });
 
+
+describe('serve and url', () => {
+  const webSpec: SpecDoc = { ...spec, kit: 'web' };
+  const tasks = [{ id: 'T1', title: 'o', acceptanceChecks: ['AC-1', 'AC-2'], instructions: 'do', area: 'frontend' }];
+  const serveCmds = { ...commands, serve: 'npm start', url: 'http://localhost:3000/' };
+  it('web plan without serve is rejected', async () => {
+    await expect(runPlan(ctx, webSpec, { runAgent: run({ commands, tasks }) })).rejects.toThrow('Web kit plans must set commands.serve and commands.url');
+  });
+  it('non-localhost url is rejected', () => {
+    expect(() => PlanSchema.parse({ commands: { ...serveCmds, url: 'http://example.com:3000' }, tasks })).toThrow();
+    expect(() => PlanSchema.parse({ commands: { ...commands, serve: 'npm start' }, tasks })).toThrow();
+    expect(() => PlanSchema.parse({ commands: { ...commands, url: 'http://127.0.0.1:3000/x' }, tasks })).toThrow();
+    expect(() => PlanSchema.parse({ commands: { ...serveCmds, url: 'http://127.0.0.1:3000/x' }, tasks })).not.toThrow();
+  });
+  it('fallback plan without serve is fine', async () => {
+    await expect(runPlan(ctx, spec, { runAgent: run({ commands, tasks }) })).resolves.toBeDefined();
+  });
+  it('plan.md renders serve and url', async () => {
+    await runPlan(ctx, webSpec, { runAgent: run({ commands: serveCmds, tasks }) });
+    const md = await readFile(join(ctx.jobDir, 'plan.md'), 'utf8');
+    expect(md).toContain('- serve: `npm start`');
+    expect(md).toContain('- url: `http://localhost:3000/`');
+  });
+  it('plan prompt mentions serve only for web kit', async () => {
+    const web: AgentRequest[] = [];
+    const fb: AgentRequest[] = [];
+    await runPlan(ctx, webSpec, { runAgent: run({ commands: serveCmds, tasks }, web) });
+    await runPlan(ctx, spec, { runAgent: run({ commands, tasks }, fb) });
+    expect(web[0]!.systemPrompt).toContain('commands.serve');
+    expect(web[0]!.systemPrompt).toContain('0.0.0.0');
+    expect(fb[0]!.systemPrompt).not.toContain('commands.serve');
+  });
+});

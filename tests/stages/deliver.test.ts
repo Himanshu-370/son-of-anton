@@ -62,6 +62,38 @@ describe('runDeliver', () => {
     expect((await loadState(ctx.jobDir)).stage).toBe('awaiting_final_review');
   });
 
+  it('report shows kit, browser column and screenshots', async () => {
+    const web: SpecDoc = { ...spec, kit: 'web' };
+    const res: CheckResult[] = [
+      { id: 'AC-1', status: 'pass', tests: ['AC-1: page'], browser: { status: 'pass', note: 'ok', screenshot: join(ctx.jobDir, 'evidence', 'screens', 'AC-1.png') } },
+      { id: 'AC-2', status: 'pass', tests: ['AC-2: x'], browser: { status: 'n/a', note: 'not visual' } },
+    ];
+    await runDeliver(ctx, web, plan, { results: res, runOk: true }, { tag: vi.fn(async () => {}), listTags: async () => [] });
+    const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    expect(md).toContain('Kit: web');
+    expect(md).toContain('| ID | Check | Status | Browser | Proven against | Tests | Evidence |');
+    expect(md).toMatch(/\| AC-1 \| sums two numbers \| pass \| pass \|/);
+    expect(md).toMatch(/\| AC-2 \| .* \| pass \| n\/a \|/);
+    expect(md).toContain('## Screenshots');
+    expect(md).toContain('- AC-1: evidence/screens/AC-1.png');
+    expect(md).not.toContain('AC-2: evidence/screens');
+  });
+
+  it('web report shows - for a check the browser never reached', async () => {
+    await runDeliver(ctx, { ...spec, kit: 'web' }, plan, { results, runOk: false }, { tag: vi.fn(async () => {}), listTags: async () => [] });
+    const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    expect(md).toMatch(/\| AC-1 \| sums two numbers \| pass \| - \|/);
+    expect(md).not.toContain('## Screenshots');
+  });
+
+  it('fallback report has no browser column', async () => {
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag: vi.fn(async () => {}), listTags: async () => [] });
+    const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    expect(md).not.toContain('Browser');
+    expect(md).not.toContain('Screenshots');
+    expect(md).not.toContain('Kit: web');
+  });
+
   it('deliver after accept-as-is lists failing checks from the latest results.json under Not done', async () => {
     await mkdir(join(ctx.jobDir, 'evidence'), { recursive: true });
     const latest = {

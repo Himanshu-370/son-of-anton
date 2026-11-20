@@ -1,5 +1,6 @@
-import { readFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { lstat, readFile, readlink, rm } from 'node:fs/promises';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { execa } from 'execa';
 import { writeFileAtomic } from './atomic.js';
 import { redact } from './secrets.js';
@@ -74,7 +75,8 @@ export async function commitAll(repo: string, message: string, secrets?: Record<
   const status = await git(repo, ['status', '--porcelain']);
   if (status.trim() === '') return null;
   if (Object.keys(secrets ?? {}).length) {
-    const diff = await stagedDiff(repo);
+    // shortcut: binary files are not inspected (git diff shows no text for them); upgrade if agents may write binaries.
+    const diff = (await stagedDiff(repo)).split('\n').filter((l) => l.startsWith('+') && !/^\+\+\+ ("?b\/|\/dev\/null)/.test(l)).join('\n');
     if (redact(diff, secrets) !== diff) {
       await git(repo, ['reset', '-q']);
       throw new SecretInDiff(Object.entries(secrets!).filter(([k, v]) => redact(diff, { [k]: v }) !== diff).map(([k]) => k));
@@ -98,6 +100,74 @@ export async function resetWorktree(repo: string): Promise<void> {
   await ensureAntonIgnored(repo);
   await git(repo, ['checkout', '--', '.']);
   await git(repo, ['clean', '-fd']);
+}
+
+/** sha1 of a work-tree path's content (a symlink's target text, not what it points to); 'missing' if absent. */
+async function contentId(repo: string, p: string): Promise<string> {
+  const abs = resolve(repo, p);
+  const st = await lstat(abs).catch(() => undefined);
+  if (!st) return 'missing';
+  const h = createHash('sha1');
+  if (st.isSymbolicLink()) h.update(`link:${await readlink(abs)}`);
+  else if (st.isFile()) h.update(await readFile(abs));
+  else h.update(`type:${st.mode}`);
+  return h.digest('hex');
+}
+
+/**
+ * `git status --porcelain` as path -> "XY <content sha1>", untracked files listed one by one, `.anton/`
+ * left out. The content id makes a further edit to an already-dirty path show up as a change.
+ * A rename/copy entry contributes both its new and its old path.
+ */
+export async function porcelainStatus(repo: string): Promise<Map<string, string>> {
+  await ensureAntonIgnored(repo);
+  const parts = (await git(repo, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])).split('\0');
+  const out = new Map<string, string>();
+  for (let i = 0; i < parts.length; i++) {
+    const e = parts[i]!;
+    if (e.length < 4) continue;
+    const code = e.slice(0, 2);
+    const paths = [e.slice(3)];
+    if (code[0] === 'R' || code[0] === 'C') paths.push(parts[++i] ?? '');
+    for (const p of paths) if (p && !p.startsWith('.anton/')) out.set(p, `${code} ${await contentId(repo, p)}`);
+  }
+  return out;
+}
+
+/**
+ * Puts repo-relative `paths` back to HEAD: tracked ones via `checkout HEAD --`, others are unstaged and
+ * deleted if they are then untracked and not ignored (an ignored file is left alone). Refuses (throws, before touching anything) a path outside the repo, in `.git/` or in `.anton/`.
+ */
+export async function restorePaths(repo: string, paths: string[]): Promise<void> {
+  for (const p of paths) {
+    const rel = relative(repo, resolve(repo, p));
+    const top = rel.split(/[\\/]/)[0]!.toLowerCase(); // case-insensitive file systems: .GIT is .git
+    if (!rel || isAbsolute(p) || isAbsolute(rel) || top === '..' || top === '.git' || top === '.anton') {
+      throw new Error(`refusing to restore ${JSON.stringify(p)}: outside the project files`);
+    }
+  }
+  // Literal pathspecs: a file named `*.js` must not match every .js file.
+  const lit = ['--literal-pathspecs'];
+  const notInHead: string[] = [];
+  for (const p of paths) {
+    let inHead = true;
+    try {
+      await git(repo, [...lit, 'cat-file', '-e', `HEAD:${p}`]);
+    } catch {
+      inHead = false;
+    }
+    if (inHead) await git(repo, [...lit, 'checkout', '-q', 'HEAD', '--', p]);
+    else {
+      await git(repo, [...lit, 'rm', '-q', '--cached', '--ignore-unmatch', '--', p]);
+      notInHead.push(p);
+    }
+  }
+  if (!notInHead.length) return;
+  // Tracked files (a restored .gitignore among them) are back first, so this status sees HEAD's ignore
+  // rules: only paths still untracked and not ignored are deleted. Ignored files (.env, node_modules) never are.
+  const untracked = new Set((await git(repo, ['status', '--porcelain=v1', '-z', '--untracked-files=all'])).split('\0')
+    .filter((e) => e.startsWith('?? ')).map((e) => e.slice(3)));
+  for (const p of notInHead) if (untracked.has(p)) await rm(resolve(repo, p), { force: true, recursive: true });
 }
 
 /** Create and switch to a new branch; git's error surfaces if it already exists. */
@@ -131,6 +201,15 @@ export async function repoRoot(path: string): Promise<string | null> {
     return (await git(path, ['rev-parse', '--show-toplevel'])).trim();
   } catch {
     return null;
+  }
+}
+
+/** Tracked paths (`git ls-files`), at most `cap` of them; [] when `repo` is not a git repo. Names only, never contents. */
+export async function listFiles(repo: string, cap = 2000): Promise<string[]> {
+  try {
+    return (await git(repo, ['ls-files', '-z'])).split('\0').filter(Boolean).slice(0, cap);
+  } catch {
+    return [];
   }
 }
 

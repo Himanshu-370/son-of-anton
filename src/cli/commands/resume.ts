@@ -18,7 +18,6 @@ export async function resumeCommand(
     const budget = parseBudget(opts.budget);
     const job = await resolveJob(project);
     if ((await refuseIfRunning(d, job.repo, project)) !== 0) return 1;
-    await assertOnJobBranch(job.repo, job.state);
     let state = job.state;
     const paused = state.stage === 'paused';
 
@@ -26,6 +25,7 @@ export async function resumeCommand(
       d.err(`Nothing to resume (stage: ${state.stage})`);
       return 1;
     }
+    await assertOnJobBranch(job.repo, job.state);
     if (opts.acceptAsIs && !(paused && (state.pausedFrom === 'verify' || state.pausedFrom === 'build'))) {
       d.err(`--accept-as-is only works when paused during build or verify (stage: ${state.stage}${paused ? `, paused from: ${state.pausedFrom}` : ''})`);
       return 1;

@@ -10,7 +10,7 @@ describe('DEFAULTS', () => {
 });
 
 describe('ROLE_MODELS', () => {
-  it('matches the role table for all 9 roles', () => {
+  it('matches the role table for all 11 roles', () => {
     expect(ROLE_MODELS).toEqual({
       pm: { model: 'claude-opus-5-5', effort: 'high' },
       tech_lead: { model: 'claude-opus-5-5', effort: 'medium' },
@@ -22,6 +22,7 @@ describe('ROLE_MODELS', () => {
       security_reviewer: { model: 'claude-sonnet-5-5', effort: 'high' },
       coach: { model: 'claude-haiku-5-5', effort: 'low' },
       mapper: { model: 'claude-sonnet-5-5', effort: 'low' },
+      browser_tester: { model: 'claude-sonnet-5-5', effort: 'medium' },
     });
   });
 });

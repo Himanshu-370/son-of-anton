@@ -241,6 +241,34 @@ describe('commitAll secret guard', () => {
     expect(await readFile(join(repo, 'conf.ts'), 'utf8')).toContain('FAKE_SECRET_VALUE_123');
     expect((await git(repo, 'diff', '--cached', '--name-only')).stdout).toBe('');
   });
+  it('staged removal of a line holding a secret value is allowed', async () => {
+    await writeFile(join(repo, 'conf.ts'), 'const k = "FAKE_SECRET_VALUE_123";\nconst x = 1;\n');
+    await commitAll(repo, 'first');
+    await writeFile(join(repo, 'conf.ts'), 'const x = 1;\n');
+    expect(await commitAll(repo, 'drop', { API_TOKEN: 'FAKE_SECRET_VALUE_123' })).not.toBeNull();
+  });
+  it('secret in unchanged context lines does not block', async () => {
+    await writeFile(join(repo, 'conf.ts'), 'const k = "FAKE_SECRET_VALUE_123";\nconst x = 1;\n');
+    await commitAll(repo, 'first');
+    await writeFile(join(repo, 'conf.ts'), 'const k = "FAKE_SECRET_VALUE_123";\nconst x = 2;\n');
+    expect(await commitAll(repo, 'edit', { API_TOKEN: 'FAKE_SECRET_VALUE_123' })).not.toBeNull();
+  });
+  it('added line with the secret still blocks, naming the key only', async () => {
+    await writeFile(join(repo, 'conf.ts'), 'const x = 1;\n');
+    await commitAll(repo, 'first');
+    await writeFile(join(repo, 'conf.ts'), 'const x = 1;\nconst k = "FAKE_SECRET_VALUE_123";\n');
+    const err = await commitAll(repo, 'leak', { API_TOKEN: 'FAKE_SECRET_VALUE_123' }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(SecretInDiff);
+    expect((err as Error).message).toContain('API_TOKEN');
+    expect((err as Error).message).not.toContain('FAKE_SECRET_VALUE_123');
+  });
+  it('added line whose content starts with ++ still blocks', async () => {
+    await writeFile(join(repo, 'conf.ts'), 'let count = 0;\n');
+    await commitAll(repo, 'first');
+    await writeFile(join(repo, 'conf.ts'), 'let count = 0;\n++count = "FAKE_SECRET_VALUE_123";\n');
+    const err = await commitAll(repo, 'leak', { API_TOKEN: 'FAKE_SECRET_VALUE_123' }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(SecretInDiff);
+  });
   it('commits clean changes with secrets set, and with no secrets', async () => {
     await writeFile(join(repo, 'a.txt'), 'a');
     expect(await commitAll(repo, 'one', { API_TOKEN: 'FAKE_SECRET_VALUE_123' })).toMatch(/^[0-9a-f]{40}$/);

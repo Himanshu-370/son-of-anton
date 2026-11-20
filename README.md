@@ -71,12 +71,23 @@ Verify first runs the acceptance checks and the smoke run. If any of them fail, 
 - `anton accept-risk <project> <findingId> --reason "<text>"` marks a security finding (an id like `SEC-1a2b3c4d`) as an accepted risk, with your reason. Accepted findings no longer block and the report shows them as accepted with the reason. Use it when a job pauses at the round cap or with no progress because of a security finding you decide to live with. The normal next step is `anton resume <project>`: it re-runs verify, the reviewers run again, and the accepted finding no longer blocks. `anton resume <project> --accept-as-is` instead delivers right away and ships any other blockers (failing checks, blocking code-review findings, other security findings) along with it. If you accept a risk after the report was written, it shows up after the next delivery.
 - Scanner finding ids are computed from the scanner, rule and file, so they stay the same between rounds and an accepted scanner finding stays accepted. Ids of findings the security reviewer raises itself come from the file and the finding's title; the reviewer is shown the previous titles and told to reuse them, but if it rewords a title the finding gets a new id and has to be accepted again.
 - gitleaks scans the whole git history, so a secret that was committed keeps being reported after the code is fixed. The fix is to rotate the secret, then accept the finding with `accept-risk`.
+- Accepted risks recorded on scanner findings before v0.3.0 no longer match. Re-accept them with `anton accept-risk`.
 
 ## Security scanners
 
 The scanners (gitleaks, osv-scanner and semgrep) are installed in the Docker image. A scanner that fails to run is listed in the report under "Scanners unavailable".
 
 The image also holds the agent code itself (the in-container entry the reviewers and builders run through). After pulling an update, re-run `npm run build:image`: a stale image means old agent code, not just missing scanners, and old agent code would ignore the reviewers' read-only tool restriction. Anton fails closed on this: it refuses to start with `Kit image files are out of date — run: npm run build:image` when the staged files differ from `dist/agent/`, and stops an agent call with `agent entry is out of date (protocol …)` when the image's entry does not speak the current protocol.
+
+## Web apps (the web kit)
+
+Anton has two kits: `fallback` (any project, no browser) and `web` (adds Chromium and Playwright so an agent can open your app and look at it). During the spec session Anton detects which one fits and writes a `Kit:` line in `spec.md`. You can change it to `fallback` or `web` while you review the spec, before `anton approve` (checkpoint 1).
+
+A web plan sets two extra commands: `serve` (starts the app, for example `python3 -m http.server 8080`) and `url` (where it listens, always `localhost` or `127.0.0.1` with a port). Anton starts `serve` in the container, waits for `url` to answer, then runs the browser checks.
+
+Browser checks run only when all tests pass. The browser agent must not change project files: if it does, Anton reverts them and the round fails. Each check gets a `Browser` result in `REPORT.md` (`pass`, `fail`, `n/a`, or `-` when the browser step was never reached).
+
+Screenshots are saved at `evidence/screens/<AC-id>.png` in the job folder and listed under `## Screenshots` in `REPORT.md`. They are not redacted: a page that shows a secret will have it in the picture, so look before you share them.
 
 ## Changing existing code
 
@@ -110,10 +121,11 @@ npm test                                   # unit tests, no Docker or API needed
 ANTON_E2E=1 npm run test:e2e               # also runs Docker-only e2e tests
 ANTON_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/new-project.e2e.test.ts
 ANTON_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/change-job.e2e.test.ts   # adopts a tiny repo, runs a change
+ANTON_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/web-job.e2e.test.ts      # builds a static web page, checks Kit: web and a screenshot in REPORT.md
 ```
 
 The last one builds a real project end to end with the API and costs up to about $3, and checks that REPORT.md has the `## Code review` and `## Security` sections. It runs only when BOTH `ANTON_E2E=1` and `ANTHROPIC_API_KEY` are set; with `ANTON_E2E=1` alone (no key), only the Docker-only e2e tests run and it is skipped.
 
 ## Limits
 
-Fallback kit only, CLI only, no Slack yet. See the [roadmap](docs/superpowers/plans/2026-11-19-son-of-anton-roadmap.md).
+Two kits (fallback and web), CLI only, no Slack yet. See the [roadmap](docs/superpowers/plans/2026-11-19-son-of-anton-roadmap.md).

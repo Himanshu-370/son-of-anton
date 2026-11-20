@@ -43,7 +43,7 @@ describe('runScanners', () => {
       severity: 'high',
       file: 'config.js',
       line: 1,
-      key: '0000000000000000000000000000000000000000:config.js:aws-access-token:1',
+      key: expect.stringMatching(/^[0-9a-f]{8}$/),
       message: expect.stringContaining('AWS'),
     });
     expect(f.cmds.some((c) => c.includes('timeout 300') && c.includes('--report-path /tmp/gitleaks.json'))).toBe(true);
@@ -51,7 +51,7 @@ describe('runScanners', () => {
 
   it('two gitleaks hits of the same rule in the same file get different refs', async () => {
     const [a] = JSON.parse(fx('gitleaks.json'));
-    const b = { ...a, StartLine: 9, Fingerprint: 'other-fingerprint' };
+    const b = { ...a, StartLine: 9, Fingerprint: 'other-fingerprint', Secret: 'FAKE_OTHER_SECRET' };
     const out = await runScanners('c', { runIn: fake({ gitleaks: r(1), report: r(0, JSON.stringify([a, b])) }).runIn });
     const refs = out.findings.map(scannerRef);
     expect(refs).toHaveLength(2);
@@ -94,9 +94,23 @@ describe('runScanners', () => {
     expect(a).toBe(b);
   });
 
+  it('gitleaks key is stable when the finding moves to another line', async () => {
+    const [a] = JSON.parse(fx('gitleaks.json'));
+    const b = { ...a, StartLine: 9, Fingerprint: 'moved:9' };
+    const out = await runScanners('c', { runIn: fake({ gitleaks: r(1), report: r(0, JSON.stringify([a, b])) }).runIn });
+    expect(out.findings[0]!.key).toBe(out.findings[1]!.key);
+  });
+
+  it('gitleaks key never contains the secret', async () => {
+    const [a] = JSON.parse(fx('gitleaks.json'));
+    const x = { ...a, Secret: 'FAKE_SECRET_VALUE_123' };
+    const out = await runScanners('c', { runIn: fake({ gitleaks: r(1), report: r(0, JSON.stringify([x])) }).runIn });
+    expect(out.findings[0]!.key).not.toContain('FAKE_SECRET_VALUE_123');
+  });
+
   it('gitleaks without Fingerprint falls back to file:rule:line, never "undefined"', async () => {
     const [a] = JSON.parse(fx('gitleaks.json'));
-    const { Fingerprint: _f, ...noFp } = a;
+    const { Fingerprint: _f, Secret: _s, ...noFp } = a;
     const { StartLine: _l, ...noLine } = noFp;
     const keys = async (x: object) =>
       (await runScanners('c', { runIn: fake({ gitleaks: r(1), report: r(0, JSON.stringify([x])) }).runIn })).findings[0]!.key;

@@ -135,6 +135,37 @@ describe('ensureImage', () => {
   });
 });
 
+describe('ensureImage with a base kit', () => {
+  async function makeWeb(baseKit: { name: string; dockerfile: string }) {
+    const dir = await mkdtemp(join(tmpdir(), 'anton-web-'));
+    await writeFile(join(dir, 'Dockerfile'), 'ARG BASE\nFROM ${BASE}\n');
+    return { name: 'web', dockerfile: join(dir, 'Dockerfile'), dir, base: baseKit };
+  }
+
+  it('ensureImage builds the base first and passes BASE build-arg', async () => {
+    const base = await makeKit();
+    const web = await makeWeb({ name: 'node', dockerfile: base.dockerfile });
+    const { exec, calls } = fake((c) => (c.args[0] === 'image' ? { exitCode: 1 } : {}));
+    const tag = await ensureImage(web, exec, { agentDir: base.agentDir });
+    const builds = calls.filter((c) => c.args[0] === 'build');
+    expect(builds).toHaveLength(2);
+    const baseTag = builds[0].args[builds[0].args.indexOf('-t') + 1];
+    expect(baseTag).toMatch(/^anton\/kit-node:/);
+    expect(builds[1].args).toEqual(['build', '-t', tag, '-f', web.dockerfile, '--build-arg', `BASE=${baseTag}`, web.dir]);
+    expect(tag).toMatch(/^anton\/kit-web:\d+\.\d+\.\d+-[0-9a-f]{12}$/);
+  });
+
+  it('web tag changes when the base tag changes', async () => {
+    const base = await makeKit();
+    const web = await makeWeb({ name: 'node', dockerfile: base.dockerfile });
+    const { exec } = fake();
+    const t1 = await ensureImage(web, exec, { agentDir: base.agentDir });
+    await writeFile(join(base.dir, '.stage', 'sub', 'x.json'), '{"a":1}');
+    const t2 = await ensureImage(web, exec, { agentDir: base.agentDir });
+    expect(t2).not.toBe(t1);
+  });
+});
+
 describe('startContainer', () => {
   it('startContainer passes exactly one -v mount: <repo>:/workspace', async () => {
     const { exec, calls } = fake();

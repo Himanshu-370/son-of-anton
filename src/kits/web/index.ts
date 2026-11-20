@@ -1,0 +1,112 @@
+import { lstat, mkdir, rm } from 'node:fs/promises';
+import { basename, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import type { runAgent as defaultRunAgent } from '../../agent/host-runner.js';
+import { porcelainStatus as defaultStatus, restorePaths as defaultRestore } from '../../core/git.js';
+import type { JobState } from '../../core/state.js';
+import { runIn as dockerRunIn } from '../../docker/container.js';
+import { fallbackKit } from '../fallback/index.js';
+import type { CheckResult, Kit, VerifyContext, VerifyOutcome } from '../types.js';
+import {
+  appLogTail, browserReport, changedPaths, KILL_ALL, mergeBrowser, READY_TRIES, runBrowserAgent, startApp, STOP_APP,
+  type BrowserCheck, type RunIn,
+} from './browser.js';
+
+const WEB_FILE = /(^|\/)(next\.config\.[^/]+|vite\.config\.[^/]+|svelte\.config\.[^/]+|nuxt\.config\.[^/]+|angular\.json|[^/]+\.(tsx|jsx|vue|svelte)|index\.html)$/;
+const WEB_WORDS = /\b(web ?app|website|web page|frontend|front-end|react|next\.js|vue|svelte|dashboard|landing page|browser)\b/i;
+
+function detect(description: string, files: string[]): number {
+  if (files.some((f) => WEB_FILE.test(f))) return 0.9;
+  return WEB_WORDS.test(description) ? 0.8 : 0;
+}
+
+export type WebVerifyDeps = {
+  runIn?: RunIn;
+  runAgent?: typeof defaultRunAgent;
+  porcelainStatus?: typeof defaultStatus;
+  restorePaths?: typeof defaultRestore;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+/**
+ * Restores every path whose status differs from `before`, re-snapshotting after each restore: restoring
+ * `.gitignore` can expose files it hid (or hide ones that showed). A restored path that is now clean
+ * (at HEAD) counts as settled. Bounded to 3 restores; whatever still differs after that is `unsettled`.
+ */
+async function restoreChanges(
+  repo: string, before: Map<string, string>, status: typeof defaultStatus, restore: typeof defaultRestore,
+): Promise<{ changed: string[]; unsettled: string[] }> {
+  const restored = new Set<string>();
+  for (let i = 0; ; i++) {
+    const now = await status(repo);
+    const todo = changedPaths(before, now).filter((p) => !restored.has(p) || now.has(p));
+    if (!todo.length) return { changed: [...restored].sort(), unsettled: [] };
+    if (i === 3) return { changed: [...new Set([...restored, ...todo])].sort(), unsettled: todo };
+    for (const p of todo) restored.add(p);
+    await restore(repo, todo);
+  }
+}
+
+/**
+ * Fallback verify first; only when every check passes and runOk, start the app in the container, run one
+ * browser_tester session over all checks, and merge its verdicts. The app is always stopped and any
+ * project file the agent touched is restored (and fails every check).
+ */
+async function verify(ctx: VerifyContext, deps: WebVerifyDeps = {}): Promise<VerifyOutcome> {
+  const base = await fallbackKit.verify(ctx, { runIn: deps.runIn });
+  if (!base.runOk || base.results.some((r) => r.status === 'fail')) return base;
+  const { serve, url } = ctx.commands;
+  const stage = ctx.stage;
+  if (!serve || !url || !stage) throw new Error('web verify needs commands.serve, commands.url and the stage context');
+  const runIn: RunIn = deps.runIn ?? ((n, c) => dockerRunIn(n, c));
+  const status = deps.porcelainStatus ?? defaultStatus;
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+
+  const evidence = join(ctx.jobDir, 'evidence');
+  const boxEvidence = `/workspace/.anton/jobs/${basename(ctx.jobDir)}/evidence`;
+  const screens = join(evidence, 'screens');
+  // runVerify checked evidence itself; screens is container-writable too, so never rm/mkdir through a link.
+  if ((await lstat(screens).catch(() => undefined))?.isSymbolicLink()) throw new Error(`Refusing to verify: ${screens} is a symlink`);
+  await rm(screens, { recursive: true, force: true }); // no stale screenshot from an earlier round
+  await mkdir(screens, { recursive: true });
+
+  let ready = false;
+  let agent: { checks: BrowserCheck[]; state: JobState } | undefined;
+  let changed: string[] = [];
+  let unsettled: string[] = [];
+  let tail: string;
+  try {
+    ready = await startApp(runIn, ctx.container, serve, url, `${boxEvidence}/app.log`, sleep);
+    if (ready) {
+      const before = await status(stage.repo);
+      try {
+        agent = await runBrowserAgent(stage, ctx.checks, url, `${boxEvidence}/screens`, deps.runAgent);
+      } finally {
+        // Nothing may keep writing between the snapshot and the next stage: stop the app and any leftover process.
+        await runIn(ctx.container, KILL_ALL);
+        ({ changed, unsettled } = await restoreChanges(stage.repo, before, status, deps.restorePaths ?? defaultRestore));
+      }
+    }
+  } finally {
+    await runIn(ctx.container, STOP_APP);
+    tail = await appLogTail(runIn, ctx.container, `${boxEvidence}/app.log`, join(evidence, 'app.log'), ctx.secrets);
+  }
+
+  if (!ready) {
+    const error = `App did not answer at ${url}. Last lines of app.log:\n${tail}`;
+    const results: CheckResult[] = ctx.checks.map((c) => ({ id: c.id, status: 'fail', reason: 'run_failed', tests: [], error }));
+    const failureReport = `### App did not start\n\`${serve}\` did not answer at ${url} within ${READY_TRIES} s, or exited. Last lines of app.log:\n\`\`\`\n${tail}\n\`\`\``;
+    return { ...base, results, runOk: false, failureReport };
+  }
+  const results = mergeBrowser(base.results, agent!.checks, changed, screens, unsettled);
+  return { ...base, results, failureReport: browserReport(results), state: agent!.state };
+}
+
+export const webKit: Kit & { verify: typeof verify } = {
+  name: 'web',
+  dockerfile: fileURLToPath(new URL('../../../src/kits/web/Dockerfile', import.meta.url)),
+  base: fallbackKit,
+  detect,
+  verify,
+  baseline: (ctx) => fallbackKit.baseline(ctx),
+};

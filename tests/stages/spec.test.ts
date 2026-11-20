@@ -157,6 +157,54 @@ describe('writeSpec / readApprovedSpec', () => {
     expect(out.acceptanceChecks[0]!.text).toBe('adds a habit fast');
   });
 
+  it('spec.md Kit line round-trips; edited value wins', async () => {
+    await writeSpec(ctx.jobDir, { ...spec, kit: 'web' });
+    const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');
+    expect(md).toMatch(/^# Habit Tracker\n\nKit: web\n/);
+    expect((await readApprovedSpec(ctx.jobDir)).kit).toBe('web');
+    await writeFile(join(ctx.jobDir, 'spec.md'), md.replace('Kit: web', 'Kit: fallback'));
+    expect((await readApprovedSpec(ctx.jobDir)).kit).toBe('fallback');
+  });
+
+  it('only the Kit line before the first ## heading counts', async () => {
+    await writeSpec(ctx.jobDir, { ...spec, kit: 'web' });
+    const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');
+    await writeFile(join(ctx.jobDir, 'spec.md'), `${md}\n## Notes\n\nKit: rails\n`);
+    expect((await readApprovedSpec(ctx.jobDir)).kit).toBe('web');
+    // No header Kit line: a body one is ignored too (spec.json's value stands).
+    await writeFile(join(ctx.jobDir, 'spec.md'), `${md.replace('Kit: web\n\n', '')}\n## Notes\n\nKit: rails\n`);
+    expect((await readApprovedSpec(ctx.jobDir)).kit).toBe('web');
+    // `\s*` must not cross a newline: "Kit:" followed by a blank line is an empty value, not the next line.
+    await writeFile(join(ctx.jobDir, 'spec.md'), md.replace('Kit: web', 'Kit:'));
+    await expect(readApprovedSpec(ctx.jobDir)).rejects.toThrow('Unknown kit ""');
+  });
+
+  it('unknown kit in spec.md throws', async () => {
+    await writeSpec(ctx.jobDir, spec);
+    const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');
+    await writeFile(join(ctx.jobDir, 'spec.md'), md.replace('Kit: fallback', 'Kit: rails'));
+    await expect(readApprovedSpec(ctx.jobDir)).rejects.toThrow('Unknown kit "rails" in spec.md (use fallback or web)');
+  });
+
+  it('old spec.json without kit loads as fallback', async () => {
+    await writeSpec(ctx.jobDir, spec);
+    const old = JSON.parse(await readFile(join(ctx.jobDir, 'spec.json'), 'utf8'));
+    delete old.kit;
+    await writeFile(join(ctx.jobDir, 'spec.json'), JSON.stringify(old));
+    // An older spec.md has no Kit line either: spec.json's (defaulted) value is used.
+    const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');
+    await writeFile(join(ctx.jobDir, 'spec.md'), md.replace('Kit: fallback\n\n', ''));
+    expect((await readApprovedSpec(ctx.jobDir)).kit).toBe('fallback');
+  });
+
+  it('PM agent schema and prompt no longer carry kit', async () => {
+    const { fn, reqs } = fakeRun([{ kind: 'spec', spec }]);
+    const r = await runSpec(ctx, 'd', async () => [], { runAgent: fn });
+    expect(JSON.stringify(reqs[0]!.outputSchema)).not.toContain('"kit"');
+    expect(r.spec.kit).toBe('fallback');
+    expect(await loadPrompt('spec.md')).not.toMatch(/`kit`/);
+  });
+
   it('rejects duplicates and zero checks', async () => {
     await writeSpec(ctx.jobDir, spec);
     const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');

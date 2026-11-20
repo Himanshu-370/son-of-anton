@@ -387,19 +387,32 @@ describe('change job branch guard', () => {
     expect((await loadState(dir)).stage).toBe('awaiting_spec_approval');
     expect(h.spawned).toEqual([]);
   });
-  it('approve (final) on the wrong branch: refuses and stays awaiting_final_review', async () => {
-    const { dir } = await changeJob({ stage: 'awaiting_final_review', round: 1 });
-    const h = harness();
-    expect(await approveCommand('p', h.deps)).toBe(1);
-    expect(h.errText()).toContain('Switch back to the job branch first');
-    expect((await loadState(dir)).stage).toBe('awaiting_final_review');
-  });
   it('resume on the wrong branch: refuses and spawns nothing', async () => {
     await changeJob({ stage: 'paused', pausedFrom: 'build', pauseReason: 'error', round: 1 });
     const h = harness();
     expect(await resumeCommand('p', {}, h.deps)).toBe(1);
     expect(h.errText()).toContain('git switch anton/1-init');
     expect(h.spawned).toEqual([]);
+  });
+  it('resume of a done change job says nothing to resume even off-branch', async () => {
+    await changeJob({ stage: 'done', round: 1 });
+    const h = harness();
+    expect(await resumeCommand('p', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('Nothing to resume');
+  });
+  it('final accept works after the user switched to main', async () => {
+    const { dir, cur } = await changeJob({ stage: 'awaiting_final_review', round: 1 });
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(0);
+    expect((await loadState(dir)).stage).toBe('done');
+    expect(await cur()).toBe('main');
+  });
+  it('spec approval off-branch still refuses', async () => {
+    const { dir } = await changeJob({ stage: 'awaiting_spec_approval' });
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(1);
+    expect(h.errText()).toContain('git switch anton/1-init');
+    expect((await loadState(dir)).stage).toBe('awaiting_spec_approval');
   });
   it('final accept on the job branch with a clean tree switches back to fromBranch', async () => {
     const { dir, g, cur } = await changeJob({ stage: 'awaiting_final_review', round: 1 });
@@ -768,6 +781,26 @@ describe('anton change', () => {
     expect((await execa('git', ['branch', '--show-current'], { cwd: dir })).stdout).toBe('anton/2-x');
     expect(h.text()).toContain(`Spec ready: ${join(d, 'spec.md')}. Edit the acceptance checks if you like, then run: anton approve app. Work happens on branch anton/2-x.`);
     expect(stopped).toEqual(['anton-app']);
+  });
+
+  it('change picks the kit from repo file names; the spec container stays on the fallback image', async () => {
+    const dir = await adopted();
+    const images: string[] = [];
+    const listed: string[] = [];
+    const h = harness({
+      ensureImage: async () => 'fallback-img',
+      startContainer: async (slug, _r, image) => { images.push(image); return `anton-${slug}`; },
+      ensureRepoMap: async (ctx) => ctx.state,
+      listFiles: async (r) => { listed.push(r); return ['package.json', 'next.config.js']; },
+      runSpec: async (ctx) => ({ spec, state: ctx.state }),
+    });
+    expect(await changeCommand('app', 'add a flag', {}, h.deps)).toBe(0);
+    expect(listed).toEqual([dir]);
+    expect(images).toEqual(['fallback-img']);
+    const d = jobDirOf(dir, '1-add-a-flag');
+    expect(JSON.parse(await readFile(join(d, 'spec.json'), 'utf8')).kit).toBe('web');
+    expect(await readFile(join(d, 'spec.md'), 'utf8')).toContain('\nKit: web\n');
+    expect(h.text()).toContain('Kit: web');
   });
 
   it('change on dirty repo → exit 1 "Commit or stash your changes first", runSpec not called', async () => {

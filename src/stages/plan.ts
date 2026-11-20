@@ -16,7 +16,9 @@ const CommandsSchema: z.ZodType<Commands> = z.object({
   install: z.string().min(1),
   test: z.string().min(1),
   run: z.string().min(1).optional(),
-});
+  serve: z.string().min(1).optional(),
+  url: z.string().regex(/^http:\/\/(localhost|127\.0\.0\.1):\d+(\/.*)?$/).optional(),
+}).refine((c) => !!c.serve === !!c.url, { message: 'commands.serve and commands.url must be set together' });
 
 export const PlanSchema = z.object({
   commands: CommandsSchema,
@@ -63,6 +65,7 @@ export type PlanDeps = { runAgent?: typeof defaultRunAgent };
 function renderPlan(p: Plan): string {
   const lines = ['# Plan', '', '## Commands', '', `- install: \`${p.commands.install}\``, `- test: \`${p.commands.test}\``];
   if (p.commands.run) lines.push(`- run: \`${p.commands.run}\``);
+  if (p.commands.serve) lines.push(`- serve: \`${p.commands.serve}\``, `- url: \`${p.commands.url}\``);
   if (p.contract?.trim()) lines.push('', '## Contract', '', p.contract.trim());
   for (const t of p.tasks) {
     lines.push('', `## ${t.id}: ${t.title} [${t.area}]`, '', `Acceptance checks: ${t.acceptanceChecks.join(', ') || '(none)'}`, '', t.instructions);
@@ -82,7 +85,7 @@ export async function runPlan(
     role: 'tech_lead',
     model,
     effort,
-    systemPrompt: await loadPrompt('plan.md'),
+    systemPrompt: (await loadPrompt('plan.md')) + (spec.kit === 'web' ? await loadPrompt('plan-web.md') : ''),
     prompt: `${ctx.state.kind === 'change' ? 'This is a change to an existing codebase (see the Change jobs section).\n\n' : ''}Approved spec:\n\n${JSON.stringify(spec, null, 2)}`,
     outputSchema: z.toJSONSchema(PlanSchema) as Record<string, unknown>,
     maxTurns: 30,
@@ -90,6 +93,7 @@ export async function runPlan(
   };
   const res = await run(ctx, req);
   const plan = PlanSchema.parse(res.output);
+  if (spec.kit === 'web' && !plan.commands.serve) throw new PlanInvalid('Web kit plans must set commands.serve and commands.url');
   validatePlanCoverage(plan, spec.acceptanceChecks.map((c) => c.id));
   validatePlanAreas(plan);
   await writeFileAtomic(join(ctx.jobDir, 'plan.json'), redact(JSON.stringify(plan, null, 2) + '\n', ctx.secrets));

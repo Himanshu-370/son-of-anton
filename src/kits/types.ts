@@ -1,7 +1,18 @@
+import type { StageCtx } from '../agent/host-runner.js';
+import type { JobState } from '../core/state.js';
+
 export type AcceptanceCheck = { id: string; text: string };
 
 /** `test` must write JUnit XML to `$ANTON_JUNIT`. */
-export type Commands = { install: string; test: string; run?: string };
+export type Commands = {
+  install: string;
+  test: string;
+  run?: string;
+  /** Starts the app in the foreground (web projects); set together with `url`. */
+  serve?: string;
+  /** Where `serve` listens (localhost or 127.0.0.1 with a port). */
+  url?: string;
+};
 
 export type CheckResult = {
   id: string;
@@ -11,6 +22,8 @@ export type CheckResult = {
   /** real: a passing `[real]` test covers it; stand-in: tests exist but none is a passing `[real]` one. */
   evidence?: 'real' | 'stand-in';
   error?: string;
+  /** Web kit: what the browser agent saw. Only `fail` fails the check; `n/a` (no UI part) neither passes nor fails it. */
+  browser?: { status: 'pass' | 'fail' | 'n/a'; note: string; screenshot?: string };
 };
 
 export type VerifyContext = {
@@ -20,12 +33,16 @@ export type VerifyContext = {
   commands: Commands;
   /** Project secrets: the kit redacts them from everything it saves. */
   secrets?: Record<string, string>;
+  /** The verify stage's context; kits that run an agent (web) need it. */
+  stage?: StageCtx;
 };
 
 /** `tests` lists every testcase (named as in BaselineOutcome.passingTests) so verify can compare with the baseline. */
 export type VerifyOutcome = { results: CheckResult[]; runOk: boolean; failureReport: string; tests: { name: string; passed: boolean }[];
   /** False when install failed or the test run left no valid JUnit XML (so `tests` says nothing); undefined counts as true. */
   testsRan?: boolean;
+  /** Job state after any agent the kit ran (its cost recorded); undefined when the kit ran none. */
+  state?: JobState;
 };
 
 export type BaselineContext = { container: string; jobDir: string; commands: Commands; secrets?: Record<string, string> };
@@ -34,8 +51,13 @@ export type BaselineOutcome = { passingTests: string[]; ran: boolean };
 export interface Kit {
   name: string;
   dockerfile: string;
-  /** 0..1 confidence that this kit suits the job description. */
-  detect(description: string): number;
+  /** Kit whose image this one builds on (FROM); ensured first. */
+  base?: Kit;
+  /**
+   * 0..1 confidence that this kit suits the job. `files` are repo-relative paths (from `git ls-files`,
+   * capped at 2000; [] for a new project). Reads names only, never file contents.
+   */
+  detect(description: string, files: string[]): number;
   verify(ctx: VerifyContext): Promise<VerifyOutcome>;
   /** Runs install and test on the untouched repo; ran is false when install fails or no valid JUnit comes back. */
   baseline(ctx: BaselineContext): Promise<BaselineOutcome>;

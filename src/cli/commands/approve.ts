@@ -12,7 +12,8 @@ export async function approveCommand(project: string, deps: CliDeps = {}): Promi
   return guard(d, async () => {
     const job = await resolveJob(project);
     const { state } = job;
-    if (state.stage === 'awaiting_spec_approval' || state.stage === 'awaiting_final_review') await assertOnJobBranch(job.repo, state);
+    // The final accept makes no commit, so only spec approval needs the branch.
+    if (state.stage === 'awaiting_spec_approval') await assertOnJobBranch(job.repo, state);
     if (state.stage === 'awaiting_spec_approval') {
       const code = await preflightOr2(d);
       if (code !== 0) return code;

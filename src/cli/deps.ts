@@ -5,6 +5,7 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import type { StageCtx } from '../agent/host-runner.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
+import { listFiles as gitListFiles } from '../core/git.js';
 import { currentJobId } from '../core/job.js';
 import { jobDir as jobDirOf } from '../core/paths.js';
 import { getProject } from '../core/registry.js';
@@ -36,6 +37,8 @@ export type CliDeps = {
   /** Builds or refreshes the repo map before a change's spec. */
   ensureRepoMap?: (ctx: StageCtx) => Promise<JobState>;
   ask?: (questions: string[]) => Promise<string[]>;
+  /** Repo file names for kit detection (`git ls-files`, capped). */
+  listFiles?: (repo: string) => Promise<string[]>;
   /** Start the detached background run for a project. */
   spawnRun?: (name: string, jobDir: string) => void;
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
@@ -112,6 +115,7 @@ export function resolveDeps(d: CliDeps = {}): Resolved {
     runSpec: d.runSpec ?? defaultRunSpec,
     ensureRepoMap: d.ensureRepoMap ?? ((ctx) => defaultEnsureRepoMap(ctx)),
     ask: d.ask ?? readlineAsk,
+    listFiles: d.listFiles ?? ((r) => gitListFiles(r)),
     spawnRun: d.spawnRun ?? defaultSpawnRun,
     kill: d.kill ?? ((pid, sig) => { process.kill(pid, sig); }),
     sleep: d.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),

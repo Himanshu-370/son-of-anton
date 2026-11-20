@@ -8,7 +8,8 @@ import { jobDir as jobDirOf } from '../../src/core/paths.js';
 import { registerProject } from '../../src/core/registry.js';
 import { loadState, pause, saveState, transition, type JobState } from '../../src/core/state.js';
 import type { CheckResult, Kit } from '../../src/kits/types.js';
-import { runUnattended, type RunnerDeps } from '../../src/pipeline/runner.js';
+import { runUnattended, startOrReuseContainer, type RunnerDeps } from '../../src/pipeline/runner.js';
+import type { ExecFn } from '../../src/core/exec.js';
 import type { Plan } from '../../src/stages/plan.js';
 import type { SpecDoc } from '../../src/stages/spec.js';
 import type { VerifyResult } from '../../src/stages/verify.js';
@@ -116,10 +117,12 @@ describe('runUnattended', () => {
   it('change job on the wrong branch: nothing runs; on the job branch it runs; new jobs skip the check', async () => {
     await setup({ kind: 'change', branch: 'anton/1-init', fromBranch: 'main' });
     const f = fakes();
-    await expect(runUnattended('p', { ...f.deps, currentBranch: async () => 'main' })).rejects.toThrow('git switch anton/1-init');
+    await runUnattended('p', { ...f.deps, currentBranch: async () => 'main' });
     expect(f.calls).toEqual([]);
     expect(f.stopped).toEqual([]);
+    expect((await loadState(dir)).stage).toBe('paused');
     expect(await isRunning(repo)).toEqual({ running: false });
+    await setup({ kind: 'change', branch: 'anton/1-init', fromBranch: 'main' });
     const g = fakes();
     await runUnattended('p', { ...g.deps, currentBranch: async () => 'anton/1-init', runBaseline: async (c: StageCtx) => transition(c.state, 'build', { round: 1 }) });
     expect(g.calls[0]).toBe('plan');
@@ -127,6 +130,16 @@ describe('runUnattended', () => {
     const h = fakes();
     await runUnattended('p', { ...h.deps, currentBranch: async () => { throw new Error('should not be asked'); } });
     expect(h.calls[0]).toBe('plan');
+  });
+
+  it('runner on wrong branch pauses with error and notifies', async () => {
+    await setup({ kind: 'change', branch: 'anton/1-init', fromBranch: 'main' });
+    const f = fakes();
+    await runUnattended('p', { ...f.deps, currentBranch: async () => 'main' });
+    expect(await loadState(dir)).toMatchObject({ stage: 'paused', pausedFrom: 'plan', pauseReason: 'error' });
+    expect(await readFile(join(dir, 'logs', 'error.log'), 'utf8')).toContain('git switch anton/1-init');
+    expect(f.notify).toHaveBeenCalled();
+    expect(f.calls).toEqual([]);
   });
 
   it('crash during baseline resumes at baseline without re-running plan', async () => {
@@ -323,5 +336,42 @@ describe('runner log redaction', () => {
     expect(all).toContain('boom [REDACTED:TOKEN]');
     expect(all).not.toContain('FAKE_SECRET_VALUE_123');
     expect(await readFile(join(dir, 'logs', 'error.log'), 'utf8')).not.toContain('FAKE_SECRET_VALUE_123');
+  });
+});
+
+describe('startOrReuseContainer', () => {
+  beforeEach(async () => { await setup(); });
+
+  function fakeExec(image: string) {
+    const calls: string[][] = [];
+    const exec: ExecFn = async (_cmd, args) => {
+      calls.push(args);
+      if (args[0] === 'inspect' && args[2] === '{{.State.Running}}') return { exitCode: 0, stdout: 'true\n', stderr: '' };
+      if (args[0] === 'inspect' && args[2] === '{{.Config.Image}}') return { exitCode: 0, stdout: `${image}\n`, stderr: '' };
+      return { exitCode: 0, stdout: '', stderr: '' };
+    };
+    return { exec, calls };
+  }
+  const ensure = async (k: Kit) => `anton/kit-${k.name}:1`;
+
+  it('running container on another image is replaced', async () => {
+    const f = fakeExec('anton/kit-fallback:1');
+    expect(await startOrReuseContainer('p', repo, { ...kit, name: 'web' }, f.exec, ensure)).toBe('anton-p');
+    expect(f.calls).toContainEqual(['rm', '-f', 'anton-p']);
+    expect(f.calls.find((a) => a[0] === 'run')).toContain('anton/kit-web:1');
+  });
+
+  it('running container on the kit image is reused', async () => {
+    const f = fakeExec('anton/kit-web:1');
+    expect(await startOrReuseContainer('p', repo, { ...kit, name: 'web' }, f.exec, ensure)).toBe('anton-p');
+    expect(f.calls.some((a) => a[0] === 'run' || a[0] === 'rm')).toBe(false);
+  });
+
+  it('runner starts the container with the approved spec\'s kit', async () => {
+    await writeFile(join(dir, 'spec.approved.json'), JSON.stringify({ ...spec, kit: 'web' }));
+    const seen: string[] = [];
+    const f = fakes({ kit: undefined, startContainer: async (s, _r, k) => { seen.push(k.name); return `anton-${s}`; } });
+    await runUnattended('p', f.deps);
+    expect(seen).toEqual(['web']);
   });
 });
