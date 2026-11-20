@@ -142,8 +142,8 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       log(`nothing to run (stage: ${state.stage})`);
       return;
     }
-    await assertOnJobBranch(repo, state, deps.currentBranch);
     try {
+      await assertOnJobBranch(repo, state, deps.currentBranch);
       startedContainer = true;
       const container = await startContainer(project, repo);
       secrets = await loadSecrets(project);

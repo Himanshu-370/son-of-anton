@@ -387,19 +387,32 @@ describe('change job branch guard', () => {
     expect((await loadState(dir)).stage).toBe('awaiting_spec_approval');
     expect(h.spawned).toEqual([]);
   });
-  it('approve (final) on the wrong branch: refuses and stays awaiting_final_review', async () => {
-    const { dir } = await changeJob({ stage: 'awaiting_final_review', round: 1 });
-    const h = harness();
-    expect(await approveCommand('p', h.deps)).toBe(1);
-    expect(h.errText()).toContain('Switch back to the job branch first');
-    expect((await loadState(dir)).stage).toBe('awaiting_final_review');
-  });
   it('resume on the wrong branch: refuses and spawns nothing', async () => {
     await changeJob({ stage: 'paused', pausedFrom: 'build', pauseReason: 'error', round: 1 });
     const h = harness();
     expect(await resumeCommand('p', {}, h.deps)).toBe(1);
     expect(h.errText()).toContain('git switch anton/1-init');
     expect(h.spawned).toEqual([]);
+  });
+  it('resume of a done change job says nothing to resume even off-branch', async () => {
+    await changeJob({ stage: 'done', round: 1 });
+    const h = harness();
+    expect(await resumeCommand('p', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('Nothing to resume');
+  });
+  it('final accept works after the user switched to main', async () => {
+    const { dir, cur } = await changeJob({ stage: 'awaiting_final_review', round: 1 });
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(0);
+    expect((await loadState(dir)).stage).toBe('done');
+    expect(await cur()).toBe('main');
+  });
+  it('spec approval off-branch still refuses', async () => {
+    const { dir } = await changeJob({ stage: 'awaiting_spec_approval' });
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(1);
+    expect(h.errText()).toContain('git switch anton/1-init');
+    expect((await loadState(dir)).stage).toBe('awaiting_spec_approval');
   });
   it('final accept on the job branch with a clean tree switches back to fromBranch', async () => {
     const { dir, g, cur } = await changeJob({ stage: 'awaiting_final_review', round: 1 });

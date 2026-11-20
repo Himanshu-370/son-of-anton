@@ -116,10 +116,12 @@ describe('runUnattended', () => {
   it('change job on the wrong branch: nothing runs; on the job branch it runs; new jobs skip the check', async () => {
     await setup({ kind: 'change', branch: 'anton/1-init', fromBranch: 'main' });
     const f = fakes();
-    await expect(runUnattended('p', { ...f.deps, currentBranch: async () => 'main' })).rejects.toThrow('git switch anton/1-init');
+    await runUnattended('p', { ...f.deps, currentBranch: async () => 'main' });
     expect(f.calls).toEqual([]);
     expect(f.stopped).toEqual([]);
+    expect((await loadState(dir)).stage).toBe('paused');
     expect(await isRunning(repo)).toEqual({ running: false });
+    await setup({ kind: 'change', branch: 'anton/1-init', fromBranch: 'main' });
     const g = fakes();
     await runUnattended('p', { ...g.deps, currentBranch: async () => 'anton/1-init', runBaseline: async (c: StageCtx) => transition(c.state, 'build', { round: 1 }) });
     expect(g.calls[0]).toBe('plan');
@@ -127,6 +129,16 @@ describe('runUnattended', () => {
     const h = fakes();
     await runUnattended('p', { ...h.deps, currentBranch: async () => { throw new Error('should not be asked'); } });
     expect(h.calls[0]).toBe('plan');
+  });
+
+  it('runner on wrong branch pauses with error and notifies', async () => {
+    await setup({ kind: 'change', branch: 'anton/1-init', fromBranch: 'main' });
+    const f = fakes();
+    await runUnattended('p', { ...f.deps, currentBranch: async () => 'main' });
+    expect(await loadState(dir)).toMatchObject({ stage: 'paused', pausedFrom: 'plan', pauseReason: 'error' });
+    expect(await readFile(join(dir, 'logs', 'error.log'), 'utf8')).toContain('git switch anton/1-init');
+    expect(f.notify).toHaveBeenCalled();
+    expect(f.calls).toEqual([]);
   });
 
   it('crash during baseline resumes at baseline without re-running plan', async () => {
