@@ -130,6 +130,26 @@ describe('runSecurityReview', () => {
     expect(p).toMatch(/Accepted risks: SEC-aaaaaaaa/);
   });
 
+  it('scanner findings in the prompt: sorted by severity, top 50, messages capped at 300 chars, with a note on the rest', async () => {
+    const many: ScannerFinding[] = [
+      ...Array.from({ length: 60 }, (_, i): ScannerFinding => ({ tool: 'semgrep', ruleId: `low-${i}`, severity: 'low', file: `l${i}.ts`, message: 'low' })),
+      { tool: 'semgrep', ruleId: 'crit', severity: 'critical', file: 'c.ts', message: 'C'.repeat(1000) },
+      { tool: 'osv-scanner', ruleId: 'med', severity: 'medium', file: 'package-lock.json', message: 'med' },
+    ];
+    const h = harness([]);
+    h.deps.runScanners = vi.fn(async () => ({ findings: many, unavailable: [] }));
+    await runSecurityReview(ctx, spec, plan, 'abc', h.deps);
+    const p = h.reqs[0]!.prompt;
+    const start = p.indexOf('[\n', p.indexOf('## Scanner findings'));
+    const json = JSON.parse(p.slice(start, p.indexOf('\n]', start) + 2)) as Array<{ ruleId: string; message: string }>;
+    expect(json).toHaveLength(50);
+    expect(json[0]!.ruleId).toBe('crit');
+    expect(json[1]!.ruleId).toBe('med');
+    expect(json[0]!.message.length).toBeLessThanOrEqual(300);
+    expect(json[0]!.message.endsWith('…')).toBe(true);
+    expect(p).toContain('12 more scanner findings not shown; run semgrep in /workspace to see them');
+  });
+
   it('unavailable scanners are returned unchanged', async () => {
     const r = await runSecurityReview(ctx, spec, plan, 'abc', harness([], ['semgrep', 'osv-scanner']).deps);
     expect(r.unavailable).toEqual(['semgrep', 'osv-scanner']);

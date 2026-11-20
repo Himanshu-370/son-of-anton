@@ -71,6 +71,25 @@ export function blocking(findings: SecurityFinding[], accepted: Set<string>): Se
   return findings.filter((f) => (f.severity === 'critical' || f.severity === 'high') && !accepted.has(f.id));
 }
 
+/** Scanner findings shown to the reviewer; the rest are summarised in a note. */
+export const MAX_SCANNER_FINDINGS = 50;
+/** Scanner messages are capped (a gitleaks message can quote the secret; huge ones bloat the prompt). */
+export const MAX_SCANNER_MESSAGE_CHARS = 300;
+const SEVERITY_RANK = { critical: 0, high: 1, medium: 2, low: 3 } as const;
+
+/** Most severe first, top MAX_SCANNER_FINDINGS, messages capped; plus a note naming what was left out. */
+function scannerForPrompt(all: Array<ScannerFinding & { ref: string }>): { shown: Array<ScannerFinding & { ref: string }>; note?: string } {
+  const sorted = [...all].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
+  const shown = sorted.slice(0, MAX_SCANNER_FINDINGS).map((f) => ({
+    ...f,
+    message: f.message.length > MAX_SCANNER_MESSAGE_CHARS ? `${f.message.slice(0, MAX_SCANNER_MESSAGE_CHARS - 1)}…` : f.message,
+  }));
+  const rest = sorted.slice(MAX_SCANNER_FINDINGS);
+  if (!rest.length) return { shown };
+  const tools = [...new Set(rest.map((f) => f.tool))].join(', ');
+  return { shown, note: `${rest.length} more scanner findings not shown; run ${tools} in /workspace to see them.` };
+}
+
 function priorSection(prior: SecurityReviewContext): string[] {
   const previous = prior.previous ?? [];
   const accepted = prior.accepted ?? [];
@@ -97,6 +116,7 @@ function renderPrompt(
   prior: SecurityReviewContext,
 ): string {
   const tasks = plan.tasks.map((t) => `- ${t.id} [${t.area}] ${t.title}`).join('\n');
+  const { shown, note } = scannerForPrompt(scanner);
   return [
     `# Spec: ${spec.title}`,
     '',
@@ -111,8 +131,9 @@ function renderPrompt(
     unavailable.length ? `Scanners that did not run: ${unavailable.join(', ')}.` : 'All scanners ran.',
     'Each finding has a `ref`. For every scanner finding you keep, copy its `ref` exactly into your output.',
     '',
-    JSON.stringify(scanner, null, 2),
+    JSON.stringify(shown, null, 2),
     '',
+    ...(note ? [note, ''] : []),
     ...priorSection(prior),
     '## Diff of this round',
     '',
