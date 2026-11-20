@@ -9,6 +9,7 @@ import { loadAcceptedRisks } from '../security/risks.js';
 import type { SecurityFinding } from '../security/review.js';
 import { saveState, transition, type JobState } from '../core/state.js';
 import type { CheckResult } from '../kits/types.js';
+import { failuresPath, FailureItemSchema } from './qa.js';
 import { listVerifyCopies } from './verify.js';
 import type { Plan } from './plan.js';
 import type { SpecDoc } from './spec.js';
@@ -106,9 +107,14 @@ async function securitySection(jobDir: string, sections: ReviewSections): Promis
     return reason === undefined ? base : `${base} — accepted — ${cell(reason)}`;
   };
   if (findings.length === 0) lines.push('No findings.');
+  const isOld = (f: SecurityFinding) => f.preexisting === true; // missing on old records counts as new
   for (const sev of SEVERITIES) {
-    const group = findings.filter((f) => f.severity === sev);
+    const group = findings.filter((f) => f.severity === sev && !isOld(f));
     if (group.length) lines.push(`### ${sev}`, '', ...group.map(line), '');
+  }
+  const old = findings.filter(isOld);
+  if (old.length) {
+    lines.push('### Pre-existing', '', 'Already in the repo before this change.', '', ...old.map((f) => `${line(f)} [${f.severity}]`), '');
   }
 
   // No longer reported: in an earlier verify's findings, gone from the latest. Listed only when the
@@ -138,6 +144,13 @@ async function securitySection(jobDir: string, sections: ReviewSections): Promis
   if (unavailable.length) lines.push(`Scanners unavailable: ${unavailable.join(', ')}.`, '');
   while (lines[lines.length - 1] === '') lines.pop();
   return lines;
+}
+
+/** Regressions still open at delivery (only an accept-as-is delivery can have any). */
+async function regressionsSection(jobDir: string): Promise<string[]> {
+  const raw = await readOptional(failuresPath(jobDir));
+  const items = raw ? FailureItemSchema.array().parse(JSON.parse(raw)).filter((i) => i.kind === 'regression') : [];
+  return ['## Regressions', '', ...(items.length ? items.map((i) => `- ${i.id}: ${cell(i.text)}`) : ['None.'])];
 }
 
 function runSection(plan: Plan): string[] {
@@ -188,12 +201,14 @@ export async function runDeliver(
   const sections = await readSections(join(ctx.jobDir, 'evidence', 'results.json'));
   const questions = (await readOptional(join(ctx.jobDir, 'questions.md')))?.trim();
 
+  const change = ctx.state.kind === 'change' && !!ctx.state.branch;
   const md = [
     `# ${spec.title}`,
     '',
     spec.summary,
     '',
     `Job \`${ctx.state.jobId}\`, delivered after ${ctx.state.round} round(s).`,
+    ...(change ? ['', `Branch to merge: ${ctx.state.branch}`] : []),
     '',
     ...checksSection(spec, outcome.results),
     ...servicesSection(spec, outcome.results),
@@ -202,6 +217,7 @@ export async function runDeliver(
     '',
     ...(await securitySection(ctx.jobDir, sections)),
     '',
+    ...(change ? [...(await regressionsSection(ctx.jobDir)), ''] : []),
     ...runSection(plan),
     '',
     ...costSection(costs),

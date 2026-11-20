@@ -191,6 +191,57 @@ describe('runDeliver', () => {
   });
 });
 
+describe('runDeliver change jobs', () => {
+  const deliver = async () => {
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag: async () => {}, listTags: async () => [] });
+    return readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+  };
+  const put = async (name: string, body: unknown) => {
+    await mkdir(join(ctx.jobDir, 'evidence'), { recursive: true });
+    await writeFile(join(ctx.jobDir, 'evidence', name), JSON.stringify(body));
+  };
+  const asChange = () => { ctx.state = { ...ctx.state, kind: 'change', branch: 'anton/j1' }; };
+
+  it('change job report names the branch and regressions', async () => {
+    asChange();
+    await put('failures.json', [
+      { area: 'backend', kind: 'regression', id: 'REG-1', text: 'Regression: test "old works" passed before' },
+      { area: 'backend', kind: 'check', id: 'AC-1:failing', text: 'x' },
+    ]);
+    const md = await deliver();
+    expect(md).toContain('Branch to merge: anton/j1');
+    expect(md).toMatch(/## Regressions\n\n- REG-1: Regression: test "old works" passed before\n/);
+    expect(md).not.toContain('AC-1:failing');
+  });
+
+  it('change job with no regressions says None.', async () => {
+    asChange();
+    expect(await deliver()).toMatch(/## Regressions\n\nNone\./);
+  });
+
+  it('new job report has no branch line or Regressions section', async () => {
+    const md = await deliver();
+    expect(md).not.toContain('Branch to merge');
+    expect(md).not.toContain('## Regressions');
+  });
+
+  it('pre-existing findings grouped', async () => {
+    const f = (id: string, severity: string, preexisting?: boolean) => ({
+      id, severity, area: 'backend', file: 'src/a.ts', title: `T-${id}`, detail: 'd', source: 'scanner', preexisting,
+    });
+    await put('results.json', {
+      round: 1, results, runOk: true,
+      security: { findings: [f('SEC-new00001', 'high', false), f('SEC-old00001', 'high', true), f('SEC-missing1', 'low')], unavailable: [] },
+    });
+    const md = await deliver();
+    const pre = md.indexOf('### Pre-existing');
+    expect(pre).toBeGreaterThan(0);
+    expect(md.indexOf('SEC-old00001')).toBeGreaterThan(pre);
+    expect(md.indexOf('SEC-new00001')).toBeLessThan(pre);
+    expect(md.indexOf('SEC-missing1')).toBeLessThan(pre); // missing flag counts as new
+  });
+});
+
 describe('runDeliver redaction', () => {
   it('REPORT.md never contains the raw value', async () => {
     ctx.secrets = { TOKEN: 'FAKE_SECRET_VALUE_123' };
