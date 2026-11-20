@@ -1,7 +1,8 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runIn as dockerRunIn } from '../../docker/container.js';
+import { writeFileAtomic } from '../../core/atomic.js';
 import { redact } from '../../core/secrets.js';
 import { trimOutput } from '../../core/trim.js';
 import { allTests, isValidJUnit, mapJUnit, passingTests } from '../../verify/junit.js';
@@ -21,7 +22,7 @@ function redactingRunIn(runIn: RunIn, secrets: Record<string, string> | undefine
 
 /** The container writes the JUnit file; if it holds a secret, replace it on disk with the redacted text. */
 async function redactJUnitFile(path: string, redacted: string, original: string): Promise<void> {
-  if (redacted && redacted !== original) await writeFile(path, redacted);
+  if (redacted && redacted !== original) await writeFileAtomic(path, redacted);
 }
 
 type RunFailure = { exitCode: number; output: string };
@@ -62,7 +63,7 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
   const install = await runIn(ctx.container, ctx.commands.install);
   if (install.exitCode !== 0) {
     const output = `${install.stdout}\n${install.stderr}`.trim();
-    await writeFile(outPath, output);
+    await writeFileAtomic(outPath, output);
     const error = trimOutput(output, { fullPath: outPath });
     const results: CheckResult[] = ctx.checks.map((c) => ({
       id: c.id, status: 'fail', reason: 'run_failed', tests: [], error,
@@ -73,7 +74,7 @@ async function verify(ctx: VerifyContext, deps: { runIn?: RunIn } = {}) {
   await runIn(ctx.container, `rm -f ${shq(junit)}`);
   const test = await runIn(ctx.container, `export ANTON_JUNIT=${shq(junit)}; ${ctx.commands.test}`);
   const testOutput = `${test.stdout}\n${test.stderr}`;
-  await writeFile(outPath, testOutput);
+  await writeFileAtomic(outPath, testOutput);
   const xml = await rawRunIn(ctx.container, `cat ${shq(junit)}`);
   const xmlText = xml.exitCode === 0 ? redact(xml.stdout, ctx.secrets) : '';
   await redactJUnitFile(join(evidenceDir, 'junit.xml'), xmlText, xml.stdout);

@@ -104,7 +104,10 @@ function pauseMessage(
  * Build fix rounds read the persisted evidence/failure-report.md (R11); no report is passed in.
  */
 export async function runUnattended(project: string, deps: RunnerDeps = {}): Promise<void> {
-  const log = deps.log ?? ((l: string) => console.log(`[${new Date().toISOString()}] ${l}`));
+  let secrets: Record<string, string> = {};
+  const rawLog = deps.log ?? ((l: string) => console.log(`[${new Date().toISOString()}] ${l}`));
+  /** Every runner log line (it lands in logs/runner.log) is redacted with the secrets loaded so far. */
+  const log = (l: string): void => rawLog(redact(l, secrets));
   const rawNotify = deps.notify ?? ((t: string, m: string) => defaultNotify(t, m));
   /** Notifications are best-effort: a failure must never turn into a run error. */
   const notify = async (t: string, m: string): Promise<void> => {
@@ -127,7 +130,6 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
   const jobDir = jobDirOf(repo, await currentJobId(repo));
   const release = await (deps.acquireLock ?? defaultAcquireLock)(repo);
   let startedContainer = false;
-  let secrets: Record<string, string> = {};
   /**
    * The end-of-run notification is sent only after the container is stopped and the lock released,
    * so a user acting on it (reject/resume) doesn't race this runner's shutdown.

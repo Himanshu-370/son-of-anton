@@ -132,3 +132,24 @@ describe('fallbackKit redaction', () => {
     expect(JSON.stringify(out)).not.toContain('FAKE_SECRET_VALUE_123');
   });
 });
+
+describe('fallbackKit XML-escaped secrets and junit on disk', () => {
+  const S = { TOKEN: 'FAKE&VALUE_123' };
+  const leaky = `<testsuite><testcase name="AC-1 FAKE&amp;VALUE_123"/><testcase name="AC-2 bad"><failure message="x"/></testcase></testsuite>`;
+  const run = async (_c: string, cmd: string) =>
+    cmd.startsWith('cat ') ? { exitCode: 0, stdout: leaky, stderr: '' } : { exitCode: 0, stdout: '', stderr: '' };
+
+  it('junit.xml and baseline-junit.xml are rewritten redacted; baseline and verify names agree', async () => {
+    const ctx = { ...mk({ install: 'npm i', test: 'npm test' }), secrets: S };
+    const v = await fallbackKit.verify(ctx, { runIn: run });
+    const b = await fallbackKit.baseline(ctx, { runIn: run });
+    for (const f of ['junit.xml', 'baseline-junit.xml']) {
+      const t = readFileSync(join(ctx.jobDir, 'evidence', f), 'utf8');
+      expect(t, f).not.toContain('VALUE_123');
+      expect(t).toContain('[REDACTED:TOKEN]');
+    }
+    const passed = v.tests.filter((t) => t.passed).map((t) => t.name);
+    expect(b.passingTests).toEqual(passed);
+    expect(b.passingTests[0]).toContain('[REDACTED:TOKEN]');
+  });
+});

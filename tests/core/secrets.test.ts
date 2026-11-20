@@ -90,4 +90,18 @@ describe('redact', () => {
     const text = JSON.stringify({ log: `got ${v}` });
     expect(JSON.parse(redact(text, { K: v }))).toEqual({ log: 'got [REDACTED:K]' });
   });
+
+  it.each([['trailing backslash', 'FAKEVAL1\\'], ['leading backslash', '\\FAKEVAL1'], ['embedded quote', 'FAKE"VAL1X']])(
+    'JSON stays valid and value is gone: %s',
+    (_n, v) => {
+      const text = JSON.stringify({ e: `x ${v}`, n: 1 }, null, 2);
+      const out = redact(text, { K: v });
+      expect(JSON.parse(out)).toEqual({ e: 'x [REDACTED:K]', n: 1 });
+    },
+  );
+
+  it('XML-escaped form is hidden too', () => {
+    const out = redact('<t name="a FAKE&amp;VAL&lt;1&gt;&quot;&apos;"/>', { K: 'FAKE&VAL<1>"\'' });
+    expect(out).toBe('<t name="a [REDACTED:K]"/>');
+  });
 });

@@ -290,3 +290,22 @@ describe('runUnattended', () => {
     expect(f.notify).not.toHaveBeenCalled();
   });
 });
+
+describe('runner log redaction', () => {
+  it('an error message containing a secret is logged redacted', async () => {
+    await setup();
+    await mkdir(join(process.env.ANTON_HOME!, 'secrets'), { recursive: true });
+    await writeFile(join(process.env.ANTON_HOME!, 'secrets', 'p.env'), 'TOKEN=FAKE_SECRET_VALUE_123\n', { mode: 0o600 });
+    const lines: string[] = [];
+    const f = fakes();
+    await runUnattended('p', {
+      ...f.deps,
+      log: (l) => lines.push(l),
+      runPlan: async () => { throw new Error('boom FAKE_SECRET_VALUE_123'); },
+    });
+    const all = lines.join('\n');
+    expect(all).toContain('boom [REDACTED:TOKEN]');
+    expect(all).not.toContain('FAKE_SECRET_VALUE_123');
+    expect(await readFile(join(dir, 'logs', 'error.log'), 'utf8')).not.toContain('FAKE_SECRET_VALUE_123');
+  });
+});

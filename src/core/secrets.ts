@@ -29,9 +29,11 @@ export function redact(text: string, secrets: Record<string, string> | undefined
   let out = text;
   for (const [k, v] of entries) {
     const tag = `[REDACTED:${k}]`;
-    out = out.split(v).join(tag);
-    const esc = JSON.stringify(v).slice(1, -1);
-    if (esc !== v) out = out.split(esc).join(tag);
+    // Escaped forms first: the raw value can sit inside an escaped one (a trailing backslash) and would corrupt it.
+    const json = JSON.stringify(v).slice(1, -1);
+    const xml = v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+    const xmlNum = xml.replace(/&apos;/g, '&#39;');
+    for (const form of new Set([json, xml, xmlNum, v])) out = out.split(form).join(tag);
   }
   return out;
 }
