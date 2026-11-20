@@ -14,7 +14,8 @@ export type Role =
   | 'qa'
   | 'code_reviewer'
   | 'security_reviewer'
-  | 'coach';
+  | 'coach'
+  | 'mapper';
 
 export type Area = 'frontend' | 'backend' | 'infra';
 
@@ -31,6 +32,7 @@ export const ROLE_MODELS: Record<Role, ModelConfig> = {
   code_reviewer: { model: 'claude-sonnet-5-5', effort: 'medium' },
   security_reviewer: { model: 'claude-sonnet-5-5', effort: 'high' },
   coach: { model: 'claude-haiku-5-5', effort: 'low' },
+  mapper: { model: 'claude-sonnet-5-5', effort: 'low' },
 };
 
 export const DEFAULTS: {

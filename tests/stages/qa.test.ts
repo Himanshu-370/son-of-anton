@@ -76,3 +76,13 @@ describe('failuresPath / renderFailureReport', () => {
     expect(md).toContain('kit detail');
   });
 });
+
+describe('regressionItems', () => {
+  it('area follows the run-failure rule (infra first)', async () => {
+    const { regressionItems } = await import('../../src/stages/qa.js');
+    const plan: Plan = { commands: { install: 'i', test: 't' }, tasks: [task('T1', 'backend', []), task('T2', 'infra', [])], contract: 'c' };
+    const items = regressionItems(['a', 'a', 'b'], [{ name: 'b', passed: true }], plan);
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({ kind: 'regression', area: 'infra' });
+  });
+});

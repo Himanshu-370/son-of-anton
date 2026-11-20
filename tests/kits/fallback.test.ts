@@ -102,4 +102,64 @@ describe('fallbackKit', () => {
   it('dockerfile path exists on disk', () => {
     expect(existsSync(fallbackKit.dockerfile)).toBe(true);
   });
+
+  it('baseline lists passing testcases from a separate junit file; install failure → ran false', async () => {
+    const cmds = { install: 'npm i', test: 'npm test' };
+    const ok = fake(0);
+    expect(await fallbackKit.baseline({ container: 'c', jobDir: mk(cmds).jobDir, commands: cmds }, ok)).toEqual({ passingTests: ['AC-1 ok'], ran: true });
+    expect(ok.calls.some((c) => c.includes('baseline-junit.xml'))).toBe(true);
+    const bad = fake(0, 1);
+    expect(await fallbackKit.baseline({ container: 'c', jobDir: mk(cmds).jobDir, commands: cmds }, bad)).toEqual({ passingTests: [], ran: false });
+    const none = fake(0, 0, null);
+    expect((await fallbackKit.baseline({ container: 'c', jobDir: mk(cmds).jobDir, commands: cmds }, none)).ran).toBe(false);
+  });
+});
+
+describe('fallbackKit redaction', () => {
+  const S = { TOKEN: 'FAKE_SECRET_VALUE_123' };
+  it('test-output.txt, failure report and junit are redacted', async () => {
+    const leaky = `<testsuite><testcase name="AC-1 ok"/><testcase name="AC-2 bad"><failure message="saw FAKE_SECRET_VALUE_123"/></testcase></testsuite>`;
+    const d = fake(0, 0, leaky);
+    const ctx = { ...mk({ install: 'npm i', test: 'npm test' }), secrets: S };
+    const run = async (c: string, cmd: string) => {
+      const r = await d.runIn(c, cmd);
+      return cmd === 'npm test' || cmd.includes('npm test') ? { ...r, stdout: 'out FAKE_SECRET_VALUE_123' } : r;
+    };
+    const out = await fallbackKit.verify(ctx, { runIn: run });
+    const text = readFileSync(join(ctx.jobDir, 'evidence', 'test-output.txt'), 'utf8');
+    expect(text).not.toContain('FAKE_SECRET_VALUE_123');
+    expect(text).toContain('[REDACTED:TOKEN]');
+    expect(JSON.stringify(out)).not.toContain('FAKE_SECRET_VALUE_123');
+  });
+});
+
+describe('fallbackKit XML-escaped secrets and junit on disk', () => {
+  const S = { TOKEN: 'FAKE&VALUE_123' };
+  const leaky = `<testsuite><testcase name="AC-1 FAKE&amp;VALUE_123"/><testcase name="AC-2 bad"><failure message="x"/></testcase></testsuite>`;
+  const run = async (_c: string, cmd: string) =>
+    cmd.startsWith('cat ') ? { exitCode: 0, stdout: leaky, stderr: '' } : { exitCode: 0, stdout: '', stderr: '' };
+
+  it('junit.xml and baseline-junit.xml are rewritten redacted; baseline and verify names agree', async () => {
+    const ctx = { ...mk({ install: 'npm i', test: 'npm test' }), secrets: S };
+    const v = await fallbackKit.verify(ctx, { runIn: run });
+    const b = await fallbackKit.baseline(ctx, { runIn: run });
+    for (const f of ['junit.xml', 'baseline-junit.xml']) {
+      const t = readFileSync(join(ctx.jobDir, 'evidence', f), 'utf8');
+      expect(t, f).not.toContain('VALUE_123');
+      expect(t).toContain('[REDACTED:TOKEN]');
+    }
+    const passed = v.tests.filter((t) => t.passed).map((t) => t.name);
+    expect(b.passingTests).toEqual(passed);
+    expect(b.passingTests[0]).toContain('[REDACTED:TOKEN]');
+  });
+});
+
+describe('fallbackKit testsRan', () => {
+  const cmds = { install: 'npm i', test: 'npm test' };
+  it('false on install failure, missing XML and invalid XML; true on valid XML', async () => {
+    expect((await fallbackKit.verify(mk(cmds), fake(0, 2))).testsRan).toBe(false);
+    expect((await fallbackKit.verify(mk(cmds), fake(0, 0, null))).testsRan).toBe(false);
+    expect((await fallbackKit.verify(mk(cmds), fake(0, 0, 'not xml'))).testsRan).toBe(false);
+    expect((await fallbackKit.verify(mk(cmds), fake(0))).testsRan).toBe(true);
+  });
 });

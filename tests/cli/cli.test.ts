@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { access, chmod, mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
 import type { ExecFn } from '../../src/core/exec.js';
 import { jobDir as jobDirOf } from '../../src/core/paths.js';
-import { registerProject } from '../../src/core/registry.js';
+import { getProject, listProjects, registerProject } from '../../src/core/registry.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
 import type { CliDeps } from '../../src/cli/deps.js';
 import { approveCommand } from '../../src/cli/commands/approve.js';
@@ -15,6 +15,12 @@ import { rejectCommand } from '../../src/cli/commands/reject.js';
 import { resumeCommand } from '../../src/cli/commands/resume.js';
 import { statusCommand } from '../../src/cli/commands/status.js';
 import { stopCommand } from '../../src/cli/commands/stop.js';
+import { changeCommand } from '../../src/cli/commands/change.js';
+import { adoptCommand } from '../../src/cli/commands/adopt.js';
+import { secretsEditCommand } from '../../src/cli/commands/secrets.js';
+import { secretsPath } from '../../src/core/secrets.js';
+import { runSpecSession } from '../../src/cli/spec-session.js';
+import { defaultOpenEditor, resolveDeps } from '../../src/cli/deps.js';
 import { abandonCommand } from '../../src/cli/commands/abandon.js';
 import { acceptRiskCommand } from '../../src/cli/commands/accept-risk.js';
 import { loadAcceptedRisks } from '../../src/security/risks.js';
@@ -313,6 +319,109 @@ describe('anton abandon', () => {
     expect((await loadState(dir)).stage).toBe('abandoned');
     expect(stopped).toEqual(['anton-p']);
   });
+
+  describe('change job restore', () => {
+    async function changeRepo(over: Partial<JobState> = {}) {
+      const { repo, dir } = await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'error', kind: 'change', branch: 'anton/1-init', fromBranch: 'main', ...over });
+      const g = (...a: string[]) => execa('git', a, { cwd: repo });
+      await g('init', '-q', '-b', 'main');
+      await g('config', 'user.email', 't@t'); await g('config', 'user.name', 't');
+      await writeFile(join(repo, '.gitignore'), '.anton/\n');
+      await writeFile(join(repo, 'a.txt'), 'a');
+      await g('add', '-A'); await g('commit', '-qm', 'first');
+      await g('switch', '-qc', 'anton/1-init');
+      const cur = async () => (await g('branch', '--show-current')).stdout;
+      return { repo, dir, g, cur };
+    }
+    it('clean repo: switches back to fromBranch and keeps the anton branch', async () => {
+      const { g, cur } = await changeRepo();
+      expect(await abandonCommand('p', harness().deps)).toBe(0);
+      expect(await cur()).toBe('main');
+      expect((await g('branch', '--list', 'anton/1-init')).stdout).toContain('anton/1-init');
+    });
+    it('dirty repo: prints the git switch hint and stays on the branch', async () => {
+      const { repo, dir, cur } = await changeRepo();
+      await writeFile(join(repo, 'a.txt'), 'dirty');
+      const h = harness();
+      expect(await abandonCommand('p', h.deps)).toBe(0);
+      expect(h.text()).toContain('git switch main');
+      expect(await cur()).toBe('anton/1-init');
+      expect((await loadState(dir)).stage).toBe('abandoned');
+    });
+    it('HEAD on another branch with a clean tree: no switch, nothing printed about switching', async () => {
+      const { g, cur } = await changeRepo();
+      await g('switch', '-qc', 'feature-x');
+      const h = harness();
+      expect(await abandonCommand('p', h.deps)).toBe(0);
+      expect(await cur()).toBe('feature-x');
+      expect(h.text()).not.toMatch(/switch/i);
+    });
+    it('job without fromBranch: no git touched', async () => {
+      const { cur } = await changeRepo({ fromBranch: undefined });
+      expect(await abandonCommand('p', harness().deps)).toBe(0);
+      expect(await cur()).toBe('anton/1-init');
+    });
+  });
+});
+
+describe('change job branch guard', () => {
+  async function changeJob(over: Partial<JobState>) {
+    const { repo, dir } = await project('p', { kind: 'change', branch: 'anton/1-init', fromBranch: 'main', ...over });
+    const g = (...a: string[]) => execa('git', a, { cwd: repo });
+    await g('init', '-q', '-b', 'main');
+    await g('config', 'user.email', 't@t'); await g('config', 'user.name', 't');
+    await writeFile(join(repo, '.gitignore'), '.anton/\n');
+    await writeFile(join(repo, 'a.txt'), 'a');
+    await g('add', '-A'); await g('commit', '-qm', 'first');
+    const cur = async () => (await g('branch', '--show-current')).stdout;
+    return { repo, dir, g, cur };
+  }
+  it('approve (spec) on the wrong branch: refuses, commits nothing, spawns nothing', async () => {
+    const { repo, dir, g } = await changeJob({ stage: 'awaiting_spec_approval' });
+    await g('branch', 'anton/1-init'); // exists, but HEAD stays on main
+    await writeFile(join(repo, 'user-edit.txt'), 'mine');
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(1);
+    expect(h.errText()).toContain('git switch anton/1-init');
+    expect((await g('log', '--oneline')).stdout.split('\n')).toHaveLength(1);
+    expect((await loadState(dir)).stage).toBe('awaiting_spec_approval');
+    expect(h.spawned).toEqual([]);
+  });
+  it('approve (final) on the wrong branch: refuses and stays awaiting_final_review', async () => {
+    const { dir } = await changeJob({ stage: 'awaiting_final_review', round: 1 });
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(1);
+    expect(h.errText()).toContain('Switch back to the job branch first');
+    expect((await loadState(dir)).stage).toBe('awaiting_final_review');
+  });
+  it('resume on the wrong branch: refuses and spawns nothing', async () => {
+    await changeJob({ stage: 'paused', pausedFrom: 'build', pauseReason: 'error', round: 1 });
+    const h = harness();
+    expect(await resumeCommand('p', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('git switch anton/1-init');
+    expect(h.spawned).toEqual([]);
+  });
+  it('final accept on the job branch with a clean tree switches back to fromBranch', async () => {
+    const { dir, g, cur } = await changeJob({ stage: 'awaiting_final_review', round: 1 });
+    await g('switch', '-qc', 'anton/1-init');
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(0);
+    expect((await loadState(dir)).stage).toBe('done');
+    expect(await cur()).toBe('main');
+    expect(h.text()).toContain('Switched back to main');
+  });
+  it('final accept with a failing switch prints the hint instead of throwing', async () => {
+    const { cur, g } = await changeJob({ stage: 'awaiting_final_review', round: 1, fromBranch: 'no-such-branch' });
+    await g('switch', '-qc', 'anton/1-init');
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(0);
+    expect(h.text()).toContain('git switch no-such-branch');
+    expect(await cur()).toBe('anton/1-init');
+  });
+  it('new jobs are unaffected by the branch guard', async () => {
+    await project('p', { stage: 'awaiting_final_review', round: 1 });
+    expect(await approveCommand('p', harness().deps)).toBe(0);
+  });
 });
 
 describe('anton accept-risk', () => {
@@ -475,5 +584,226 @@ describe('anton new', () => {
     const h = harness();
     expect(await newCommand('x', { budget: 'lots' }, h.deps)).toBe(1);
     expect(h.errText()).toContain('--budget');
+  });
+});
+
+describe('secrets', () => {
+  it('secrets edit creates 0600 file and calls openEditor', async () => {
+    const opened: string[] = [];
+    const h = harness({ openEditor: async (p) => { opened.push(p); } });
+    expect(await secretsEditCommand('app', h.deps)).toBe(0);
+    const p = join(home, 'secrets', 'app.env');
+    expect(opened).toEqual([p]);
+    expect((await stat(p)).mode & 0o777).toBe(0o600);
+    expect((await stat(join(home, 'secrets'))).mode & 0o777).toBe(0o700);
+    expect(await readFile(p, 'utf8')).toMatch(/^# /);
+  });
+
+  it('secrets edit rejects a traversal name', async () => {
+    const h = harness({ openEditor: async () => { throw new Error('should not open'); } });
+    expect(await secretsEditCommand('../x', h.deps)).toBe(1);
+    expect(h.errText()).toContain('Project names may only use a-z, 0-9 and -');
+  });
+
+  it('spec session prints secret names, never values; passes env file', async () => {
+    const repo = join(home, 'r');
+    await mkdir(repo, { recursive: true });
+    await execa('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+    await mkdir(join(home, 'secrets'), { recursive: true });
+    await writeFile(join(home, 'secrets', 'app.env'), 'ALPHA=FAKE_VALUE_1\nBETA=not-a-secret\n', { mode: 0o600 });
+    const jobDir = jobDirOf(repo, '1-x');
+    await mkdir(jobDir, { recursive: true });
+    await saveState(jobDir, {
+      jobId: '1-x', project: 'app', stage: 'spec', round: 0, maxRounds: 3, budgetUsd: 10, spentUsd: 0,
+      warned80: false, completedTasks: [], updatedAt: '',
+    });
+    const opts: unknown[] = [];
+    const spec: SpecDoc = { title: 'T', summary: 's', outOfScope: [], kit: 'fallback', tech: [], acceptanceChecks: [{ id: 'AC-1', text: 't' }], services: [{ name: 'Stripe', envVars: ['ALPHA', 'STRIPE_KEY'] }] };
+    const h = harness({
+      startContainer: async (_s, _r, _i, o) => { opts.push(o); return 'c'; },
+      runSpec: async (ctx) => ({ spec, state: ctx.state }) as never,
+      onSigint: () => () => undefined,
+    });
+    expect(await runSpecSession(resolveDeps(h.deps), { name: 'app', repoPath: repo, jobDir, description: 'd', image: 'img', jobId: '1-x' }, 'new')).toBe(0);
+    expect(h.text()).toContain('Secrets this job will receive: ALPHA, BETA');
+    expect(h.text()).toContain('Service Stripe: missing from the secrets file: STRIPE_KEY');
+    expect(h.text() + h.errText()).not.toMatch(/FAKE_VALUE_1|not-a-secret/);
+    expect(opts).toEqual([{ envFile: join(home, 'secrets', 'app.env') }]);
+  });
+});
+
+describe('secrets hardening', () => {
+  it.each([0o644, 0o640])('spec session refuses a %o secrets file; startContainer never called', async (mode) => {
+    await mkdir(join(home, 'secrets'), { recursive: true });
+    const f = join(home, 'secrets', 'app.env');
+    await writeFile(f, 'ALPHA=FAKE_VALUE_1\n');
+    await chmod(f, mode);
+    const startContainer = vi.fn(async () => 'c');
+    const runSpec = vi.fn();
+    const h = harness({ startContainer, runSpec, onSigint: () => () => undefined });
+    await expect(
+      runSpecSession(resolveDeps(h.deps), { name: 'app', repoPath: home, jobDir: home, description: 'd', image: 'img', jobId: '1-x' }, 'new'),
+    ).rejects.toThrow(`Secrets file must be private: chmod 600 ${f}`);
+    expect(startContainer).not.toHaveBeenCalled();
+    expect(runSpec).not.toHaveBeenCalled();
+  });
+
+  it('secrets edit warns when tightening a loose existing file', async () => {
+    await mkdir(join(home, 'secrets'), { recursive: true });
+    const f = join(home, 'secrets', 'app.env');
+    await writeFile(f, 'A=FAKE_VALUE_1\n');
+    await chmod(f, 0o644);
+    const h = harness({ openEditor: async () => undefined });
+    expect(await secretsEditCommand('app', h.deps)).toBe(0);
+    expect(h.errText()).toContain(`${f} was readable by others; tightened to 0600`);
+    expect((await stat(f)).mode & 0o777).toBe(0o600);
+  });
+
+  it('defaultOpenEditor supports editors with args, and rejects on non-zero exit', async () => {
+    const prev = process.env.EDITOR;
+    try {
+      process.env.EDITOR = 'test -n';
+      await expect(defaultOpenEditor('/some path/x.env')).resolves.toBeUndefined();
+      process.env.EDITOR = 'false';
+      await expect(defaultOpenEditor('/x.env')).rejects.toThrow('Editor exited with code 1');
+    } finally {
+      if (prev === undefined) delete process.env.EDITOR;
+      else process.env.EDITOR = prev;
+    }
+  });
+});
+
+describe('adopt', () => {
+  async function repo(name: string): Promise<string> {
+    const dir = join(await mkdtemp(join(tmpdir(), 'anton-adopt-')), name);
+    await mkdir(dir, { recursive: true });
+    await execa('git', ['init', '-q'], { cwd: dir });
+    return dir;
+  }
+
+  it('adopt registers and excludes .anton', async () => {
+    const dir = await repo('My App');
+    const h = harness();
+    expect(await adoptCommand(dir, {}, h.deps)).toBe(0);
+    const { repoPath } = await getProject('my-app');
+    expect(repoPath).toBe(await realpath(dir));
+    expect(await readFile(join(dir, '.git', 'info', 'exclude'), 'utf8')).toContain('.anton/');
+    expect(h.text()).toContain('Start a change with: anton change my-app "<what to change>"');
+  });
+  it('not a repo → exit 1, nothing registered', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'anton-adopt-'));
+    const h = harness();
+    expect(await adoptCommand(dir, {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('is not the root of a git repository');
+    expect(await listProjects()).toEqual([]);
+  });
+  it('subfolder of a repo → exit 1', async () => {
+    const dir = await repo('top');
+    await mkdir(join(dir, 'sub'));
+    const h = harness();
+    expect(await adoptCommand(join(dir, 'sub'), {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('is not the root of a git repository');
+    expect(await listProjects()).toEqual([]);
+  });
+  it('explicit taken name → exit 1', async () => {
+    await project('taken');
+    const h = harness();
+    expect(await adoptCommand(await repo('x'), { name: 'taken' }, h.deps)).toBe(1);
+    expect(h.errText()).toContain('A project named taken already exists');
+  });
+  it('non-slug --name → exit 1, nothing registered', async () => {
+    const h = harness();
+    expect(await adoptCommand(await repo('x'), { name: 'My App' }, h.deps)).toBe(1);
+    expect(h.errText()).toContain('Project names may only use a-z, 0-9 and -');
+    expect(await listProjects()).toEqual([]);
+  });
+  it('default name collision gets a suffix', async () => {
+    await project('dup');
+    const h = harness();
+    expect(await adoptCommand(await repo('dup'), {}, h.deps)).toBe(0);
+    expect((await getProject('dup-2')).name).toBe('dup-2');
+  });
+});
+
+describe('anton change', () => {
+  const spec: SpecDoc = {
+    title: 'T', summary: 's', outOfScope: [], kit: 'fallback', tech: [],
+    acceptanceChecks: [{ id: 'AC-1', text: 'keeps working' }],
+  };
+  async function adopted(dirty = false): Promise<string> {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), 'anton-change-')));
+    const git = (...a: string[]) => execa('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: dir });
+    await git('init', '-q');
+    await writeFile(join(dir, 'a.txt'), 'a');
+    await git('add', '-A');
+    await git('commit', '-qm', 'init');
+    await registerProject('app', dir);
+    if (dirty) await writeFile(join(dir, 'a.txt'), 'changed');
+    return dir;
+  }
+
+  it('change runs spec in change mode on branch anton/2-x', async () => {
+    const dir = await adopted();
+    // an earlier finished job makes the next one number 2
+    await mkdir(jobDirOf(dir, '1-old'), { recursive: true });
+    await saveState(jobDirOf(dir, '1-old'), {
+      jobId: '1-old', project: 'app', stage: 'done', round: 0, maxRounds: 3, budgetUsd: 10, spentUsd: 0,
+      warned80: false, completedTasks: [], updatedAt: '',
+    });
+    const modes: unknown[] = [];
+    const order: string[] = [];
+    const stopped: string[] = [];
+    const h = harness({
+      ensureImage: async () => 'img',
+      startContainer: async (slug) => { order.push('start'); return `anton-${slug}`; },
+      stopContainer: async (n) => { stopped.push(n); },
+      ensureRepoMap: async (ctx) => { order.push('map'); return ctx.state; },
+      runSpec: async (ctx, _d, _a, _deps, mode) => { order.push('spec'); modes.push(mode); return { spec, state: ctx.state }; },
+    });
+    expect(await changeCommand('app', 'x', { budget: '5' }, h.deps)).toBe(0);
+    expect(modes).toEqual(['change']);
+    expect(order).toEqual(['start', 'map', 'spec']);
+    const d = jobDirOf(dir, '2-x');
+    expect(await loadState(d)).toMatchObject({ stage: 'awaiting_spec_approval', branch: 'anton/2-x', budgetUsd: 5 });
+    expect((await execa('git', ['branch', '--show-current'], { cwd: dir })).stdout).toBe('anton/2-x');
+    expect(h.text()).toContain(`Spec ready: ${join(d, 'spec.md')}. Edit the acceptance checks if you like, then run: anton approve app. Work happens on branch anton/2-x.`);
+    expect(stopped).toEqual(['anton-app']);
+  });
+
+  it('change on dirty repo → exit 1 "Commit or stash your changes first", runSpec not called', async () => {
+    await adopted(true);
+    const runSpec = vi.fn();
+    const h = harness({ ensureImage: async () => 'img', startContainer: async () => 'c', runSpec });
+    expect(await changeCommand('app', 'x', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('Commit or stash your changes first');
+    expect(runSpec).not.toHaveBeenCalled();
+  });
+
+  it('bad secrets file → exit 1 before any branch or job is created', async () => {
+    const dir = await adopted();
+    await mkdir(join(home, 'secrets'), { recursive: true });
+    await writeFile(secretsPath('app'), 'K=FAKE_SECRET_VALUE_123\n');
+    await chmod(secretsPath('app'), 0o644);
+    const h = harness({ ensureImage: async () => 'img', startContainer: async () => 'c' });
+    expect(await changeCommand('app', 'x', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('must be private');
+    expect((await execa('git', ['branch', '--list', 'anton/*'], { cwd: dir })).stdout).toBe('');
+    await expect(access(jobDirOf(dir, '1-x'))).rejects.toThrow();
+  });
+
+  it('change on an unknown project → exit 1', async () => {
+    const h = harness({ ensureImage: async () => 'img' });
+    expect(await changeCommand('nope', 'x', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('nope');
+  });
+
+  it('change spec failure → exit 1 with an anton change abandon hint', async () => {
+    await adopted();
+    const h = harness({
+      ensureImage: async () => 'img', startContainer: async () => 'c',
+      runSpec: async () => { throw new Error('boom'); },
+    });
+    expect(await changeCommand('app', 'x', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('then run anton change again');
   });
 });

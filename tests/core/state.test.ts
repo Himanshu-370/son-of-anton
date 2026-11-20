@@ -33,6 +33,7 @@ import {
 function base(stage: Stage = 'spec', extra: Partial<JobState> = {}): JobState {
   return {
     jobId: 'j1',
+    kind: 'new',
     project: 'p',
     stage,
     round: 0,
@@ -125,5 +126,22 @@ describe('state persistence', () => {
     await writeFile(join(dir, 'state.json'), JSON.stringify({ jobId: 'x' }));
     await expect(loadState(dir)).rejects.toThrow();
     expect(await readFile(join(dir, 'state.json'), 'utf8')).toContain('jobId');
+  });
+});
+
+describe('baseline stage and kind', () => {
+  it('plan→baseline→build allowed; plan→build still allowed for new jobs', () => {
+    const b = transition(base('plan'), 'baseline');
+    expect(transition(b, 'build').stage).toBe('build');
+    expect(transition(base('plan'), 'build').stage).toBe('build');
+    expect(unpause(pause(b, 'interrupted')).stage).toBe('baseline');
+  });
+  it('old state.json without kind loads as kind new', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'anton-state-kind-'));
+    const { kind: _k, ...old } = base();
+    await writeFile(join(dir, 'state.json'), JSON.stringify(old));
+    expect((await loadState(dir)).kind).toBe('new');
+    await saveState(dir, await loadState(dir));
+    expect(JSON.parse(await readFile(join(dir, 'state.json'), 'utf8')).kind).toBe('new');
   });
 });

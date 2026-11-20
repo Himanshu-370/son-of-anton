@@ -2,12 +2,13 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { AREA_ORDER, type Area } from '../core/config.js';
 import type { CheckResult } from '../kits/types.js';
+import { sha8 } from '../review/shared.js';
 import type { Plan } from './plan.js';
 
 /** One failure routed to one area's developer. `id` is stable across rounds (it feeds the R1 signature). */
 export const FailureItemSchema = z.object({
   area: z.enum(['frontend', 'backend', 'infra']),
-  kind: z.enum(['check', 'run', 'review', 'security']),
+  kind: z.enum(['check', 'run', 'review', 'security', 'regression']),
   id: z.string(),
   text: z.string(),
 });
@@ -26,7 +27,7 @@ function checkText(r: CheckResult): string {
 }
 
 /** infra if the plan has infra tasks, else backend if it has backend tasks, else the first area present. */
-function runArea(plan: Plan): Area {
+export function runArea(plan: Plan): Area {
   const present = new Set(plan.tasks.map((t) => t.area));
   if (present.has('infra')) return 'infra';
   if (present.has('backend')) return 'backend';
@@ -48,6 +49,30 @@ export function attributeFailures(results: CheckResult[], runOk: boolean, plan: 
   }
   if (!runOk) items.push({ area: runArea(plan), kind: 'run', id: 'run:failed', text: runFailureText });
   return items;
+}
+
+/** One item per baseline-passing test that is now missing or not passing; area by the run-failure rule. */
+export function regressionItems(baselinePassing: string[], tests: { name: string; passed: boolean }[], plan: Plan): FailureItem[] {
+  const passing = new Set(tests.filter((t) => t.passed).map((t) => t.name));
+  const area = runArea(plan);
+  return [...new Set(baselinePassing)]
+    .filter((n) => !passing.has(n))
+    .map((n) => ({
+      area,
+      kind: 'regression' as const,
+      id: `REG-${sha8(n)}`,
+      text: `Regression: test "${n}" passed before this change and is now failing or missing. Existing behavior must keep working.`,
+    }));
+}
+
+/** One item for a run that left no valid JUnit, instead of one per baseline test. */
+export function noRunRegression(baselineCount: number, plan: Plan): FailureItem {
+  return {
+    area: runArea(plan),
+    kind: 'regression',
+    id: 'REG-norun',
+    text: `Regression: the test run produced no results; ${baselineCount} baseline tests unverified. Make the install and test commands run again and write JUnit XML.`,
+  };
 }
 
 /** Markdown failure report: one `### <area>` section per area (AREA_ORDER), then the kit's check details. */

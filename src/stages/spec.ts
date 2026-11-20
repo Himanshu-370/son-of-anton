@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
 import { writeFileAtomic } from '../core/atomic.js';
+import { redact } from '../core/secrets.js';
 import { remainingUsd } from '../core/budget.js';
 import { ROLE_MODELS } from '../core/config.js';
 import type { JobState } from '../core/state.js';
@@ -21,6 +22,8 @@ const specShape = {
   kit: z.literal('fallback'),
   tech: z.array(z.string()),
   acceptanceChecks: z.array(AcceptanceCheckSchema).min(1),
+  /** Outside services the project calls, with the env var names each needs. Default [] keeps older spec.json files parsing. */
+  services: z.array(z.object({ name: z.string().min(1), envVars: z.array(z.string().regex(/^[A-Z_][A-Z0-9_]*$/, 'env var names only, never values')) })).default([]),
 };
 
 /** Structure without the id-sequence rule; used when reading human-edited specs. */
@@ -59,6 +62,8 @@ export type SpecDeps = { runAgent?: typeof defaultRunAgent };
 const SPEC_ONLY_JSON_SCHEMA = z.toJSONSchema(SpecOnlyTurnSchema) as Record<string, unknown>;
 const SPEC_TURN_JSON_SCHEMA = z.toJSONSchema(z.object(turnShape)) as Record<string, unknown>;
 
+const CHANGE_NOTE = `This is a change to an existing codebase, so the spec covers the change, not the whole project. Read .anton/repo-map.md and the relevant code first. List what must keep working (existing behaviour the change must not break) as acceptance checks. If the repo has few or no tests, propose characterization acceptance checks that pin the current behaviour before the change.`;
+
 /**
  * Question loop. Returns the spec and the latest job state (cost accounting from runAgent).
  */
@@ -67,6 +72,7 @@ export async function runSpec(
   description: string,
   ask: (questions: string[]) => Promise<string[]>,
   deps: SpecDeps = {},
+  mode: 'new' | 'change' = 'new',
 ): Promise<{ spec: SpecDoc; state: JobState }> {
   const run = deps.runAgent ?? defaultRunAgent;
   const systemPrompt = await loadPrompt('spec.md');
@@ -75,7 +81,8 @@ export async function runSpec(
   let sessionId: string | undefined;
   /** The previous call's cumulative SDK total; a resumed session's total continues from it. */
   let baseUsd = 0;
-  let prompt = `Description of what to build:\n\n${description}`;
+  let prompt = mode === 'change' ? `Description of the change:\n\n${description}` : `Description of what to build:\n\n${description}`;
+  if (mode === 'change') prompt += `\n\n${CHANGE_NOTE}`;
 
   for (let call = 0; call <= MAX_QUESTION_ROUNDS; call++) {
     const final = call === MAX_QUESTION_ROUNDS;
@@ -126,12 +133,16 @@ function renderSpec(s: SpecDoc): string {
     '',
     s.acceptanceChecks.map((c) => `- **${c.id}**: ${c.text.replace(/\s+/g, ' ').trim()}`).join('\n'),
     '',
+    '## Outside services',
+    '',
+    list((s.services ?? []).map((x) => `${x.name} (env: ${x.envVars.join(', ') || 'none'})`)),
+    '',
   ].join('\n');
 }
 
-export async function writeSpec(jobDir: string, spec: SpecDoc): Promise<void> {
-  const md = renderSpec(spec);
-  await writeFileAtomic(join(jobDir, 'spec.json'), JSON.stringify(spec, null, 2) + '\n');
+export async function writeSpec(jobDir: string, spec: SpecDoc, secrets?: Record<string, string>): Promise<void> {
+  const md = redact(renderSpec(spec), secrets);
+  await writeFileAtomic(join(jobDir, 'spec.json'), redact(JSON.stringify(spec, null, 2) + '\n', secrets));
   await writeFileAtomic(join(jobDir, 'spec.generated.md'), md);
   await writeFileAtomic(join(jobDir, 'spec.md'), md);
 }

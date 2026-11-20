@@ -3,6 +3,7 @@ import { mkdirSync, openSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
+import type { StageCtx } from '../agent/host-runner.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
 import { currentJobId } from '../core/job.js';
 import { jobDir as jobDirOf } from '../core/paths.js';
@@ -16,6 +17,7 @@ import {
 } from '../docker/container.js';
 import { fallbackKit } from '../kits/fallback/index.js';
 import { runUnattended as defaultRunUnattended } from '../pipeline/runner.js';
+import { ensureRepoMap as defaultEnsureRepoMap } from '../stages/repo-map.js';
 import { runSpec as defaultRunSpec } from '../stages/spec.js';
 
 /** Every external effect a command has, injectable for tests. */
@@ -26,9 +28,13 @@ export type CliDeps = {
   exec?: ExecFn;
   preflight?: () => Promise<void>;
   ensureImage?: () => Promise<string>;
-  startContainer?: (slug: string, repo: string, image: string) => Promise<string>;
+  startContainer?: (slug: string, repo: string, image: string, opts?: { envFile?: string }) => Promise<string>;
+  /** Opens the secrets file for editing (`$EDITOR`, or `open -t` on macOS). */
+  openEditor?: (path: string) => Promise<void>;
   stopContainer?: (name: string) => Promise<void>;
   runSpec?: typeof defaultRunSpec;
+  /** Builds or refreshes the repo map before a change's spec. */
+  ensureRepoMap?: (ctx: StageCtx) => Promise<JobState>;
   ask?: (questions: string[]) => Promise<string[]>;
   /** Start the detached background run for a project. */
   spawnRun?: (name: string, jobDir: string) => void;
@@ -64,6 +70,18 @@ export function defaultOnSigint(handler: () => Promise<void> | void): () => void
   };
 }
 
+export async function defaultOpenEditor(path: string): Promise<void> {
+  const editor = process.env.EDITOR || process.env.VISUAL;
+  // Via a shell so values with arguments ("code --wait") work; the path is a positional arg, never interpolated.
+  const [cmd, args] = editor
+    ? ['sh', ['-c', `${editor} "$1"`, 'sh', path]]
+    : process.platform === 'darwin' ? ['open', ['-t', path]] : ['vi', [path]];
+  await new Promise<void>((res, rej) =>
+    spawn(cmd, args, { stdio: 'inherit' })
+      .on('error', rej)
+      .on('exit', (code) => (code === 0 ? res() : rej(new Error(`Editor exited with code ${code}`)))));
+}
+
 /** Interactive question loop on the terminal. */
 export async function readlineAsk(questions: string[]): Promise<string[]> {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -88,9 +106,11 @@ export function resolveDeps(d: CliDeps = {}): Resolved {
     err: d.err ?? ((l) => console.error(l)),
     preflight: d.preflight ?? (() => dockerPreflight(exec)),
     ensureImage: d.ensureImage ?? (() => dockerEnsureImage(fallbackKit, exec)),
-    startContainer: d.startContainer ?? ((s, r, i) => dockerStartContainer(s, r, i, exec)),
+    startContainer: d.startContainer ?? ((s, r, i, o) => dockerStartContainer(s, r, i, exec, o)),
+    openEditor: d.openEditor ?? defaultOpenEditor,
     stopContainer: d.stopContainer ?? ((n) => dockerStopContainer(n, exec)),
     runSpec: d.runSpec ?? defaultRunSpec,
+    ensureRepoMap: d.ensureRepoMap ?? ((ctx) => defaultEnsureRepoMap(ctx)),
     ask: d.ask ?? readlineAsk,
     spawnRun: d.spawnRun ?? defaultSpawnRun,
     kill: d.kill ?? ((pid, sig) => { process.kill(pid, sig); }),

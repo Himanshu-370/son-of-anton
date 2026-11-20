@@ -21,7 +21,7 @@ const plan: Plan = {
   commands: { install: 'i', test: 't' },
   tasks: [{ id: 'T1', title: 'x', acceptanceChecks: ['AC-1'], instructions: 'y', area: 'backend' }],
 };
-const kit: Kit = { name: 'fake', dockerfile: '', detect: () => 1, verify: async () => ({ results: [], runOk: true, failureReport: '' }) };
+const kit: Kit = { name: 'fake', dockerfile: '', detect: () => 1, baseline: async () => ({ passingTests: [], ran: true }), verify: async () => ({ results: [], runOk: true, failureReport: '' }) };
 
 let repo: string;
 let dir: string;
@@ -92,6 +92,65 @@ describe('runUnattended', () => {
     expect(f.notify).toHaveBeenCalledTimes(1);
     expect(f.stopped).toEqual(['anton-p']);
     expect(await isRunning(repo)).toEqual({ running: false });
+  });
+
+  it('runner routes change jobs plan→baseline→build; new jobs plan→build', async () => {
+    const withBaseline = (calls: string[]) => ({
+      runBaseline: async (ctx: StageCtx) => {
+        calls.push('baseline');
+        const s = transition(ctx.state, 'build', { round: 1 });
+        await saveState(ctx.jobDir, s);
+        return s;
+      },
+    });
+    await setup({ kind: 'change' });
+    const c = fakes();
+    await runUnattended('p', { ...c.deps, ...withBaseline(c.calls) });
+    expect(c.calls.slice(0, 3)).toEqual(['plan', 'baseline', 'build']);
+    await setup();
+    const n = fakes();
+    await runUnattended('p', { ...n.deps, ...withBaseline(n.calls) });
+    expect(n.calls.slice(0, 2)).toEqual(['plan', 'build']);
+  });
+
+  it('change job on the wrong branch: nothing runs; on the job branch it runs; new jobs skip the check', async () => {
+    await setup({ kind: 'change', branch: 'anton/1-init', fromBranch: 'main' });
+    const f = fakes();
+    await expect(runUnattended('p', { ...f.deps, currentBranch: async () => 'main' })).rejects.toThrow('git switch anton/1-init');
+    expect(f.calls).toEqual([]);
+    expect(f.stopped).toEqual([]);
+    expect(await isRunning(repo)).toEqual({ running: false });
+    const g = fakes();
+    await runUnattended('p', { ...g.deps, currentBranch: async () => 'anton/1-init', runBaseline: async (c: StageCtx) => transition(c.state, 'build', { round: 1 }) });
+    expect(g.calls[0]).toBe('plan');
+    await setup();
+    const h = fakes();
+    await runUnattended('p', { ...h.deps, currentBranch: async () => { throw new Error('should not be asked'); } });
+    expect(h.calls[0]).toBe('plan');
+  });
+
+  it('crash during baseline resumes at baseline without re-running plan', async () => {
+    await setup({ kind: 'change' });
+    let boom = true;
+    const calls: string[] = [];
+    const f = fakes({
+      runBaseline: async (ctx: StageCtx) => {
+        calls.push('baseline');
+        if (boom) { boom = false; throw new Error('crash'); }
+        const s = transition(ctx.state, 'build', { round: 1 });
+        await saveState(ctx.jobDir, s);
+        return s;
+      },
+    });
+    await runUnattended('p', f.deps);
+    const paused = await loadState(dir);
+    expect(paused).toMatchObject({ stage: 'paused', pausedFrom: 'baseline' });
+    await writeFile(join(dir, 'plan.json'), JSON.stringify(plan)); // the real runPlan persists it
+    await saveState(dir, transition(paused, 'baseline'));
+    await runUnattended('p', f.deps);
+    expect(f.calls.filter((c) => c === 'plan')).toEqual(['plan']);
+    expect(calls).toEqual(['baseline', 'baseline']);
+    expect((await loadState(dir)).stage).toBe('awaiting_final_review');
   });
 
   it('notifies only after the container is stopped and the lock released (review and pause)', async () => {
@@ -245,5 +304,24 @@ describe('runUnattended', () => {
     await runUnattended('p', f.deps);
     expect(f.calls).toEqual([]);
     expect(f.notify).not.toHaveBeenCalled();
+  });
+});
+
+describe('runner log redaction', () => {
+  it('an error message containing a secret is logged redacted', async () => {
+    await setup();
+    await mkdir(join(process.env.ANTON_HOME!, 'secrets'), { recursive: true });
+    await writeFile(join(process.env.ANTON_HOME!, 'secrets', 'p.env'), 'TOKEN=FAKE_SECRET_VALUE_123\n', { mode: 0o600 });
+    const lines: string[] = [];
+    const f = fakes();
+    await runUnattended('p', {
+      ...f.deps,
+      log: (l) => lines.push(l),
+      runPlan: async () => { throw new Error('boom FAKE_SECRET_VALUE_123'); },
+    });
+    const all = lines.join('\n');
+    expect(all).toContain('boom [REDACTED:TOKEN]');
+    expect(all).not.toContain('FAKE_SECRET_VALUE_123');
+    expect(await readFile(join(dir, 'logs', 'error.log'), 'utf8')).not.toContain('FAKE_SECRET_VALUE_123');
   });
 });

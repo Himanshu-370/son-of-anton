@@ -3,7 +3,7 @@ import { access, chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
-import { commitAll, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse, changedFilesSince } from '../../src/core/git.js';
+import { commitAll, SecretInDiff, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse, changedFilesSince, isClean, createBranch, resetWorktree } from '../../src/core/git.js';
 
 const git = (repo: string, ...args: string[]) =>
   execa('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo });
@@ -184,5 +184,67 @@ describe('git helper', () => {
     expect(await revParse(repo, 'anton/j1/spec-approved')).toBe(sha);
     await expect(revParse(repo, 'anton/j1/missing')).rejects.toThrow();
     await expect(revParse(repo, '--output=/tmp/x')).rejects.toThrow(/invalid ref/);
+  });
+});
+
+describe('isClean / createBranch', () => {
+  it('isClean ignores .anton/ and flags real changes', async () => {
+    await writeFile(join(repo, 'a.txt'), 'a');
+    await commitAll(repo, 'first');
+    await mkdir(join(repo, '.anton'));
+    await writeFile(join(repo, '.anton', 'x'), 'x');
+    expect(await isClean(repo)).toBe(true);
+    await writeFile(join(repo, 'a.txt'), 'b');
+    expect(await isClean(repo)).toBe(false);
+    await git(repo, 'checkout', '-q', 'a.txt');
+    await writeFile(join(repo, 'new.txt'), 'n');
+    expect(await isClean(repo)).toBe(false);
+  });
+  it('createBranch switches, and fails if the branch exists', async () => {
+    await writeFile(join(repo, 'a.txt'), 'a');
+    await commitAll(repo, 'first');
+    await createBranch(repo, 'anton/1-x');
+    expect((await git(repo, 'branch', '--show-current')).stdout).toBe('anton/1-x');
+    await expect(createBranch(repo, 'anton/1-x')).rejects.toThrow(/already exists/);
+  });
+
+  it('resetWorktree reverts tracked edits and untracked files but keeps ignored files and .anton', async () => {
+    await writeFile(join(repo, '.gitignore'), 'node_modules\n');
+    await writeFile(join(repo, 'a.txt'), 'a');
+    await commitAll(repo, 'first');
+    await writeFile(join(repo, 'a.txt'), 'changed');
+    await writeFile(join(repo, 'new.txt'), 'n');
+    await mkdir(join(repo, 'node_modules'));
+    await writeFile(join(repo, 'node_modules', 'x'), 'x');
+    await mkdir(join(repo, '.anton'));
+    await writeFile(join(repo, '.anton', 'keep'), 'k');
+    await resetWorktree(repo);
+    expect(await readFile(join(repo, 'a.txt'), 'utf8')).toBe('a');
+    await expect(access(join(repo, 'new.txt'))).rejects.toThrow();
+    await access(join(repo, 'node_modules', 'x'));
+    await access(join(repo, '.anton', 'keep'));
+  });
+});
+
+describe('commitAll secret guard', () => {
+  it('blocks a staged secret value: nothing committed, file kept, unstaged, error names key only', async () => {
+    await writeFile(join(repo, 'a.txt'), 'a');
+    await commitAll(repo, 'first');
+    await writeFile(join(repo, 'conf.ts'), 'const k = "FAKE_SECRET_VALUE_123";\n');
+    const before = await headSha(repo);
+    const err = await commitAll(repo, 'leak', { API_TOKEN: 'FAKE_SECRET_VALUE_123', OTHER: 'FAKE_OTHER_VALUE_456' }).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(SecretInDiff);
+    expect((err as Error).message).toContain('API_TOKEN');
+    expect((err as Error).message).not.toContain('OTHER');
+    expect((err as Error).message).not.toContain('FAKE_SECRET_VALUE_123');
+    expect(await headSha(repo)).toBe(before);
+    expect(await readFile(join(repo, 'conf.ts'), 'utf8')).toContain('FAKE_SECRET_VALUE_123');
+    expect((await git(repo, 'diff', '--cached', '--name-only')).stdout).toBe('');
+  });
+  it('commits clean changes with secrets set, and with no secrets', async () => {
+    await writeFile(join(repo, 'a.txt'), 'a');
+    expect(await commitAll(repo, 'one', { API_TOKEN: 'FAKE_SECRET_VALUE_123' })).toMatch(/^[0-9a-f]{40}$/);
+    await writeFile(join(repo, 'b.txt'), 'FAKE_SECRET_VALUE_123');
+    expect(await commitAll(repo, 'two', {})).toMatch(/^[0-9a-f]{40}$/);
   });
 });

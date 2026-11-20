@@ -11,6 +11,7 @@ import { failureSignature, runVerify, type VerifyDeps } from '../../src/stages/v
 import { failuresPath, type FailureItem } from '../../src/stages/qa.js';
 import type { ReviewFinding } from '../../src/review/code-review.js';
 import type { SecurityFinding } from '../../src/security/review.js';
+import { sha8 } from '../../src/review/shared.js';
 import { acceptRisk } from '../../src/security/risks.js';
 
 const spec: SpecDoc = {
@@ -34,7 +35,7 @@ beforeEach(async () => {
   ctx = { project: 'p', repo: '/r', container: 'c', jobDir, stage: 'verify', state: st() };
 });
 function kit(outcome: VerifyOutcome, seen: VerifyContext[] = []): Kit {
-  return { name: 'fake', dockerfile: '', detect: () => 1, verify: async (c) => { seen.push(c); return outcome; } };
+  return { name: 'fake', dockerfile: '', detect: () => 1, baseline: async () => ({ passingTests: [], ran: true }), verify: async (c) => { seen.push(c); return outcome; } };
 }
 
 const item = (kind: FailureItem['kind'], id: string, area: FailureItem['area'] = 'backend'): FailureItem => ({ area, kind, id, text: 't' });
@@ -77,7 +78,7 @@ const cr = (id: string, severity: ReviewFinding['severity'] = 'blocking', area: 
   id, severity, area, file: 'src/x.ts', line: 3, summary: `summary ${id}`,
 });
 const sec = (id: string, severity: SecurityFinding['severity']): SecurityFinding => ({
-  id, severity, area: 'backend', file: 'src/db.ts', title: `title ${id}`, detail: 'd', source: 'review',
+  id, severity, area: 'backend', file: 'src/db.ts', title: `title ${id}`, detail: 'd', source: 'review', preexisting: false,
 });
 const allPass = (): Kit => kit({ results: [pass('AC-1'), pass('AC-2')], runOk: true, failureReport: '' });
 const readJson = async (f: string) => JSON.parse(await readFile(f, 'utf8'));
@@ -274,7 +275,7 @@ describe('runVerify', () => {
   it('passes the previous security findings (id, title, file) and accepted ids to the security reviewer', async () => {
     const calls: Calls = [];
     await runVerify(ctx, allPass(), spec, plan, fakeDeps({ security: [sec('SEC-1', 'high'), sec('SEC-2', 'low')] }, calls));
-    expect(calls[1]!.prior).toEqual({ previous: [], accepted: [] });
+    expect(calls[1]!.prior).toEqual({ previous: [], accepted: [], baselineRefs: [] });
     await acceptRisk(ctx.jobDir, 'SEC-1', 'ok');
     // A verify whose checks fail skips the reviewers; the next review still sees the last review's findings.
     ctx.state = st({ round: 2 });
@@ -287,7 +288,93 @@ describe('runVerify', () => {
         { id: 'SEC-1', title: 'title SEC-1', file: 'src/db.ts' },
         { id: 'SEC-2', title: 'title SEC-2', file: 'src/db.ts' },
       ],
-      accepted: ['SEC-1'],
+      accepted: ['SEC-1'], baselineRefs: [],
     });
+  });
+
+  it('a corrupt results-verify copy is skipped, not fatal', async () => {
+    const calls: Calls = [];
+    await runVerify(ctx, allPass(), spec, plan, fakeDeps({ security: [sec('SEC-1', 'low')] }));
+    await writeFile(join(ctx.jobDir, 'evidence', 'results-verify-2.json'), '{not json');
+    ctx.state = st({ round: 2 });
+    await runVerify(ctx, allPass(), spec, plan, fakeDeps({}, calls));
+    expect(calls[1]!.prior!.previous).toEqual([{ id: 'SEC-1', title: 'title SEC-1', file: 'src/db.ts' }]);
+  });
+});
+
+describe('runVerify: baseline regressions', () => {
+  const writeBaseline = async (b: unknown) => {
+    await mkdir(join(ctx.jobDir, 'evidence'), { recursive: true });
+    await writeFile(join(ctx.jobDir, 'evidence', 'baseline.json'), typeof b === 'string' ? b : JSON.stringify(b));
+  };
+  const base = (over: Record<string, unknown> = {}) => ({ passingTests: ['A::t1', 'A::t2'], ran: true, scannerRefs: ['SCN-1'], unavailable: [], ...over });
+  const run = (tests: { name: string; passed: boolean }[], calls: Calls = []) =>
+    runVerify(ctx, kit({ results: [pass('AC-1'), pass('AC-2')], runOk: true, failureReport: '', tests }), spec, plan, fakeDeps({}, calls));
+  const REG = (n: string) => `REG-${sha8(n)}`;
+
+  it('baseline-passing test now failing → regression item', async () => {
+    await writeBaseline(base());
+    const calls: Calls = [];
+    const r = await run([{ name: 'A::t1', passed: true }, { name: 'A::t2', passed: false }], calls);
+    expect(r.passed).toBe(false);
+    expect(r.failures).toMatchObject([{ kind: 'regression', id: REG('A::t2'), area: 'backend' }]);
+    expect(calls).toEqual([]); // reviewers skipped
+  });
+  it('baseline-passing test missing → regression item', async () => {
+    await writeBaseline(base());
+    const r = await run([{ name: 'A::t1', passed: true }]);
+    expect(r.failures?.map((f) => f.id)).toEqual([REG('A::t2')]);
+  });
+  it('test already failing at baseline → no item', async () => {
+    await writeBaseline(base());
+    const r = await run([{ name: 'A::t1', passed: true }, { name: 'A::t2', passed: true }, { name: 'A::t3', passed: false }]);
+    expect(r.passed).toBe(true);
+  });
+  it('no baseline.json (new job) → no regression logic', async () => {
+    const r = await run([]);
+    expect(r.passed).toBe(true);
+  });
+  it('baseline.ran false → no regression logic', async () => {
+    await writeBaseline(base({ ran: false }));
+    expect((await run([])).passed).toBe(true);
+  });
+  it('corrupt or invalid baseline.json fails safe: treated as no baseline', async () => {
+    await writeBaseline('{nope');
+    expect((await run([])).passed).toBe(true);
+    await writeBaseline({ ran: true });
+    expect((await run([])).passed).toBe(true);
+  });
+  it('test run produced no valid JUnit → ONE REG-norun item, not one per baseline test', async () => {
+    await writeBaseline(base({ passingTests: ['A::t1', 'A::t2', 'A::t3'] }));
+    const r = await runVerify(ctx, kit({ results: [pass('AC-1'), pass('AC-2')], runOk: true, failureReport: '', tests: [], testsRan: false }), spec, plan, fakeDeps());
+    expect(r.failures).toMatchObject([{ kind: 'regression', id: 'REG-norun', area: 'backend' }]);
+    expect(r.failures![0]!.text).toContain('3 baseline tests unverified');
+  });
+  it('valid but empty JUnit still gives per-test regression items', async () => {
+    await writeBaseline(base());
+    const r = await runVerify(ctx, kit({ results: [pass('AC-1'), pass('AC-2')], runOk: true, failureReport: '', tests: [], testsRan: true }), spec, plan, fakeDeps());
+    expect(r.failures?.map((f) => f.id)).toEqual([REG('A::t1'), REG('A::t2')]);
+  });
+  it('passes the baseline scanner refs to the security reviewer', async () => {
+    await writeBaseline(base());
+    const calls: Calls = [];
+    await run([{ name: 'A::t1', passed: true }, { name: 'A::t2', passed: true }], calls);
+    expect(calls.find((c) => c.name === 'security')?.prior).toMatchObject({ baselineRefs: ['SCN-1'] });
+  });
+});
+
+describe('runVerify redaction', () => {
+  it('results*.json, failures.json and failure report are redacted and still parse', async () => {
+    ctx.secrets = { TOKEN: 'FAKE_SECRET_VALUE_123' };
+    const bad: CheckResult = { id: 'AC-1', status: 'fail', reason: 'failing', tests: [], error: 'boom FAKE_SECRET_VALUE_123' };
+    const k = kit({ results: [bad, pass('AC-2')], runOk: true, failureReport: '### AC-1\nboom FAKE_SECRET_VALUE_123' });
+    await runVerify(ctx, k, spec, plan, fakeDeps());
+    const ev = join(ctx.jobDir, 'evidence');
+    for (const f of [join(ev, 'results.json'), join(ev, 'results-verify-1.json'), failuresPath(ctx.jobDir), join(ctx.jobDir, 'failure-report.md')]) {
+      const t = await readFile(f, 'utf8').catch(() => '');
+      expect(t, f).not.toContain('FAKE_SECRET_VALUE_123');
+      if (f.endsWith('.json')) expect(() => JSON.parse(t)).not.toThrow();
+    }
+    expect((await readJson(join(ev, 'results.json'))).results[0].error).toBe('boom [REDACTED:TOKEN]');
   });
 });

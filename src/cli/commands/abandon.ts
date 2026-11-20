@@ -1,7 +1,7 @@
 import { saveState, transition } from '../../core/state.js';
 import { containerName } from '../../pipeline/runner.js';
 import { guard, resolveDeps, resolveJob, type CliDeps } from '../deps.js';
-import { refuseIfRunning } from './shared.js';
+import { refuseIfRunning, switchBackFromJob } from './shared.js';
 
 /** `anton abandon <project>`: give up on the current job and stop its container. */
 export async function abandonCommand(project: string, deps: CliDeps = {}): Promise<number> {
@@ -12,6 +12,8 @@ export async function abandonCommand(project: string, deps: CliDeps = {}): Promi
     await saveState(job.jobDir, transition(job.state, 'abandoned'));
     await d.stopContainer(containerName(project));
     d.out(`${project}: abandoned.`);
+    // Change jobs leave the repo on anton/<id>; go back to where the user was.
+    await switchBackFromJob(d, job.repo, job.state);
     return 0;
   });
 }

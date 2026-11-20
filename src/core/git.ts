@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { execa } from 'execa';
 import { writeFileAtomic } from './atomic.js';
+import { redact } from './secrets.js';
 
 /**
  * Host git runs on the Mac, outside Docker, inside a repo the agent can write to. So every
@@ -48,17 +49,99 @@ async function git(repo: string, args: string[]): Promise<string> {
   return String(r.stdout);
 }
 
+/** Thrown by `commitAll` when the staged diff holds a secret value. Names keys only, never values. */
+export class SecretInDiff extends Error {
+  constructor(public keys: string[]) {
+    super(`Refusing to commit: the change contains the value of secret(s) ${keys.join(', ')}. Remove it from the code (read it from the environment instead).`);
+    this.name = 'SecretInDiff';
+  }
+}
+
+/** The staged diff (`git diff --cached`). */
+export async function stagedDiff(repo: string): Promise<string> {
+  return git(repo, ['diff', '--cached', '--no-color', '--no-ext-diff']);
+}
+
 /**
  * Stage everything and commit as Son of Anton. Returns the sha, or null if nothing to commit.
  * Re-asserts the `.anton/` exclusion first (cheap, idempotent), so job files never enter history.
+ * With `secrets`, a staged diff that contains a secret value is unstaged (work tree kept) and rejected
+ * with SecretInDiff instead of committed.
  */
-export async function commitAll(repo: string, message: string): Promise<string | null> {
+export async function commitAll(repo: string, message: string, secrets?: Record<string, string>): Promise<string | null> {
   await ensureAntonIgnored(repo);
   await git(repo, ['add', '-A']);
   const status = await git(repo, ['status', '--porcelain']);
   if (status.trim() === '') return null;
+  if (Object.keys(secrets ?? {}).length) {
+    const diff = await stagedDiff(repo);
+    if (redact(diff, secrets) !== diff) {
+      await git(repo, ['reset', '-q']);
+      throw new SecretInDiff(Object.entries(secrets!).filter(([k, v]) => redact(diff, { [k]: v }) !== diff).map(([k]) => k));
+    }
+  }
   await git(repo, ['commit', '-q', '--no-verify', '-m', message]);
   return headSha(repo);
+}
+
+/** True when the work tree has no changes (`.anton/` is excluded, so it does not count). Writes .git/info/exclude first, by design. */
+export async function isClean(repo: string): Promise<boolean> {
+  await ensureAntonIgnored(repo);
+  return (await git(repo, ['status', '--porcelain'])).trim() === '';
+}
+
+/**
+ * Discards tracked edits and untracked files, back to HEAD. No `-x`: ignored files (node_modules,
+ * `.anton/`) survive.
+ */
+export async function resetWorktree(repo: string): Promise<void> {
+  await ensureAntonIgnored(repo);
+  await git(repo, ['checkout', '--', '.']);
+  await git(repo, ['clean', '-fd']);
+}
+
+/** Create and switch to a new branch; git's error surfaces if it already exists. */
+export async function createBranch(repo: string, name: string): Promise<void> {
+  await git(repo, ['switch', '-c', name]);
+}
+
+/** The checked-out branch name, or the commit sha when HEAD is detached. Needs at least one commit. */
+export async function currentBranch(repo: string): Promise<string> {
+  try {
+    return (await git(repo, ['symbolic-ref', '--short', '-q', 'HEAD'])).trim();
+  } catch {
+    return headSha(repo);
+  }
+}
+
+/** Switch to an existing branch (or sha); git refuses if local changes would be lost. */
+export async function switchBranch(repo: string, name: string): Promise<void> {
+  await git(repo, ['checkout', '-q', name, '--']);
+}
+
+/** Undo `createBranch`: switch back to `back` (a branch name or sha from `currentBranch`) and force-delete `name`. */
+export async function dropBranch(repo: string, name: string, back: string): Promise<void> {
+  await git(repo, ['checkout', '-q', back]);
+  await git(repo, ['branch', '-D', name]);
+}
+
+/** The work tree's root as git sees it (`rev-parse --show-toplevel`), or null if `path` is not in a repo. */
+export async function repoRoot(path: string): Promise<string | null> {
+  try {
+    return (await git(path, ['rev-parse', '--show-toplevel'])).trim();
+  } catch {
+    return null;
+  }
+}
+
+/** False for a repo with no commits (unborn HEAD). */
+export async function hasCommits(repo: string): Promise<boolean> {
+  try {
+    await git(repo, ['rev-parse', '--verify', '--quiet', 'HEAD']);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export async function tag(repo: string, name: string): Promise<void> {

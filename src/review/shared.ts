@@ -24,7 +24,12 @@ export function fenceDiff(diff: string): string {
   if (trimmed.length > MAX_DIFF_CHARS) {
     trimmed = `${trimmed.slice(0, MAX_DIFF_CHARS)}\n… [diff truncated at ${MAX_DIFF_CHARS} characters; read the full code in /workspace]`;
   }
-  const longest = Math.max(0, ...(trimmed.match(/`+/g) ?? []).map((m) => m.length));
+  return fenceText(trimmed, 'diff');
+}
+
+/** Wraps text in a code fence longer than any backtick run inside it. */
+export function fenceText(text: string, lang = ''): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((m) => m.length));
   const fence = '`'.repeat(Math.max(3, longest + 1));
-  return [`${fence}diff`, trimmed, fence].join('\n');
+  return [`${fence}${lang}`, text, fence].join('\n');
 }

@@ -5,11 +5,14 @@ import { Command } from 'commander';
 import type { CliDeps } from './deps.js';
 import { abandonCommand } from './commands/abandon.js';
 import { acceptRiskCommand } from './commands/accept-risk.js';
+import { adoptCommand } from './commands/adopt.js';
 import { approveCommand } from './commands/approve.js';
+import { changeCommand } from './commands/change.js';
 import { logsCommand } from './commands/logs.js';
 import { newCommand } from './commands/new.js';
 import { rejectCommand } from './commands/reject.js';
 import { resumeCommand } from './commands/resume.js';
+import { secretsEditCommand } from './commands/secrets.js';
 import { runCommand } from './commands/run.js';
 import { statusCommand } from './commands/status.js';
 import { stopCommand } from './commands/stop.js';
@@ -26,6 +29,19 @@ export function buildProgram(deps: CliDeps = {}): Command {
     .argument('<description>', 'what to build')
     .option('--budget <usd>', 'spend cap for this job in USD')
     .action(async (desc: string, o: { budget?: string }) => exit(await newCommand(desc, o, deps)));
+  program
+    .command('adopt')
+    .description('Register an existing git repository as a project')
+    .argument('<path>', 'the repository root')
+    .option('--name <name>', 'project name (default: the folder name)')
+    .action(async (p: string, o: { name?: string }) => exit(await adoptCommand(p, o, deps)));
+  program
+    .command('change')
+    .description('Start a change on an adopted project and write its spec interactively')
+    .argument('<project>')
+    .argument('<description>', 'what to change')
+    .option('--budget <usd>', 'spend cap for this job in USD')
+    .action(async (p: string, desc: string, o: { budget?: string }) => exit(await changeCommand(p, desc, o, deps)));
   program
     .command('approve')
     .description('Approve the spec (starts the build) or the final delivery')
@@ -72,6 +88,13 @@ export function buildProgram(deps: CliDeps = {}): Command {
     .argument('<project>')
     .option('-f, --follow', 'keep following the log')
     .action(async (p: string, o: { follow?: boolean }) => exit(await logsCommand(p, o, deps)));
+  program
+    .command('secrets')
+    .description("Manage a project's secrets (passed to the job container as env vars only)")
+    .command('edit')
+    .description("Create and open a project's secrets file")
+    .argument('<project>')
+    .action(async (p: string) => exit(await secretsEditCommand(p, deps)));
   program
     .command('_run', { hidden: true })
     .argument('<project>')

@@ -1,3 +1,5 @@
+import { currentBranch, isClean, switchBranch } from '../../core/git.js';
+import type { JobState } from '../../core/state.js';
 import { isRunning } from '../../core/lock.js';
 import { PreflightError } from '../../docker/container.js';
 import type { Resolved } from '../deps.js';
@@ -28,4 +30,18 @@ export async function refuseIfRunning(
   if (!r.running) return 0;
   d.err(message ? message(r.pid) : `${project} is already running (pid ${r.pid}). Stop it first with: anton stop ${project}`);
   return 1;
+}
+
+/**
+ * After a change job ends, return the repo to the branch it started from. Only when HEAD is still on the
+ * job branch (never move the user off a branch anton does not own) and the tree is clean; otherwise
+ * print the `git switch` command. The job branch is kept.
+ */
+export async function switchBackFromJob(d: Resolved, repo: string, state: JobState): Promise<void> {
+  const from = state.fromBranch;
+  if (state.kind !== 'change' || !from || (await currentBranch(repo).catch(() => '')) !== state.branch) return;
+  const back = await isClean(repo)
+    .then((clean) => clean && switchBranch(repo, from).then(() => true))
+    .catch(() => false);
+  d.out(back ? `Switched back to ${from}. Branch ${state.branch} is kept.` : `Repo not switched back. To return: git switch ${from}`);
 }

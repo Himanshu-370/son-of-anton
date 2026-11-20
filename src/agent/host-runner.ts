@@ -3,6 +3,7 @@ import { basename, join } from 'node:path';
 import { appendStageCost, recordCost, remainingUsd } from '../core/budget.js';
 import { execIn } from '../docker/container.js';
 import { notify as defaultNotify } from '../core/notify.js';
+import { redact } from '../core/secrets.js';
 import { saveState, type JobState } from '../core/state.js';
 import { AgentEventSchema, PROTOCOL_VERSION, type AgentRequest } from './protocol.js';
 
@@ -13,6 +14,8 @@ export type StageCtx = {
   jobDir: string;
   state: JobState;
   stage: string;
+  /** Project secrets, loaded once by the runner. Optional: redact treats undefined as none. */
+  secrets?: Record<string, string>;
 };
 
 /** Minimal process shape; satisfied by an execa child and by test fakes. */
@@ -72,7 +75,7 @@ export async function runAgent(
   const file = await nextRequestFile(ctx.jobDir, ctx.stage);
   await fsp.writeFile(
     join(ctx.jobDir, 'requests', file),
-    JSON.stringify({ ...req, protocolVersion: PROTOCOL_VERSION }, null, 2) + '\n',
+    redact(JSON.stringify({ ...req, protocolVersion: PROTOCOL_VERSION }, null, 2) + '\n', ctx.secrets),
   );
   const containerPath = `/workspace/.anton/jobs/${basename(ctx.jobDir)}/requests/${file}`;
   await fsp.mkdir(join(ctx.jobDir, 'logs'), { recursive: true });
@@ -104,7 +107,7 @@ export async function runAgent(
 
   const handleLine = async (line: string): Promise<{ output: unknown; sessionId: string } | undefined> => {
     if (line.trim() === '') return undefined;
-    await fsp.appendFile(logPath, line + '\n');
+    await fsp.appendFile(logPath, redact(line, ctx.secrets) + '\n');
     let json: unknown;
     try {
       json = JSON.parse(line);

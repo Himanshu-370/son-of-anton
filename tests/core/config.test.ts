@@ -21,6 +21,7 @@ describe('ROLE_MODELS', () => {
       code_reviewer: { model: 'claude-sonnet-5-5', effort: 'medium' },
       security_reviewer: { model: 'claude-sonnet-5-5', effort: 'high' },
       coach: { model: 'claude-haiku-5-5', effort: 'low' },
+      mapper: { model: 'claude-sonnet-5-5', effort: 'low' },
     });
   });
 });

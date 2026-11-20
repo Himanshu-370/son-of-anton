@@ -25,6 +25,10 @@ The verifier maps tests to acceptance checks by finding the check id as a WHOLE 
 - `area`: exactly one of `infra`, `backend`, `frontend`. Tag every task with the single area it belongs to.
 - `instructions`: concrete guidance for the builder: files to create, behaviour to implement, which tests to write (with their `AC-n` names), and any pitfalls. Do not repeat the entire spec.
 
+## Change jobs
+
+Only when the prompt says this is a change to an existing codebase: reuse the repo's existing test runner and install flow; do not introduce a new framework. Add a JUnit reporter through command-line flags in `commands.test`, writing to `$ANTON_JUNIT`, and do not edit config files to do it. Task 1 is not scaffolding; the project already exists.
+
 ## Areas and build order
 
 Developers work area by area in the order infra → backend → frontend, so order your tasks accordingly (all infra tasks first, then backend, then frontend). Task 1 (scaffolding) is normally `infra`.

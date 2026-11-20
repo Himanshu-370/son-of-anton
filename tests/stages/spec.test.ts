@@ -9,7 +9,7 @@ import { runSpec, writeSpec, readApprovedSpec, SpecNotProduced, type SpecDoc } f
 
 const spec: SpecDoc = {
   title: 'Habit Tracker', summary: 'Track habits.', outOfScope: ['accounts'], kit: 'fallback', tech: ['node'],
-  acceptanceChecks: [{ id: 'AC-1', text: 'adds a habit' }, { id: 'AC-2', text: 'lists habits' }],
+  acceptanceChecks: [{ id: 'AC-1', text: 'adds a habit' }, { id: 'AC-2', text: 'lists habits' }], services: [],
 };
 let ctx: StageCtx;
 beforeEach(async () => {
@@ -93,6 +93,47 @@ describe('runSpec cost accounting across resumed turns', () => {
   });
 });
 
+describe('services', () => {
+  const withSvc: SpecDoc = { ...spec, services: [{ name: 'Stripe', envVars: ['STRIPE_KEY', 'STRIPE_WEBHOOK'] }] };
+
+  it('spec.md renders Outside services', async () => {
+    await writeSpec(ctx.jobDir, withSvc);
+    const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');
+    expect(md).toContain('## Outside services\n\n- Stripe (env: STRIPE_KEY, STRIPE_WEBHOOK)');
+    expect((await readApprovedSpec(ctx.jobDir)).services).toEqual(withSvc.services);
+  });
+
+  it('older spec.json without services still parses with services []', async () => {
+    await writeSpec(ctx.jobDir, spec);
+    const old = JSON.parse(await readFile(join(ctx.jobDir, 'spec.json'), 'utf8'));
+    delete old.services;
+    await writeFile(join(ctx.jobDir, 'spec.json'), JSON.stringify(old));
+    expect((await readApprovedSpec(ctx.jobDir)).services).toEqual([]);
+  });
+
+  it('rejects value-like strings in envVars', async () => {
+    await writeSpec(ctx.jobDir, withSvc);
+    const j = JSON.parse(await readFile(join(ctx.jobDir, 'spec.json'), 'utf8'));
+    j.services[0].envVars = ['KEY=abc123'];
+    await writeFile(join(ctx.jobDir, 'spec.json'), JSON.stringify(j));
+    await expect(readApprovedSpec(ctx.jobDir)).rejects.toThrow();
+  });
+
+  it('PM prompt requires services and stand-in default', async () => {
+    const p = await loadPrompt('spec.md');
+    expect(p).toMatch(/`services`.*EVERY outside service/);
+    expect(p).toMatch(/stand-in.*default/);
+  });
+
+  it('build and infra prompts state the [real] rule and .env.example', async () => {
+    const b = await loadPrompt('build.md');
+    expect(b).toContain('`[real]`');
+    expect(b).toMatch(/skip unless ALL/);
+    expect(b).toMatch(/environment variables only/);
+    expect(await loadPrompt('role-infra.md')).toMatch(/\.env\.example.*no values/s);
+  });
+});
+
 describe('writeSpec / readApprovedSpec', () => {
   it('picks up edited and added acceptance checks', async () => {
     await writeSpec(ctx.jobDir, spec);
@@ -123,6 +164,16 @@ describe('writeSpec / readApprovedSpec', () => {
     await expect(readApprovedSpec(ctx.jobDir)).rejects.toThrow(/duplicate.*AC-1/);
     await writeFile(join(ctx.jobDir, 'spec.md'), '# T\n\nnothing\n');
     await expect(readApprovedSpec(ctx.jobDir)).rejects.toThrow(/no acceptance checks/);
+  });
+
+  it('change mode prompt mentions repo-map.md and characterization checks', async () => {
+    const { fn, reqs } = fakeRun([{ kind: 'spec', spec }]);
+    await runSpec(ctx, 'add login', async () => [], { runAgent: fn }, 'change');
+    expect(reqs[0]!.prompt).toContain('.anton/repo-map.md');
+    expect(reqs[0]!.prompt).toContain('characterization');
+    const n = fakeRun([{ kind: 'spec', spec }]);
+    await runSpec(ctx, 'x', async () => [], { runAgent: n.fn });
+    expect(n.reqs[0]!.prompt).not.toContain('repo-map.md');
   });
 
   it('PM prompt requires security acceptance checks for logins/user data/payments/network exposure', async () => {

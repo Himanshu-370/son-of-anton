@@ -2,11 +2,12 @@ import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import { BudgetExceeded, type StageCtx } from '../agent/host-runner.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
-import { currentJobId } from '../core/job.js';
+import { assertOnJobBranch, currentJobId } from '../core/job.js';
 import { acquireLock as defaultAcquireLock } from '../core/lock.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { jobDir as jobDirOf } from '../core/paths.js';
 import { getProject } from '../core/registry.js';
+import { loadSecrets, redact, secretsEnvFile } from '../core/secrets.js';
 import { loadState, pause, saveState, transition, type JobState, type PauseReason } from '../core/state.js';
 import {
   ensureImage,
@@ -15,6 +16,7 @@ import {
 } from '../docker/container.js';
 import { fallbackKit } from '../kits/fallback/index.js';
 import type { Kit } from '../kits/types.js';
+import { runBaseline as defaultRunBaseline } from '../stages/baseline.js';
 import { runBuild as defaultRunBuild } from '../stages/build.js';
 import { runDeliver as defaultRunDeliver, type DeliverInput } from '../stages/deliver.js';
 import { failuresPath } from '../stages/qa.js';
@@ -25,7 +27,7 @@ import { runVerify as defaultRunVerify, type VerifyDeps, type VerifyResult } fro
 export const containerName = (slug: string) => `anton-${slug}`;
 
 /** Stages the runner drives on its own; anything else is a waiting/paused/terminal stage. */
-export const ACTIVE_STAGES: readonly JobState['stage'][] = ['plan', 'build', 'verify', 'deliver'];
+export const ACTIVE_STAGES: readonly JobState['stage'][] = ['plan', 'baseline', 'build', 'verify', 'deliver'];
 
 export type RunnerDeps = {
   acquireLock?: (repo: string) => Promise<() => Promise<void>>;
@@ -35,21 +37,25 @@ export type RunnerDeps = {
   notify?: (title: string, message: string) => Promise<void>;
   kit?: Kit;
   runPlan?: (ctx: StageCtx, spec: SpecDoc) => Promise<{ plan: Plan; state: JobState }>;
+  runBaseline?: (ctx: StageCtx, kit: Kit, plan: Plan) => Promise<JobState>;
   runBuild?: (ctx: StageCtx, spec: SpecDoc, plan: Plan) => Promise<JobState>;
   runVerify?: (ctx: StageCtx, kit: Kit, spec: SpecDoc, plan: Plan, deps?: VerifyDeps) => Promise<VerifyResult>;
   /** Injectable reviewers and git lookups, forwarded to runVerify. */
   verifyDeps?: VerifyDeps;
   runDeliver?: (ctx: StageCtx, spec: SpecDoc, plan: Plan, input: DeliverInput) => Promise<JobState>;
   log?: (line: string) => void;
+  currentBranch?: (repo: string) => Promise<string>;
 };
 
 /** Reuse a running `anton-<slug>` container, else ensure the kit image and start a fresh one. */
 export async function startOrReuseContainer(slug: string, repo: string, exec: ExecFn = defaultExec): Promise<string> {
+  // Validate secrets before any docker call or API spend.
+  const envFile = await secretsEnvFile(slug);
   const name = containerName(slug);
   const r = await exec('docker', ['inspect', '-f', '{{.State.Running}}', name]);
   if (r.exitCode === 0 && r.stdout.trim() === 'true') return name;
   const image = await ensureImage(fallbackKit, exec);
-  return dockerStartContainer(slug, repo, image, exec);
+  return dockerStartContainer(slug, repo, image, exec, { envFile });
 }
 
 async function readJson(path: string): Promise<unknown> {
@@ -93,13 +99,16 @@ function pauseMessage(
 }
 
 /**
- * Background pipeline: loops on state.stage through plan → build ⇄ verify → deliver until a
+ * Background pipeline: loops on state.stage through plan → (baseline →) build ⇄ verify → deliver until a
  * waiting/paused stage. Stages persist and transition themselves (build→verify, verify→…,
- * deliver→awaiting_final_review); the runner only transitions plan→build (round 1, R1).
+ * deliver→awaiting_final_review); the runner only transitions plan→build (round 1, R1) or plan→baseline (change jobs; baseline then goes to build).
  * Build fix rounds read the persisted evidence/failure-report.md (R11); no report is passed in.
  */
 export async function runUnattended(project: string, deps: RunnerDeps = {}): Promise<void> {
-  const log = deps.log ?? ((l: string) => console.log(`[${new Date().toISOString()}] ${l}`));
+  let secrets: Record<string, string> = {};
+  const rawLog = deps.log ?? ((l: string) => console.log(`[${new Date().toISOString()}] ${l}`));
+  /** Every runner log line (it lands in logs/runner.log) is redacted with the secrets loaded so far. */
+  const log = (l: string): void => rawLog(redact(l, secrets));
   const rawNotify = deps.notify ?? ((t: string, m: string) => defaultNotify(t, m));
   /** Notifications are best-effort: a failure must never turn into a run error. */
   const notify = async (t: string, m: string): Promise<void> => {
@@ -113,6 +122,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
   const startContainer = deps.startContainer ?? ((s: string, r: string) => startOrReuseContainer(s, r));
   const kit = deps.kit ?? fallbackKit;
   const runPlan = deps.runPlan ?? defaultRunPlan;
+  const runBaseline = deps.runBaseline ?? defaultRunBaseline;
   const runBuild = deps.runBuild ?? defaultRunBuild;
   const runVerify = deps.runVerify ?? defaultRunVerify;
   const runDeliver = deps.runDeliver ?? defaultRunDeliver;
@@ -132,14 +142,16 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       log(`nothing to run (stage: ${state.stage})`);
       return;
     }
+    await assertOnJobBranch(repo, state, deps.currentBranch);
     try {
       startedContainer = true;
       const container = await startContainer(project, repo);
+      secrets = await loadSecrets(project);
       let spec: SpecDoc | undefined;
       let plan: Plan | undefined;
       const getSpec = async () => (spec ??= SpecDocBaseSchema.parse(await readJson(join(jobDir, 'spec.approved.json'))));
       const getPlan = async () => (plan ??= PlanSchema.parse(await readJson(join(jobDir, 'plan.json'))));
-      const ctx = (stage: string): StageCtx => ({ project, repo, container, jobDir, state, stage });
+      const ctx = (stage: string): StageCtx => ({ project, repo, container, jobDir, state, stage, secrets });
       let lastVerify: DeliverInput;
 
       while (ACTIVE_STAGES.includes(state.stage)) {
@@ -148,10 +160,14 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
           case 'plan': {
             const r = await runPlan(ctx('plan'), await getSpec());
             plan = r.plan;
-            state = transition(r.state, 'build', { round: 1 });
+            // Change jobs record a baseline first; it moves the job to build (round 1).
+            state = r.state.kind === 'change' ? transition(r.state, 'baseline') : transition(r.state, 'build', { round: 1 });
             await saveState(jobDir, state);
             break;
           }
+          case 'baseline':
+            state = await runBaseline(ctx('baseline'), kit, await getPlan());
+            break;
           case 'build':
             state = await runBuild(ctx('build'), await getSpec(), await getPlan());
             break;
@@ -177,7 +193,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       log(`${reason}: ${e instanceof Error ? e.message : String(e)}`);
       if (reason === 'error') {
         await fsp.mkdir(join(jobDir, 'logs'), { recursive: true });
-        await fsp.appendFile(join(jobDir, 'logs', 'error.log'), `[${new Date().toISOString()}] ${msg}\n`);
+        await fsp.appendFile(join(jobDir, 'logs', 'error.log'), redact(`[${new Date().toISOString()}] ${msg}\n`, secrets));
       }
       // Stages persist cost as they go; pause from the latest saved state.
       const latest = await loadState(jobDir);

@@ -1,4 +1,5 @@
 import { runIn as defaultRunIn } from '../docker/container.js';
+import { sha8 } from '../review/shared.js';
 
 export type ScannerFinding = {
   tool: 'gitleaks' | 'osv-scanner' | 'semgrep';
@@ -6,6 +7,8 @@ export type ScannerFinding = {
   severity: 'critical' | 'high' | 'medium' | 'low';
   file: string;
   line?: number;
+  /** Occurrence identity independent of line numbers: gitleaks Fingerprint, semgrep hash of matched text, osv vuln id. */
+  key: string;
   message: string;
 };
 
@@ -69,6 +72,7 @@ async function gitleaks(container: string, run: RunIn): Promise<ScannerFinding[]
       severity: 'high' as const,
       file: normalizePath(str(o.File)),
       ...(typeof o.StartLine === 'number' ? { line: o.StartLine } : {}),
+      key: str(o.Fingerprint, `${str(o.File)}:${str(o.RuleID)}:${typeof o.StartLine === 'number' ? o.StartLine : '?'}`),
       message: str(o.Description, 'Potential secret detected'),
     };
   });
@@ -111,6 +115,7 @@ async function osv(container: string, run: RunIn): Promise<ScannerFinding[]> {
           ruleId: id,
           severity: osvSeverity(typeof grp.max_severity === 'string' ? grp.max_severity : undefined),
           file,
+          key: id,
           message: `${str(info.name)}@${str(info.version)}: ${summary}`,
         });
       }
@@ -130,16 +135,33 @@ async function semgrep(container: string, run: RunIn, notes: string[]): Promise<
   const root = rec(parse(r.stdout));
   if (!Array.isArray(root.results)) throw new Unavailable('unexpected shape');
   if (arr(root.errors).length > 0) notes.push('semgrep (partial)');
-  return arr(root.results).map((x) => {
+  const line = (x: unknown): number => {
+    const l = rec(rec(x).start).line;
+    return typeof l === 'number' ? l : 0;
+  };
+  // Sorted by start line so occurrence ordinals are deterministic.
+  const hits = [...arr(root.results)].sort((a, b) => line(a) - line(b));
+  const seen = new Map<string, number>();
+  return hits.map((x) => {
     const o = rec(x);
     const extra = rec(o.extra);
-    const line = rec(o.start).line;
+    const ln = rec(o.start).line;
+    const lines = str(extra.lines).replace(/\s+/g, ' ').trim();
+    const ruleId = str(o.check_id, 'semgrep');
+    const file = normalizePath(str(o.path));
+    // semgrep hides `lines` without login; fall back to rule+file.
+    const base = lines && lines !== 'requires login' ? lines : `${ruleId}\n${file}`;
+    const n = seen.get(`${ruleId}\n${file}\n${base}`) ?? 0;
+    seen.set(`${ruleId}\n${file}\n${base}`, n + 1);
+    // shortcut: ordinal shifts if a new hit lands above an accepted one; upgrade when semgrep fingerprints are available.
+    const key = sha8(`${base}\n#${n}`);
     return {
       tool: 'semgrep' as const,
-      ruleId: str(o.check_id, 'semgrep'),
+      ruleId,
       severity: SEMGREP_SEVERITY[str(extra.severity)] ?? 'low',
-      file: normalizePath(str(o.path)),
-      ...(typeof line === 'number' ? { line } : {}),
+      file,
+      ...(typeof ln === 'number' ? { line: ln } : {}),
+      key,
       message: str(extra.message),
     };
   });

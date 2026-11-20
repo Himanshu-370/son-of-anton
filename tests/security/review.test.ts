@@ -20,8 +20,8 @@ beforeEach(() => {
   };
 });
 
-const scanned: ScannerFinding = { tool: 'gitleaks', ruleId: 'aws-key', severity: 'high', file: 'src/a.ts', line: 3, message: 'AKIAFAKEFAKE' };
-const REF = `SCN-${sha8('gitleaks\naws-key\nsrc/a.ts')}`;
+const scanned: ScannerFinding = { tool: 'gitleaks', ruleId: 'aws-key', severity: 'high', file: 'src/a.ts', line: 3, key: 'fp-1', message: 'AKIAFAKEFAKE' };
+const REF = `SCN-${sha8('gitleaks\naws-key\nsrc/a.ts\nfp-1')}`;
 const raw = (over: Record<string, unknown> = {}) => ({
   severity: 'high', area: 'backend', file: 'src/a.ts', line: 3, title: 'Hard-coded key', detail: 'd', source: 'scanner', tool: 'gitleaks', ref: REF, ...over,
 });
@@ -77,12 +77,23 @@ describe('runSecurityReview', () => {
     expect(a.findings[0]!.id).toBe(b.findings[0]!.id);
   });
 
+  it('model cannot downgrade a high scanner finding to medium', async () => {
+    const r = await runSecurityReview(ctx, spec, plan, 'abc', harness([raw({ severity: 'medium' })]).deps);
+    expect(r.findings[0]!.severity).toBe('high');
+    expect(blocking(r.findings, new Set())).toHaveLength(1);
+  });
+
+  it('model may raise a scanner finding above the scanner severity', async () => {
+    const r = await runSecurityReview(ctx, spec, plan, 'abc', harness([raw({ severity: 'critical' })]).deps);
+    expect(r.findings[0]!.severity).toBe('critical');
+  });
+
   it('dedupes by id and distinguishes source/tool', async () => {
     const r = await runSecurityReview(ctx, spec, plan, 'abc', harness([raw(), raw({ line: 8 }), raw({ source: 'review', tool: undefined })]).deps);
     expect(r.findings).toHaveLength(2);
   });
 
-  it('scannerRef is SCN- + sha8(tool \\n ruleId \\n file) and the prompt carries it', async () => {
+  it('scannerRef is SCN- + sha8(tool \\n ruleId \\n file \\n key) and the prompt carries it', async () => {
     expect(scannerRef(scanned)).toBe(REF);
     const h = harness([]);
     await runSecurityReview(ctx, spec, plan, 'abc', h.deps);
@@ -141,9 +152,9 @@ describe('runSecurityReview', () => {
 
   it('scanner findings in the prompt: sorted by severity, top 50, messages capped at 300 chars, with a note on the rest', async () => {
     const many: ScannerFinding[] = [
-      ...Array.from({ length: 60 }, (_, i): ScannerFinding => ({ tool: 'semgrep', ruleId: `low-${i}`, severity: 'low', file: `l${i}.ts`, message: 'low' })),
-      { tool: 'semgrep', ruleId: 'crit', severity: 'critical', file: 'c.ts', message: 'C'.repeat(1000) },
-      { tool: 'osv-scanner', ruleId: 'med', severity: 'medium', file: 'package-lock.json', message: 'med' },
+      ...Array.from({ length: 60 }, (_, i): ScannerFinding => ({ tool: 'semgrep', ruleId: `low-${i}`, severity: 'low', file: `l${i}.ts`, key: `k${i}`, message: 'low' })),
+      { tool: 'semgrep', ruleId: 'crit', severity: 'critical', file: 'c.ts', key: 'k', message: 'C'.repeat(1000) },
+      { tool: 'osv-scanner', ruleId: 'med', severity: 'medium', file: 'package-lock.json', key: 'k', message: 'med' },
     ];
     const h = harness([]);
     h.deps.runScanners = vi.fn(async () => ({ findings: many, unavailable: [] }));
@@ -178,12 +189,38 @@ describe('runSecurityReview', () => {
   });
 });
 
+describe('pre-existing scanner findings', () => {
+  const run = async (baselineRefs: string[], line: unknown[]) => {
+    const h = harness(line);
+    return runSecurityReview(ctx, spec, plan, 'abc', h.deps, { baselineRefs });
+  };
+  it('pre-existing scanner finding does not block and is marked preexisting', async () => {
+    const r = await run([REF], [raw()]);
+    expect(r.findings[0]).toMatchObject({ source: 'scanner', preexisting: true });
+    expect(blocking(r.findings, new Set())).toHaveLength(0);
+  });
+  it('new finding in same file blocks', async () => {
+    const other: ScannerFinding = { ...scanned, key: 'fp-2' };
+    const h = harness([raw({ ref: scannerRef(other) })]);
+    h.deps.runScanners.mockResolvedValue({ findings: [scanned, other], unavailable: [] });
+    const r = await runSecurityReview(ctx, spec, plan, 'abc', h.deps, { baselineRefs: [REF] });
+    expect(r.findings[0]).toMatchObject({ file: 'src/a.ts', preexisting: false });
+    expect(blocking(r.findings, new Set())).toHaveLength(1);
+  });
+  it('no baseline refs: nothing is preexisting', async () => {
+    expect((await run([], [raw()])).findings[0]!.preexisting).toBe(false);
+  });
+});
+
 describe('blocking', () => {
   const f = (id: string, severity: SecurityFinding['severity']): SecurityFinding => ({
-    id, severity, area: 'backend', file: 'a', title: 't', detail: 'd', source: 'review',
+    id, severity, area: 'backend', file: 'a', title: 't', detail: 'd', source: 'review', preexisting: false,
   });
   it('blocking returns only critical/high not in accepted', () => {
     const all = [f('1', 'critical'), f('2', 'high'), f('3', 'medium'), f('4', 'low'), f('5', 'high')];
     expect(blocking(all, new Set(['5'])).map((x) => x.id)).toEqual(['1', '2']);
+  });
+  it('ignores preexisting findings', () => {
+    expect(blocking([{ ...f('1', 'critical'), preexisting: true }], new Set())).toEqual([]);
   });
 });

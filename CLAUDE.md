@@ -15,6 +15,7 @@ Local software factory: `anton` CLI runs AI agents in Docker. Design: docs/specs
 - Host git only through src/core/git.ts (it blocks repo hooks and config).
 - Agent structured output: zod schema is the source of truth; JSON Schema must have an object root.
 - Reviewer sessions stay read-only: `tools` list plus MCP/settings isolation in src/agent/entry.ts. Don't loosen it.
+- Secret values are redacted via `redact()` in src/core/secrets.ts; new save points must use it.
 - Prompts live in src/stages/prompts/ and load via package-root URLs so they work from src/ and dist/.
 
 ## Gotchas

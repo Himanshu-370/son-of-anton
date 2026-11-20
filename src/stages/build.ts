@@ -16,7 +16,7 @@ import { failureReportPath } from './verify.js';
 
 export type BuildDeps = {
   runAgent?: typeof defaultRunAgent;
-  commitAll?: (repo: string, message: string) => Promise<string | null>;
+  commitAll?: (repo: string, message: string, secrets?: Record<string, string>) => Promise<string | null>;
 };
 
 type Task = Plan['tasks'][number];
@@ -197,7 +197,7 @@ export async function runBuild(
       if (state.completedFixAreas?.includes(area)) continue;
       const handoffs = await readHandoffs(ctx.jobDir);
       await session(fixPrompt({ ...ctx, state }, plan, area, text, handoffs, spec), area);
-      await commit(ctx.repo, `fix: round ${state.round} (${area})`);
+      await commit(ctx.repo, `fix: round ${state.round} (${area})`, ctx.secrets);
       state = { ...state, completedFixAreas: [...(state.completedFixAreas ?? []), area] };
       await saveState(ctx.jobDir, state);
     }
@@ -208,7 +208,7 @@ export async function runBuild(
       const isLastOfArea = ordered.filter((t) => t.area === task.area).at(-1)!.id === task.id;
       const handoffs = await readHandoffs(ctx.jobDir);
       await session(taskPrompt({ ...ctx, state }, spec, plan, task, handoffs, isLastOfArea), task.area);
-      await commit(ctx.repo, `${task.id}: ${task.title}`);
+      await commit(ctx.repo, `${task.id}: ${task.title}`, ctx.secrets);
       state = { ...state, completedTasks: [...state.completedTasks, task.id] };
       await saveState(ctx.jobDir, state);
     }

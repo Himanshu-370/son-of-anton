@@ -108,6 +108,7 @@ export async function startContainer(
   repoPath: string,
   image: string,
   exec: ExecFn = defaultExec,
+  opts: { envFile?: string } = {},
 ): Promise<string> {
   const name = `anton-${slug}`;
   await exec('docker', ['rm', '-f', name]).catch(() => undefined);
@@ -116,6 +117,8 @@ export async function startContainer(
     '-v', `${repoPath}:/workspace`,
     '-w', '/workspace',
     '-e', 'ANTHROPIC_API_KEY',
+    // Docker reads the file itself, so secret values never appear in argv.
+    ...(opts.envFile ? ['--env-file', opts.envFile] : []),
     image, 'sleep', 'infinity',
   ]);
   if (r.exitCode !== 0) throw new Error(`docker run failed: ${r.stderr.trim()}`);

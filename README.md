@@ -20,12 +20,15 @@ npm link              # puts `anton` on your PATH
 ## Commands
 
 - `anton new "<description>" [--budget <usd>]` creates a project and writes its spec with you interactively. Afterwards, review and edit the acceptance checks in `spec.md`, then run `anton approve <name>`.
+- `anton adopt <path> [--name <name>]` registers an existing git repo (its root) as a project. It changes nothing in the repo except ignoring `.anton/`.
+- `anton change <project> "<what to change>" [--budget <usd>]` starts a change job on an adopted project (see Changing existing code).
+- `anton secrets edit <project>` creates and opens the project's secrets file (see Secrets and redaction).
 - `anton approve <project>` approves the spec (starts the background build) or the final delivery.
 - `anton reject <project> --notes "<text>"` sends the delivery back to build with your notes.
 - `anton resume <project> [--budget <usd>] [--accept-as-is]` continues a paused job; `--budget` raises the cap, `--accept-as-is` delivers despite failing checks.
 - `anton accept-risk <project> <findingId> --reason "<text>"` records a security finding as an accepted risk (see Reviewers and security). Works while the job is paused or awaiting final review.
 - `anton stop <project>` stops a running job (graceful, forced after 10s).
-- `anton abandon <project>` gives up on the job and stops its container.
+- `anton abandon <project>` gives up on the job and stops its container. For a change job it also switches the repo back to the branch you started from, if the repo is clean; if not, it prints the `git switch` command to run. The `anton/<jobId>` branch is kept.
 - `anton status [project]` shows stage, round, spend and pause reason.
 - `anton logs [-f] <project>` shows the current stage's log; `-f` follows it.
 
@@ -75,6 +78,22 @@ The scanners (gitleaks, osv-scanner and semgrep) are installed in the Docker ima
 
 The image also holds the agent code itself (the in-container entry the reviewers and builders run through). After pulling an update, re-run `npm run build:image`: a stale image means old agent code, not just missing scanners, and old agent code would ignore the reviewers' read-only tool restriction. Anton fails closed on this: it refuses to start with `Kit image files are out of date — run: npm run build:image` when the staged files differ from `dist/agent/`, and stops an agent call with `agent entry is out of date (protocol …)` when the image's entry does not speak the current protocol.
 
+## Changing existing code
+
+`anton change` needs a clean repo with at least one commit and no active job. It creates the branch `anton/<jobId>` and works only there; your original branch is never touched, and merging is up to you. `REPORT.md` says `Branch to merge: anton/<jobId>` and has a `## Regressions` section.
+
+Don't edit files or switch branches in the repo while a change job runs: the working tree is shared. `approve`, `resume` and the runner refuse to act unless the repo is on the job branch, and the baseline refuses a tree with uncommitted changes. Accepting a change job switches the repo back to the branch you started from when it is clean.
+
+Before the first build, the baseline stage runs the repo's tests and the scanners on the untouched code and saves what passed to `evidence/baseline.json`. Later, a baseline test that no longer passes is a regression and blocks the job like a failing check. Scanner findings that were already in the baseline are shown separately as `Pre-existing` in the report and do not block.
+
+## Outside services: real or stand-in
+
+Each acceptance check shows what it was proven against. A service is `real` only when a passing test labelled `[real]` names it; otherwise `REPORT.md` says `stand-in only`, meaning it was only tested against a fake.
+
+## Secrets and redaction
+
+`anton secrets edit <project>` opens a private file (`~/anton/secrets/<project>.env`, mode 0600) of `KEY=value` lines, for example `STRIPE_SECRET_KEY=your-key-here`. Values follow Docker env-file rules: `KEY=value`, no quotes, no spaces around `=`, no `export`. The values reach the job container as environment variables only. Every file anton writes (logs, evidence, `REPORT.md`) has those values replaced with a placeholder before it is saved.
+
 ## Where things live
 
 - Projects: `~/anton/projects/<name>/` (override the root with `ANTON_HOME`), each a git repo with one commit per plan task.
@@ -90,10 +109,11 @@ Each job has a spend cap of $10 by default (`--budget` on `new`/`resume`). A war
 npm test                                   # unit tests, no Docker or API needed
 ANTON_E2E=1 npm run test:e2e               # also runs Docker-only e2e tests
 ANTON_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/new-project.e2e.test.ts
+ANTON_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/change-job.e2e.test.ts   # adopts a tiny repo, runs a change
 ```
 
 The last one builds a real project end to end with the API and costs up to about $3, and checks that REPORT.md has the `## Code review` and `## Security` sections. It runs only when BOTH `ANTON_E2E=1` and `ANTHROPIC_API_KEY` are set; with `ANTON_E2E=1` alone (no key), only the Docker-only e2e tests run and it is skipped.
 
-## Phase 1 limits
+## Limits
 
-Fallback kit only, CLI only, new projects only, no Slack yet. See the [roadmap](docs/superpowers/plans/2026-11-19-son-of-anton-roadmap.md).
+Fallback kit only, CLI only, no Slack yet. See the [roadmap](docs/superpowers/plans/2026-11-19-son-of-anton-roadmap.md).

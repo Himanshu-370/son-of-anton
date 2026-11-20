@@ -1,7 +1,7 @@
 import { XMLParser } from 'fast-xml-parser';
 import type { AcceptanceCheck, CheckResult } from '../kits/types.js';
 
-type Case = { label: string; classname: string; name: string; ok: boolean; error?: string };
+type Case = { label: string; classname: string; name: string; ok: boolean; error?: string; skipped?: boolean };
 
 const parser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_', textNodeName: '#text' });
 
@@ -47,14 +47,16 @@ function parseCases(xml: string): Case[] | null {
       const skipped = tc.skipped;
       let ok = true;
       let error: string | undefined;
+      let wasSkipped = false;
       if (failure !== undefined) {
         ok = false;
         error = text(failure) || 'test failed';
       } else if (skipped !== undefined) {
         ok = false;
         error = 'test skipped';
+        wasSkipped = true;
       }
-      cases.push({ label: name || classname, classname, name, ok, error });
+      cases.push({ label: name || classname, classname, name, ok, error, skipped: wasSkipped });
     }
   }
   return cases;
@@ -65,19 +67,39 @@ function mentions(haystack: string, id: string): boolean {
   return new RegExp(`(?<![\\w-])${esc}(?![\\w-])`).test(haystack);
 }
 
+/** Evidence label from a check's tests: real only when a passing test has `[real]` in its name. */
+export function evidenceFor(tests: { label: string; name?: string; ok: boolean }[]): 'real' | 'stand-in' | undefined {
+  if (tests.length === 0) return undefined;
+  return tests.some((t) => t.ok && (t.label.includes('[real]') || t.name?.includes('[real]'))) ? 'real' : 'stand-in';
+}
+
 export function mapJUnit(xml: string, checks: AcceptanceCheck[]): CheckResult[] {
   const cases = parseCases(xml) ?? [];
   return checks.map((c) => {
-    const mine = cases.filter((t) => mentions(t.name, c.id) || mentions(t.classname, c.id));
+    // A skipped [real] test is the expected default without secrets: it neither passes nor fails the check.
+    const mine = cases
+      .filter((t) => mentions(t.name, c.id) || mentions(t.classname, c.id))
+      .filter((t) => !(t.skipped && (t.label.includes('[real]') || t.name.includes('[real]'))));
     if (mine.length === 0) return { id: c.id, status: 'fail', reason: 'no_test', tests: [] };
     const tests = mine.map((t) => t.label);
     const bad = mine.find((t) => !t.ok);
-    if (bad) return { id: c.id, status: 'fail', reason: 'failing', tests, error: bad.error };
-    return { id: c.id, status: 'pass', tests };
+    const evidence = evidenceFor(mine);
+    if (bad) return { id: c.id, status: 'fail', reason: 'failing', tests, evidence, error: bad.error };
+    return { id: c.id, status: 'pass', tests, evidence };
   });
 }
 
 /** True when the XML parses into a testsuite/testsuites root. */
 export function isValidJUnit(xml: string): boolean {
   return parseCases(xml) !== null;
+}
+
+/** Every testcase as `{name, passed}`; skipped is not passed. Names are `classname::name` so same-named tests stay distinct (mapJUnit labels are unchanged). Empty when the XML is invalid. */
+export function allTests(xml: string): { name: string; passed: boolean }[] {
+  return (parseCases(xml) ?? []).map((t) => ({ name: t.classname && t.name ? `${t.classname}::${t.name}` : t.label, passed: t.ok }));
+}
+
+/** Names of the passing testcases, labelled as in allTests. */
+export function passingTests(xml: string): string[] {
+  return allTests(xml).filter((t) => t.passed).map((t) => t.name);
 }
