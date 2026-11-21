@@ -34,6 +34,16 @@ const results: CheckResult[] = [
 ];
 
 describe('runDeliver', () => {
+  it('a failing history append still lets deliver finish', async () => {
+    const home = join(ctx.jobDir, 'not-a-dir');
+    await writeFile(home, 'x'); // a file where the home folder should be
+    const warn = vi.fn();
+    ctx.warn = warn;
+    const state = await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag: vi.fn(async () => {}), listTags: async () => [], home });
+    expect(state.stage).toBe('awaiting_final_review');
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('Could not record job history'));
+  });
+
   it('deliver appends one history line without the description', async () => {
     await writeFile(join(ctx.jobDir, 'cost.json'), JSON.stringify({ spec: 0.5, build: 1 }));
     ctx.state = { ...ctx.state, kind: 'new' }; // fixture lacks the schema default

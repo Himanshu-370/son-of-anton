@@ -293,14 +293,19 @@ export async function runDeliver(
   const existing = await (deps.listTags ?? defaultListTags)(ctx.repo, `${prefix}*`);
   await tagFn(ctx.repo, `${prefix}${existing.length + 1}`);
   const hit = cacheHitRate(totalUsage(usage));
-  await appendHistory(
+  try {
+    await appendHistory(
     {
       jobId: ctx.state.jobId, project: ctx.state.project, kind: ctx.state.kind, kit: spec.kit,
       checks: spec.acceptanceChecks.length, spentUsd: ctx.state.spentUsd, stageUsd: costs ?? {},
       ...(hit === undefined ? {} : { cacheHitRate: hit }), at: new Date().toISOString(),
     },
     deps.home,
-  );
+    );
+  } catch (e) {
+    // Best effort: failing here would leave a delivered tag without the transition, and a retry would tag again.
+    ctx.warn?.(`Could not record job history: ${e instanceof Error ? e.message : String(e)}`);
+  }
   const state = transition(ctx.state, 'awaiting_final_review');
   await saveState(ctx.jobDir, state);
   return state;

@@ -22,7 +22,24 @@ const file = (home: string) => join(home, 'history.jsonl');
 /** One whole line per call (O_APPEND), so a crash cannot leave a half line in the middle. */
 export async function appendHistory(entry: HistoryEntry, home = antonHome()): Promise<void> {
   await fsp.mkdir(home, { recursive: true });
-  await fsp.appendFile(file(home), JSON.stringify(entry) + '\n');
+  // appendFile (O_APPEND), not writeFileAtomic: one small line, and read-modify-write would race between concurrent jobs.
+  let lead = '';
+  try {
+    const fh = await fsp.open(file(home), 'r');
+    try {
+      const { size } = await fh.stat();
+      if (size > 0) {
+        const b = Buffer.alloc(1);
+        await fh.read(b, 0, 1, size - 1);
+        if (b[0] !== 0x0a) lead = '\n'; // a crash left a half line: do not fuse with it
+      }
+    } finally {
+      await fh.close();
+    }
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+  }
+  await fsp.appendFile(file(home), lead + JSON.stringify(entry) + '\n');
 }
 
 export async function readHistory(home = antonHome()): Promise<HistoryEntry[]> {
@@ -33,17 +50,17 @@ export async function readHistory(home = antonHome()): Promise<HistoryEntry[]> {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw e;
   }
-  const out: HistoryEntry[] = [];
+  const out = new Map<string, HistoryEntry>(); // a re-delivery appends again: the last line per job wins
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     try {
       const r = HistoryEntrySchema.safeParse(JSON.parse(line));
-      if (r.success) out.push(r.data);
+      if (r.success) out.set(r.data.jobId, r.data);
     } catch {
       // corrupt line: skip
     }
   }
-  return out;
+  return [...out.values()];
 }
 
 const quantile = (sorted: number[], p: number): number => {

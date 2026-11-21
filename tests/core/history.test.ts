@@ -13,9 +13,9 @@ describe('history', () => {
   it('corrupt history lines are skipped', async () => {
     const home = await mkdtemp(join(tmpdir(), 'anton-hist-'));
     expect(await readHistory(home)).toEqual([]);
-    await appendHistory(e(1), home);
+    await appendHistory(e(1, { jobId: 'j1' }), home);
     await writeFile(join(home, 'history.jsonl'), (await readFile(join(home, 'history.jsonl'), 'utf8')) + 'not json\n{"jobId":1}\n');
-    await appendHistory(e(2), home);
+    await appendHistory(e(2, { jobId: 'j2' }), home);
     expect((await readHistory(home)).map((x) => x.spentUsd)).toEqual([1, 2]);
   });
 
@@ -34,5 +34,21 @@ describe('history', () => {
     const r2 = estimateCost([e(1), e(2), e(3), e(10)], want)!;
     expect(r2.lowUsd).toBeCloseTo(1.75);
     expect(r2.highUsd).toBeCloseTo(4.75);
+  });
+
+  it('two lines with the same jobId count once, with the later spentUsd', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'anton-hist-'));
+    await appendHistory(e(1, { jobId: 'a' }), home);
+    await appendHistory(e(2, { jobId: 'b' }), home);
+    await appendHistory(e(9, { jobId: 'a' }), home);
+    const h = await readHistory(home);
+    expect(h.map((x) => [x.jobId, x.spentUsd])).toEqual([['a', 9], ['b', 2]]);
+  });
+
+  it('a half-written last line does not fuse with the next one', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'anton-hist-'));
+    await writeFile(join(home, 'history.jsonl'), '{"jobId":"x","proj');
+    await appendHistory(e(3, { jobId: 'c' }), home);
+    expect((await readHistory(home)).map((x) => x.jobId)).toEqual(['c']);
   });
 });
