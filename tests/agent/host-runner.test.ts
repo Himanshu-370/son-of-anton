@@ -228,6 +228,12 @@ describe('runAgent', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('cost.json'));
   });
 
+  it('failed cost.json write is logged in the stage log', async () => {
+    await mkdir(join(ctx.jobDir, 'cost.json', 'x'), { recursive: true }); // a folder: the write fails
+    await runAgent(ctx, req, { spawn: () => fake([result(0.4)]).child, notify: vi.fn() });
+    expect(await readFile(join(ctx.jobDir, 'logs', 'build.log'), 'utf8')).toMatch(/^warning: Could not update cost\.json: /m);
+  });
+
   it('a usage.json that is a folder still returns the finished result (I5)', async () => {
     await mkdir(join(ctx.jobDir, 'usage.json', 'x'), { recursive: true });
     const usage = { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 };

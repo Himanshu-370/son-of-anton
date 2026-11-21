@@ -167,7 +167,10 @@ export async function runAgent(
     try {
       await write();
     } catch (e) {
-      ctx.warn?.(`Could not update ${name}: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = `Could not update ${name}: ${e instanceof Error ? e.message : String(e)}`;
+      ctx.warn?.(msg);
+      // Unattended runs have no warn sink: leave a trace in the stage log too.
+      await fsp.appendFile(logPath, redact(`warning: ${msg}`, ctx.secrets) + '\n').catch(() => undefined);
     }
   };
 
