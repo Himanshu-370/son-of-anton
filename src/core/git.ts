@@ -317,3 +317,16 @@ export async function ensureAntonIgnored(repo: string): Promise<void> {
   const sep = current === '' || current.endsWith('\n') ? '' : '\n';
   await writeFileAtomic(file, `${current}${sep}.anton/\n`);
 }
+
+/** `git init` in `dir` (created if missing) unless it already holds a repo. Same hook/config blocking as every call. */
+export async function initRepoIfMissing(dir: string): Promise<void> {
+  await mkdir(dir, { recursive: true });
+  if (await lstat(resolve(dir, '.git')).then(() => true, () => false)) return;
+  await git(dir, ['init', '-q']);
+}
+
+/** Stage only `paths` (repo-relative; deletions included) and commit them. Identity comes from SAFE, so no user git config is needed. */
+export async function commitPaths(dir: string, paths: string[], message: string): Promise<void> {
+  await git(dir, ['add', '-A', '--', ...paths]);
+  await git(dir, ['commit', '-q', '--no-verify', '-m', message, '--', ...paths]);
+}
