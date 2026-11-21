@@ -330,3 +330,8 @@ export async function commitPaths(dir: string, paths: string[], message: string)
   await git(dir, ['add', '-A', '--', ...paths]);
   await git(dir, ['commit', '-q', '--no-verify', '-m', message, '--', ...paths]);
 }
+
+/** True when git tracks the repo-relative `path` in its index. */
+export async function isTracked(dir: string, path: string): Promise<boolean> {
+  return (await git(dir, ['ls-files', '--', path])).trim() !== '';
+}

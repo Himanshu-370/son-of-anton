@@ -226,7 +226,7 @@ async function proposalsFrom(job: Job, msg: Message, notes: string[], key: strin
   for (const l of parsed.data.lessons) {
     // Value check against the fixed list; the target is never used as a path before this.
     if (!targets.includes(l.target)) {
-      notes.push(`${tag}: dropped lesson for unknown target ${JSON.stringify(l.target.slice(0, 60))}`);
+      notes.push(`${tag}: dropped lesson for unknown target ${JSON.stringify(redact(l.target, secrets).slice(0, 60))}`);
       continue;
     }
     try {

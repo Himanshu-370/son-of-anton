@@ -119,6 +119,14 @@ describe('anton lessons', () => {
     expect((await readLessons('web', home)).map((l) => l.text)).toEqual(['Run lint first']);
   });
 
+  it('Saving line is sanitized', async () => {
+    await appendProposals([prop({ text: 'Run\u009b[31m lint first' })], home);
+    const h = harness(['a']);
+    await lessonsReviewCommand(h.deps);
+    expect(h.text()).not.toMatch(/[\u0080-\u009f]/);
+    expect(h.text()).toContain('Saving: Run[31m lint first');
+  });
+
   it('collect notes and failures (job folder names) print without control characters', async () => {
     const repo = join(home, 'projects', 'p');
     const dir = join(repo, '.anton', 'jobs', '1-\u001b[31mred');

@@ -53,7 +53,7 @@ export async function lessonsReviewCommand(deps: CliDeps = {}): Promise<number> 
           let text = p.text ?? '';
           if (ans === 'e') text = (await d.ask(['New text:']))[0] ?? '';
           text = cleanLessonText(text);
-          d.out(`  Saving: ${text}`);
+          d.out(`  Saving: ${safe(text)}`);
           const l = await addLesson(p.target, text, home);
           d.out(`  Added ${l.id} to ${p.target}.md`);
           await removeProposal(p.id, home); accepted++; continue;
