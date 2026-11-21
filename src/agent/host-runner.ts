@@ -9,7 +9,7 @@ import { saveState, type JobState } from '../core/state.js';
 import { pluginsForSession } from '../plugins/session.js';
 import { loadPrompt } from '../stages/prompts.js';
 import { priceFor } from './pricing.js';
-import { AgentEventSchema, PROTOCOL_VERSION, type AgentRequest } from './protocol.js';
+import { AgentEventSchema, PROTOCOL_VERSION, type AgentRequest, type TokenTotals } from './protocol.js';
 
 export type StageCtx = {
   project: string;
@@ -24,6 +24,11 @@ export type StageCtx = {
   secrets?: Record<string, string>;
   /** Prints a warning to the user (the attended spec session); unset means none. */
   warn?: (line: string) => void;
+  /**
+   * Host-only: the token usage a resumed session's transcript already carries (the previous call's
+   * returned `usage`). The SDK's modelUsage on a resume includes it, so only the increase is recorded.
+   */
+  baseUsage?: TokenTotals;
 };
 
 /** Minimal process shape; satisfied by an execa child and by test fakes. */
@@ -97,7 +102,7 @@ export async function runAgent(
   ctx: StageCtx,
   req: AgentRequest,
   deps: RunAgentDeps = {},
-): Promise<{ output: unknown; sessionId: string; state: JobState; totalUsd: number }> {
+): Promise<{ output: unknown; sessionId: string; state: JobState; totalUsd: number; usage?: TokenTotals }> {
   if (remainingUsd(ctx.state) <= 0) throw new BudgetExceeded('no budget remaining');
   // P4b-R1: only runner stages have an allowance; any other stage is limited by the job cap alone.
   const group = stageGroup(ctx.stage);
@@ -166,6 +171,20 @@ export async function runAgent(
     }
   };
 
+  const baseUsage = req.resumeSessionId ? ctx.baseUsage : undefined;
+  /** The call's cumulative usage, returned so the caller can pass it as the next resume's base. */
+  let usage: TokenTotals | undefined;
+  const recordUsage = async (u: TokenTotals | undefined): Promise<void> => {
+    if (!u) return;
+    usage = u;
+    const b = baseUsage;
+    const inc: TokenTotals = b
+      ? { input: Math.max(0, u.input - b.input), output: Math.max(0, u.output - b.output),
+          cacheRead: Math.max(0, u.cacheRead - b.cacheRead), cacheWrite: Math.max(0, u.cacheWrite - b.cacheWrite) }
+      : u;
+    await bestEffort('usage.json', () => appendStageUsage(ctx.jobDir, ctx.stage, inc));
+  };
+
   /** Apply the increment since the last seen total; persist; notify/throw as needed. */
   const applyTotal = async (totalUsd: number, child: ChildLike, killOnCap: boolean): Promise<void> => {
     const inc = totalUsd - lastTotal;
@@ -213,12 +232,12 @@ export async function runAgent(
       case 'result':
         await applyTotal(ev.totalUsd, child, false);
         checkProtocol(ev.protocolVersion);
-        if (ev.usage) await bestEffort('usage.json', () => appendStageUsage(ctx.jobDir, ctx.stage, ev.usage!));
+        await recordUsage(ev.usage);
         return { output: ev.output, sessionId: ev.sessionId };
       case 'error':
         await applyTotal(ev.totalUsd, child, false);
         checkProtocol(ev.protocolVersion);
-        if (ev.usage) await bestEffort('usage.json', () => appendStageUsage(ctx.jobDir, ctx.stage, ev.usage!));
+        await recordUsage(ev.usage);
         // The SDK's own budget stop pauses the job like the host-side kill: allowance when the allowance set the session budget, else budget_cap.
         if (ev.code === 'budget') throw allowanceBound ? overAllowance(state) : new BudgetExceeded(ev.message);
         throw new AgentError(ev.message);
@@ -235,12 +254,12 @@ export async function runAgent(
           const line = buf.slice(0, idx);
           buf = buf.slice(idx + 1);
           const res = await handleLine(line);
-          if (res) return { ...res, state, totalUsd: lastTotal };
+          if (res) return { ...res, state, totalUsd: lastTotal, usage: usage ?? baseUsage };
         }
       }
     }
     const res = await handleLine(buf);
-    if (res) return { ...res, state, totalUsd: lastTotal };
+    if (res) return { ...res, state, totalUsd: lastTotal, usage: usage ?? baseUsage };
     const exit = await (child as unknown as PromiseLike<{ exitCode?: number }>);
     throw new AgentError(`agent exited without a result (exit ${exit?.exitCode ?? 'unknown'})`);
   } catch (e) {

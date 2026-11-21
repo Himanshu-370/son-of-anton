@@ -68,15 +68,15 @@ describe('runSpec cost accounting across resumed turns', () => {
   it('three resumed turns with SDK cumulative totals 0.5, 1.2, 2.0 record 2.0 spent, not 3.7', async () => {
     ctx.state = { ...ctx.state, spentUsd: 0 };
     const turns = [
-      { totalUsd: 0.5, output: { kind: 'questions', questions: ['a?'] } },
-      { totalUsd: 1.2, output: { kind: 'questions', questions: ['b?'] } },
-      { totalUsd: 2.0, output: { kind: 'spec', spec } },
+      { totalUsd: 0.5, usage: { input: 10, output: 1, cacheRead: 0, cacheWrite: 5 }, output: { kind: 'questions', questions: ['a?'] } },
+      { totalUsd: 1.2, usage: { input: 25, output: 3, cacheRead: 5, cacheWrite: 5 }, output: { kind: 'questions', questions: ['b?'] } },
+      { totalUsd: 2.0, usage: { input: 40, output: 6, cacheRead: 20, cacheWrite: 9 }, output: { kind: 'spec', spec } },
     ];
     const reqs: AgentRequest[] = [];
     let call = 0;
     const spawn = (): ChildLike => {
       const t = turns[call++]!;
-      const line = JSON.stringify({ type: 'result', ok: true, output: t.output, sessionId: 'sess', totalUsd: t.totalUsd, protocolVersion: 4 }) + '\n';
+      const line = JSON.stringify({ type: 'result', ok: true, output: t.output, sessionId: 'sess', totalUsd: t.totalUsd, usage: t.usage, protocolVersion: 4 }) + '\n';
       return {
         stdout: (async function* () { yield line; })(),
         kill: () => undefined,
@@ -90,6 +90,9 @@ describe('runSpec cost accounting across resumed turns', () => {
     const r = await runSpec(ctx, 'habit app', async (q) => q.map(() => 'yes'), { runAgent: run });
     expect(r.state.spentUsd).toBeCloseTo(2.0, 10);
     expect(reqs.map((q) => q.baseUsd ?? 0)).toEqual([0, 0.5, 1.2]);
+    // I4: each resumed result's usage is cumulative too; usage.json holds the session total, not the sum.
+    const usage = JSON.parse(await readFile(join(ctx.jobDir, 'usage.json'), 'utf8'));
+    expect(usage[ctx.stage]).toEqual({ input: 40, output: 6, cacheRead: 20, cacheWrite: 9 });
   });
 });
 

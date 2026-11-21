@@ -101,7 +101,7 @@ export async function runSpec(
       budgetUsd: remainingUsd(cur.state),
     };
     const res = await run(cur, req);
-    cur = { ...cur, state: res.state };
+    cur = { ...cur, state: res.state, baseUsage: res.usage };
     sessionId = res.sessionId;
     baseUsd = res.totalUsd ?? 0;
     const turn = SpecTurnSchema.parse(res.output);

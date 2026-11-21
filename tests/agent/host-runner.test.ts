@@ -372,6 +372,16 @@ describe('usage tracking', () => {
     expect(await usageJson()).toEqual({ build: u(1, 0, 0, 0) });
   });
 
+  it('a resumed call records only the usage increase over ctx.baseUsage, floored at 0 (I4)', async () => {
+    const ev = (usage: unknown) => L({ type: 'result', ok: true, output: {}, sessionId: 's', totalUsd: 0, usage, protocolVersion: 4 });
+    const r = await runAgent({ ...ctx, baseUsage: u(10, 5, 100, 3) }, { ...req, resumeSessionId: 's' }, { spawn: () => fake([ev(u(15, 9, 100, 1))]).child, notify: vi.fn() });
+    expect(await usageJson()).toEqual({ build: u(5, 4, 0, 0) });
+    expect(r.usage).toEqual(u(15, 9, 100, 1));
+    // Not a resume: the base does not apply.
+    await runAgent({ ...ctx, baseUsage: u(10, 5, 100, 3) }, req, { spawn: () => fake([ev(u(1, 1, 1, 1))]).child, notify: vi.fn() });
+    expect(await usageJson()).toEqual({ build: u(6, 5, 1, 1) });
+  });
+
   it('cache hit rate formula and empty case', () => {
     expect(cacheHitRate(u(100, 999, 620, 280))).toBeCloseTo(0.62);
     expect(cacheHitRate(u(0, 50, 0, 0))).toBeUndefined();
