@@ -290,8 +290,17 @@ describe('collectRetros', () => {
   it('a batch still running stays submitted', async () => {
     await submitted();
     const r = await collectRetros(deps(fake({ result: 'pending' }).client));
-    expect(r).toMatchObject({ collected: 0, failed: [] });
+    expect(r).toMatchObject({ collected: 0, failed: [], pending: 1 });
     expect(await retroJson()).toMatchObject({ status: 'submitted' });
+  });
+
+  it('pending counts only retros left submitted', async () => {
+    await submitted();
+    expect((await collectRetros(deps(fake().client))).pending).toBe(0);
+    await submitted();
+    expect((await collectRetros(deps(fake({ result: { type: 'expired' } }).client))).pending).toBe(0);
+    await submitted();
+    expect((await collectRetros(deps(fake().client, {}))).pending).toBe(1);
   });
 
   it('an invalid retro.json is marked failed once and never resubmitted', async () => {

@@ -254,13 +254,13 @@ async function proposalsFrom(job: Job, msg: Message, notes: string[], key: strin
 
 /**
  * Collects every finished batch of every registered project: queues the proposals, records the cost
- * at batch price and marks retro.json done (or failed). Batches still running stay submitted.
+ * at batch price and marks retro.json done (or failed). Batches still running stay submitted (`pending`).
  */
-export async function collectRetros(deps: RetroDeps = {}): Promise<{ collected: number; failed: string[]; notes: string[] }> {
+export async function collectRetros(deps: RetroDeps = {}): Promise<{ collected: number; failed: string[]; notes: string[]; pending: number }> {
   const env = deps.env ?? process.env;
   const key = env.ANTHROPIC_API_KEY || undefined;
   const home = deps.home ?? antonHome();
-  const res = { collected: 0, failed: [] as string[], notes: [] as string[] };
+  const res = { collected: 0, failed: [] as string[], notes: [] as string[], pending: 0 };
   let client: RetroClient | undefined;
 
   for (const p of await listProjects()) {
@@ -269,12 +269,15 @@ export async function collectRetros(deps: RetroDeps = {}): Promise<{ collected: 
       const job: Job = { name: p.name, repo: p.repoPath, jobId, jobDir: jobDirOf(p.repoPath, jobId) };
       const tag = `${p.name}/${jobId}`;
       const retry = (what: string, e: unknown) => res.notes.push(`${tag}: could not ${what} (${reasonOf(e, key)}); will retry`);
-      const fail = async (reason: string, submittedAt: string) => {
+      /** True once retro.json says failed. */
+      const fail = async (reason: string, submittedAt: string): Promise<boolean> => {
         try {
           await writeRetro(job.jobDir, { status: 'failed', reason, submittedAt });
           res.failed.push(`${tag}: ${reason}`);
+          return true;
         } catch (e) {
           retry('save retro.json', e);
+          return false;
         }
       };
       let raw: string | undefined;
@@ -293,20 +296,21 @@ export async function collectRetros(deps: RetroDeps = {}): Promise<{ collected: 
         continue;
       }
       if (r.status !== 'submitted') continue;
-      if (!key) {
-        res.notes.push(`Retro results waiting, but ANTHROPIC_API_KEY is not set (${tag}).`);
-        continue;
-      }
+      let settled = false; // false = still submitted after this pass (counted in pending)
       try {
+        if (!key) {
+          res.notes.push(`Retro results waiting, but ANTHROPIC_API_KEY is not set (${tag}).`);
+          continue;
+        }
         client ??= (deps.client ?? anthropicRetroClient)(key);
         const got = await client.getBatch(r.batchId!, CUSTOM_ID);
         if (!got.ended) continue;
         if (!got.result) {
-          await fail('batch has no result', r.submittedAt);
+          settled = await fail('batch has no result', r.submittedAt);
           continue;
         }
         if (got.result.type !== 'succeeded') {
-          await fail(`batch ${got.result.type}`, r.submittedAt);
+          settled = await fail(`batch ${got.result.type}`, r.submittedAt);
           continue;
         }
         let reason: string | undefined;
@@ -316,11 +320,14 @@ export async function collectRetros(deps: RetroDeps = {}): Promise<{ collected: 
           retry('save retro results', e);
           continue;
         }
+        settled = true;
         if (reason) res.failed.push(`${tag}: ${reason}`);
         else res.collected++;
       } catch (e) {
         // Network or API trouble: keep it submitted and try again next time.
         res.notes.push(`${tag}: could not fetch retro results: ${reasonOf(e, key)}`);
+      } finally {
+        if (!settled) res.pending++;
       }
     }
   }

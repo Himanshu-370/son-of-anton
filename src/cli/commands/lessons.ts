@@ -23,6 +23,7 @@ export async function lessonsReviewCommand(deps: CliDeps = {}): Promise<number> 
     // Notes and failures carry project and job tags taken from folder names.
     for (const n of r.notes) d.out(safe(n));
     for (const f of r.failed) d.out(`Retro failed: ${safe(f)}`);
+    if (r.pending > 0) d.out(`${r.pending} Retro(s) still running — try again later.`);
     const queue = await readProposals(home);
     if (!queue.length) { d.out('No lessons waiting.'); return 0; }
     if (!d.isTTY()) {

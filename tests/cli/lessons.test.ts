@@ -130,6 +130,19 @@ describe('anton lessons', () => {
     expect(h.text()).not.toMatch(/[\u001b\u202E]/);
   });
 
+  it('a batch still running is reported before the empty-queue line', async () => {
+    const repo = join(home, 'projects', 'p');
+    const dir = join(repo, '.anton', 'jobs', '1-init');
+    await mkdir(dir, { recursive: true });
+    await registerProject('p', repo);
+    await writeFile(join(dir, 'retro.json'), JSON.stringify({ status: 'submitted', batchId: 'msgbatch_1', submittedAt: 't' }));
+    const h = harness();
+    const client = { createBatch: async () => 'x', getBatch: async () => ({ ended: false as const }), send: async () => { throw new Error('unused'); } };
+    h.deps.retro = { home, env: { ANTHROPIC_API_KEY: 'test-key-not-real' }, client: () => client };
+    await lessonsReviewCommand(h.deps);
+    expect(h.text()).toContain('1 Retro(s) still running — try again later.\nNo lessons waiting.');
+  });
+
   it('empty queue prints No lessons waiting.', async () => {
     const h = harness();
     expect(await lessonsReviewCommand(h.deps)).toBe(0);
