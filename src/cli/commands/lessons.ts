@@ -20,8 +20,9 @@ export async function lessonsReviewCommand(deps: CliDeps = {}): Promise<number> 
   return guard(d, async () => {
     const home = d.retro.home;
     const r = await collectRetros({ ...d.retro, out: d.out });
-    for (const n of r.notes) d.out(n);
-    for (const f of r.failed) d.out(`Retro failed: ${f}`);
+    // Notes and failures carry project and job tags taken from folder names.
+    for (const n of r.notes) d.out(safe(n));
+    for (const f of r.failed) d.out(`Retro failed: ${safe(f)}`);
     const queue = await readProposals(home);
     if (!queue.length) { d.out('No lessons waiting.'); return 0; }
     if (!d.isTTY()) {
@@ -56,7 +57,7 @@ export async function lessonsReviewCommand(deps: CliDeps = {}): Promise<number> 
           d.out(`  Added ${l.id} to ${p.target}.md`);
           await removeProposal(p.id, home); accepted++; continue;
         } catch (e) {
-          d.out(`  Not added: ${e instanceof Error ? safe(e.message) : String(e)}`);
+          d.out(`  Not added: ${safe(e instanceof Error ? e.message : String(e))}`);
         }
       }
       kept++;
@@ -73,7 +74,7 @@ export async function lessonsListCommand(deps: CliDeps = {}): Promise<number> {
     for (const file of ALL_FILES) {
       const ls = await readLessons(file, d.retro.home);
       d.out(`${file}.md (${ls.length}/${MAX_LESSONS_PER_FILE})`);
-      for (const l of ls) d.out(`  ${l.id}  ${l.text}`);
+      for (const l of ls) d.out(`  ${l.id}  ${safe(l.text)}`);
     }
     return 0;
   });

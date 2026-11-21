@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -6,6 +6,7 @@ import type { CliDeps } from '../../src/cli/deps.js';
 import { lessonsListCommand, lessonsRemoveCommand, lessonsReviewCommand } from '../../src/cli/commands/lessons.js';
 import { appendProposals, readProposals, type Proposal } from '../../src/lessons/proposals.js';
 import { addLesson, readLessons } from '../../src/lessons/store.js';
+import { registerProject } from '../../src/core/registry.js';
 
 let home: string;
 beforeEach(async () => {
@@ -106,6 +107,27 @@ describe('anton lessons', () => {
     expect(h.text()).not.toMatch(/[\u200B\u202E\u2067]/);
     expect(h.text()).toContain('Lesson for web.md: Run lint first');
     expect((await readLessons('web', home)).map((l) => l.text)).toEqual(['Run lint first']);
+  });
+
+  it('collect notes and failures (job folder names) print without control characters', async () => {
+    const repo = join(home, 'projects', 'p');
+    const dir = join(repo, '.anton', 'jobs', '1-\u001b[31mred');
+    await mkdir(dir, { recursive: true });
+    await registerProject('p', repo);
+    await writeFile(join(dir, 'retro.json'), 'not json');
+    const h = harness();
+    await lessonsReviewCommand(h.deps);
+    expect(h.text()).toContain('Retro failed: p/1-[31mred: retro.json is unreadable');
+    expect(h.text()).not.toContain('\u001b');
+  });
+
+  it('list prints lesson text without control characters', async () => {
+    await mkdir(join(home, 'lessons'), { recursive: true });
+    await writeFile(join(home, 'lessons', 'web.md'), '- [L-0000000a] hand \u001b[2Jedited\u202E\n');
+    const h = harness();
+    await lessonsListCommand(h.deps);
+    expect(h.text()).toContain('L-0000000a  hand [2Jedited');
+    expect(h.text()).not.toMatch(/[\u001b\u202E]/);
   });
 
   it('empty queue prints No lessons waiting.', async () => {
