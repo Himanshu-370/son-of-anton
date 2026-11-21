@@ -34,6 +34,7 @@ export const AntonConfigSchema = z
       .object({ defaultUsd: z.number().positive().optional(), allowances: allowances.optional(), taskBudgets: z.boolean().optional() })
       .strict()
       .optional(),
+    retro: z.object({ batch: z.boolean().optional() }).strict().optional(),
   })
   .strict();
 
@@ -61,6 +62,9 @@ export function budgetSettings(cfg: AntonConfig): { defaultUsd: number; allowanc
     taskBudgets: cfg.budget?.taskBudgets ?? true,
   };
 }
+
+/** Retro goes through the Batch API (half price, collected later) unless `retro.batch: false`. */
+export const retroBatch = (cfg: AntonConfig): boolean => cfg.retro?.batch ?? true;
 
 export type StageGroup = 'spec' | 'plan' | 'build' | 'verify';
 
