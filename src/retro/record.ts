@@ -34,11 +34,26 @@ async function readText(path: string): Promise<string | undefined | null> {
 }
 const names = (dir: string) => readdir(dir).catch(() => [] as string[]);
 
-/** logs/ is container-writable too: every part of the path must be a real folder (missing is fine). */
-async function logsDirOk(jobDir: string): Promise<boolean> {
-  const st = await lstat(join(jobDir, 'logs')).catch(() => undefined);
+/** logs/ and evidence/ are container-writable too: each must be a real folder (missing is fine). Never creates it. */
+async function subDirOk(jobDir: string, name: string): Promise<boolean> {
+  const st = await lstat(join(jobDir, name)).catch(() => undefined);
   if (!st) return true;
-  return st.isDirectory() && (await realpath(join(jobDir, 'logs'))) === join(await realpath(jobDir), 'logs');
+  return st.isDirectory() && (await realpath(join(jobDir, name))) === join(await realpath(jobDir), name);
+}
+
+/** A tool name from one stage-log line: a JSON `log` event (what host-runner writes) or a plain `tool: X` line. */
+function toolOf(line: string): string | undefined {
+  let text: unknown = line;
+  if (line.startsWith('{')) {
+    try {
+      const ev = JSON.parse(line) as unknown;
+      text = isObj(ev) && own(ev, 'type') === 'log' ? own(ev, 'text') : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  const m = typeof text === 'string' ? /^tool: (\S.*)$/.exec(text) : null;
+  return m ? m[1]!.trim() : undefined;
 }
 const cap = (v: unknown, n = 500) => {
   const t = JSON.stringify(v ?? null) ?? 'null';
@@ -136,7 +151,7 @@ export async function buildRunRecord(ctx: { repo: string; jobDir: string; secret
     }
 
   const tools: string[] = [];
-  const logsOk = await logsDirOk(ctx.jobDir).catch(() => false);
+  const logsOk = await subDirOk(ctx.jobDir, 'logs').catch(() => false);
   if (!logsOk) tools.push(UNREADABLE);
   for (const n of (logsOk ? await names(f('logs')) : []).filter((x) => x.endsWith('.log')).sort()) {
     const text = await readText(f(`logs/${n}`));
@@ -145,7 +160,10 @@ export async function buildRunRecord(ctx: { repo: string; jobDir: string; secret
       continue;
     }
     const counts = new Map<string, number>();
-    for (const m of (text ?? '').matchAll(/^tool: (\S.*)$/gm)) counts.set(m[1]!.trim(), (counts.get(m[1]!.trim()) ?? 0) + 1);
+    for (const line of (text ?? '').split('\n')) {
+      const t = toolOf(line.trim());
+      if (t) counts.set(t, (counts.get(t) ?? 0) + 1);
+    }
     if (counts.size)
       tools.push(`### ${n.slice(0, -4)}\n${[...counts].sort((a, b) => b[1] - a[1]).map(([k, c]) => `- ${k}: ${c}${c >= REPEATED_AT ? ' (repeated)' : ''}`).join('\n')}`);
   }

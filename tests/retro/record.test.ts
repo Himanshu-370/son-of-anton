@@ -74,6 +74,18 @@ describe('buildRunRecord', () => {
     expect(r).toContain('- Grep: 24\n');
   });
 
+  it('tool use is counted from real JSON event lines (as host-runner writes them)', async () => {
+    // Same shape entry.ts emits and host-runner appends verbatim: one JSON event per line.
+    const ev = (text: string) => JSON.stringify({ type: 'log', text });
+    const lines = [...Array(25).fill(ev('tool: Read')), ...Array(3).fill(ev('tool: Bash')), ev('thinking about it'),
+      JSON.stringify({ type: 'cost', totalUsd: 0.1 }), JSON.stringify({ type: 'log', text: 7 }), '{broken', 'warning: x'];
+    await w('logs/build.log', lines.join('\n') + '\n');
+    const r = await build();
+    expect(r).toContain('- Read: 25 (repeated)');
+    expect(r).toContain('- Bash: 3\n');
+    expect(r).not.toContain('thinking');
+  });
+
   it('secrets are redacted', async () => {
     await w('questions.md', 'key is FAKE_RETRO_SECRET_42\n');
     const r = await build({ API_KEY: 'FAKE_RETRO_SECRET_42' });
