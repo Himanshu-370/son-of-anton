@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { allowanceLeftUsd, appendStageCost, recordCost, remainingUsd, seedStageSpend } from '../../src/core/budget.js';
@@ -59,6 +59,36 @@ describe('appendStageCost', () => {
     const c = JSON.parse(await readFile(join(dir, 'cost.json'), 'utf8'));
     expect(c.plan).toBeCloseTo(0.3);
     expect(c.build).toBe(1);
+  });
+
+  it('never writes through a planted cost.json.tmp symlink (C2)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'budget-'));
+    const outside = join(await mkdtemp(join(tmpdir(), 'budget-out-')), 'victim');
+    await writeFile(outside, 'keep me\n');
+    await symlink(outside, join(dir, 'cost.json.tmp'));
+    await appendStageCost(dir, 'plan', 0.5);
+    expect(await readFile(outside, 'utf8')).toBe('keep me\n');
+    expect(JSON.parse(await readFile(join(dir, 'cost.json'), 'utf8'))).toEqual({ plan: 0.5 });
+  });
+
+  it('a symlinked cost.json is not read; it is replaced by a regular file (C2)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'budget-'));
+    const outside = join(await mkdtemp(join(tmpdir(), 'budget-out-')), 'victim');
+    await writeFile(outside, '{"plan": 100}');
+    await symlink(outside, join(dir, 'cost.json'));
+    await appendStageCost(dir, 'plan', 0.5);
+    expect(await readFile(outside, 'utf8')).toBe('{"plan": 100}');
+    expect(JSON.parse(await readFile(join(dir, 'cost.json'), 'utf8'))).toEqual({ plan: 0.5 });
+  });
+
+  it('corrupt cost.json starts from {}; bad entries are dropped (C2, I5)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'budget-'));
+    await writeFile(join(dir, 'cost.json'), 'not json');
+    await appendStageCost(dir, 'plan', 0.5);
+    expect(JSON.parse(await readFile(join(dir, 'cost.json'), 'utf8'))).toEqual({ plan: 0.5 });
+    await writeFile(join(dir, 'cost.json'), '{"build": "lots", "qa": -1, "verify": 1, "plan": [1]}');
+    await appendStageCost(dir, 'plan', 0.5);
+    expect(JSON.parse(await readFile(join(dir, 'cost.json'), 'utf8'))).toEqual({ verify: 1, plan: 0.5 });
   });
 });
 

@@ -1,4 +1,3 @@
-import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import type { TokenTotals } from '../agent/protocol.js';
 import { NotRegularFileError, readRegularFile, writeFileAtomic } from './atomic.js';
@@ -14,6 +13,8 @@ export const usd = (n: number) => `$${n.toFixed(2)}`;
 export function stageGroup(stage: string): StageGroup | undefined {
   return Object.hasOwn(STAGE_GROUP, stage) ? STAGE_GROUP[stage] : undefined;
 }
+
+const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
 
 /** Own-key read: a key such as `constructor` must not resolve an inherited value. */
 const spentOf = (m: Record<string, number> | undefined, key: string): number => (m && Object.hasOwn(m, key) ? m[key]! : 0);
@@ -80,18 +81,37 @@ export function recordCost(
   return { state, crossedWarn, overCap: spentUsd > s.budgetUsd, overAllowance };
 }
 
+/**
+ * cost.json is container-writable: keep only own stage keys holding a finite, non-negative number.
+ * `clean` is false when the file was not a JSON object or any entry was dropped.
+ */
+export function parseCosts(raw: string | undefined): { costs: Record<string, number>; clean: boolean } {
+  if (raw === undefined) return { costs: {}, clean: true };
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    return { costs: {}, clean: false };
+  }
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) return { costs: {}, clean: false };
+  const entries = Object.entries(json).filter(([, v]) => isCount(v));
+  // fromEntries defines own properties, so a `__proto__` stage key cannot reach the prototype.
+  return { costs: Object.fromEntries(entries) as Record<string, number>, clean: entries.length === Object.keys(json).length };
+}
+
+/** Adds one increment into `<jobDir>/cost.json` under `stage`. */
 export async function appendStageCost(jobDir: string, stage: string, usd: number): Promise<void> {
   const final = join(jobDir, 'cost.json');
-  let costs: Record<string, number> = {};
+  let raw: string | undefined;
   try {
-    costs = JSON.parse(await fsp.readFile(final, 'utf8')) as Record<string, number>;
+    raw = await readRegularFile(final);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
+    if (!(e instanceof NotRegularFileError)) throw e;
+    // A planted symlink or FIFO: start over; the atomic rename below replaces it with a regular file.
   }
-  costs[stage] = (costs[stage] ?? 0) + usd;
-  const tmp = `${final}.tmp`;
-  await fsp.writeFile(tmp, JSON.stringify(costs, null, 2) + '\n');
-  await fsp.rename(tmp, final);
+  const { costs } = parseCosts(raw);
+  const next = spentOf(costs, stage) + usd;
+  await writeFileAtomic(final, JSON.stringify({ ...costs, ...Object.fromEntries([[stage, next]]) }, null, 2) + '\n');
 }
 
 /** cacheRead / (input + cacheRead + cacheWrite); undefined when there were no input tokens at all. */
@@ -101,7 +121,6 @@ export function cacheHitRate(t: TokenTotals): number | undefined {
 }
 
 const TOKEN_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite'] as const;
-const isCount = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0;
 
 /**
  * usage.json is container-writable: keep only own stage keys whose totals are all finite, non-negative
