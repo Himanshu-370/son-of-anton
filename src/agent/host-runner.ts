@@ -1,7 +1,7 @@
 import * as fsp from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { budgetSettings, loadAntonConfig } from '../core/anton-config.js';
-import { allowanceUsage, appendStageCost, appendStageUsage, recordCost, remainingUsd, stageGroup, usd } from '../core/budget.js';
+import { allowanceShareText, allowanceUsage, appendStageCost, appendStageUsage, recordCost, remainingUsd, stageGroup, usd } from '../core/budget.js';
 import { execIn } from '../docker/container.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { redact } from '../core/secrets.js';
@@ -60,7 +60,7 @@ export class AllowanceExceeded extends BudgetExceeded {
     public readonly spentUsd: number,
     public readonly limitUsd: number,
   ) {
-    super(`${group} allowance used (${usd(spentUsd)} of ${usd(limitUsd)})`);
+    super(allowanceShareText(group, spentUsd, limitUsd));
     this.name = 'AllowanceExceeded';
   }
 }

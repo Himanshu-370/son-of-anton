@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { allowanceLeftUsd, appendStageCost, recordCost, remainingUsd, seedStageSpend } from '../../src/core/budget.js';
+import { allowanceLeftUsd, allowanceShareText, appendStageCost, recordCost, remainingUsd, seedStageSpend } from '../../src/core/budget.js';
 import { DEFAULT_ALLOWANCES } from '../../src/core/anton-config.js';
 import { JobStateSchema, type JobState } from '../../src/core/state.js';
 
@@ -94,6 +94,11 @@ describe('appendStageCost', () => {
 
 describe('stage allowances', () => {
   const A = DEFAULT_ALLOWANCES;
+
+  it('the allowance text names the cumulative share (F3)', () => {
+    expect(allowanceShareText('verify', 9.5, 9.5)).toBe('verify share used: $9.50 of $9.50 (spec through verify)');
+    expect(allowanceShareText('spec', 1.2, 1)).toBe('spec share used: $1.20 of $1.00 (spec)');
+  });
 
   it('allowance borrows unused earlier shares', () => {
     // $10 cap: spec 10% + plan 10% + build 50% = $7.00 cumulative for build.

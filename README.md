@@ -165,7 +165,7 @@ Each job has a spend cap of $10 by default (`--budget` on `new`/`resume`). A war
 
 The job cap is split across stages: spec 10%, plan 10%, build 50%, verify 25%, retro 5%. A stage may spend its own share plus whatever earlier stages left unused (order: spec, plan, build, verify, retro; baseline counts as plan, deliver as verify). Example: on a $10 job, if spec spent $0.40 and plan $0.30, build can spend up to $7.00 - $0.70 = $6.30. Verify's spending never counts against build.
 
-When a stage's share runs out, the job pauses with reason `allowance` and a notification. `anton resume <project> --budget <usd>` raises the cap, and so every share; plain `resume` refuses and tells you this. The spec stage only warns, because you are at the keyboard; spec overspend counts against the job cap but never against later shares. The 80% warning still applies.
+When a stage's share runs out, the job pauses with reason `allowance` and a notification. The message names the cumulative share, for example `build share used: $7.00 of $7.00 (spec through build)`. `anton resume <project> --budget <usd>` raises the cap, and so every share; plain `resume` refuses and tells you this. The spec stage only warns, because you are at the keyboard; spec overspend counts against the job cap but never against later shares. The 80% warning still applies.
 
 ### Config keys
 

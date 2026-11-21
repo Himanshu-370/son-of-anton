@@ -33,6 +33,12 @@ export function allowanceUsage(s: JobState, group: StageGroup, allowances: Allow
   return { spentUsd, limitUsd: (s.budgetUsd * pct) / 100 };
 }
 
+/** A group's limit is cumulative (it borrows from earlier groups), so the text names the whole range. */
+export function allowanceShareText(group: StageGroup | string, spentUsd: number, limitUsd: number): string {
+  const range = group === ALLOWANCE_ORDER[0] ? group : `${ALLOWANCE_ORDER[0]} through ${group}`;
+  return `${group} share used: ${usd(spentUsd)} of ${usd(limitUsd)} (${range})`;
+}
+
 export function allowanceLeftUsd(s: JobState, group: StageGroup, allowances: Allowances = DEFAULT_ALLOWANCES): number {
   const { spentUsd, limitUsd } = allowanceUsage(s, group, allowances);
   return Math.max(0, limitUsd - spentUsd);

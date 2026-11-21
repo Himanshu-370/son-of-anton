@@ -290,7 +290,7 @@ describe('runUnattended', () => {
     await runUnattended('p', f.deps);
     expect(await loadState(dir)).toMatchObject({ stage: 'paused', pausedFrom: 'build', pauseReason: 'allowance' });
     expect(f.notify.mock.calls).toEqual([
-      ['Son of Anton', 'p: paused, build allowance used ($7.02 of $7.00). Resume with: anton resume p --budget <usd>'],
+      ['Son of Anton', 'p: paused, build share used: $7.02 of $7.00 (spec through build). Resume with: anton resume p --budget <usd>'],
     ]);
   });
 

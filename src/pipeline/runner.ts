@@ -2,7 +2,7 @@ import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import { AllowanceExceeded, BudgetExceeded, type StageCtx } from '../agent/host-runner.js';
 import { readRegularFile, writeFileAtomic } from '../core/atomic.js';
-import { seedStageSpend, usd } from '../core/budget.js';
+import { allowanceShareText, seedStageSpend } from '../core/budget.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
 import { assertOnJobBranch, currentJobId } from '../core/job.js';
 import { acquireLock as defaultAcquireLock } from '../core/lock.js';
@@ -97,7 +97,7 @@ async function writeRunRecord(repo: string, jobDir: string, used: LockEntry[]): 
 }
 
 export const allowanceHint = (project: string, group: string, spentUsd: number, limitUsd: number) =>
-  `${project}: paused, ${group} allowance used (${usd(spentUsd)} of ${usd(limitUsd)}). Resume with: anton resume ${project} --budget <usd>`;
+  `${project}: paused, ${allowanceShareText(group, spentUsd, limitUsd)}. Resume with: anton resume ${project} --budget <usd>`;
 
 /** Jobs from before stage allowances: fill stageSpentUsd from cost.json (the runner and resume call this). */
 export async function seededState(repo: string, jobDir: string, s: JobState): Promise<JobState> {

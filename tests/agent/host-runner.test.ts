@@ -312,6 +312,7 @@ describe('runAgent redaction', () => {
       await expect(p).rejects.toBeInstanceOf(AllowanceExceeded);
       await expect(p).rejects.toBeInstanceOf(BudgetExceeded);
       await expect(p).rejects.toMatchObject({ group: 'build', spentUsd: 7, limitUsd: 7 });
+      await expect(p).rejects.toThrow('build share used: $7.00 of $7.00 (spec through build)'); // F3: cumulative
       expect(spawn).not.toHaveBeenCalled();
     });
 

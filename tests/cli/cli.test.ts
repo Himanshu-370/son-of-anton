@@ -133,7 +133,7 @@ describe('anton resume', () => {
     await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'allowance', round: 1, spentUsd: 7.02, stageSpentUsd: { plan: 1, build: 6.02 } });
     const h = harness();
     expect(await resumeCommand('p', {}, h.deps)).toBe(1);
-    expect(h.errText()).toContain('p: paused, build allowance used ($7.02 of $7.00). Resume with: anton resume p --budget <usd>');
+    expect(h.errText()).toContain('p: paused, build share used: $7.02 of $7.00 (spec through build). Resume with: anton resume p --budget <usd>');
     expect(h.spawned).toEqual([]);
   });
 
