@@ -1,9 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { appendStageCost, recordCost, remainingUsd } from '../../src/core/budget.js';
-import type { JobState } from '../../src/core/state.js';
+import { allowanceLeftUsd, allowanceShareText, appendStageCost, recordCost, remainingUsd, seedStageSpend } from '../../src/core/budget.js';
+import { DEFAULT_ALLOWANCES } from '../../src/core/anton-config.js';
+import { JobStateSchema, type JobState } from '../../src/core/state.js';
 
 const base = (over: Partial<JobState> = {}): JobState => ({
   jobId: 'j1',
@@ -58,5 +59,108 @@ describe('appendStageCost', () => {
     const c = JSON.parse(await readFile(join(dir, 'cost.json'), 'utf8'));
     expect(c.plan).toBeCloseTo(0.3);
     expect(c.build).toBe(1);
+  });
+
+  it('never writes through a planted cost.json.tmp symlink (C2)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'budget-'));
+    const outside = join(await mkdtemp(join(tmpdir(), 'budget-out-')), 'victim');
+    await writeFile(outside, 'keep me\n');
+    await symlink(outside, join(dir, 'cost.json.tmp'));
+    await appendStageCost(dir, 'plan', 0.5);
+    expect(await readFile(outside, 'utf8')).toBe('keep me\n');
+    expect(JSON.parse(await readFile(join(dir, 'cost.json'), 'utf8'))).toEqual({ plan: 0.5 });
+  });
+
+  it('a symlinked cost.json is not read; it is replaced by a regular file (C2)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'budget-'));
+    const outside = join(await mkdtemp(join(tmpdir(), 'budget-out-')), 'victim');
+    await writeFile(outside, '{"plan": 100}');
+    await symlink(outside, join(dir, 'cost.json'));
+    await appendStageCost(dir, 'plan', 0.5);
+    expect(await readFile(outside, 'utf8')).toBe('{"plan": 100}');
+    expect(JSON.parse(await readFile(join(dir, 'cost.json'), 'utf8'))).toEqual({ plan: 0.5 });
+  });
+
+  it('corrupt cost.json starts from {}; bad entries are dropped (C2, I5)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'budget-'));
+    await writeFile(join(dir, 'cost.json'), 'not json');
+    await appendStageCost(dir, 'plan', 0.5);
+    expect(JSON.parse(await readFile(join(dir, 'cost.json'), 'utf8'))).toEqual({ plan: 0.5 });
+    await writeFile(join(dir, 'cost.json'), '{"build": "lots", "qa": -1, "verify": 1, "plan": [1]}');
+    await appendStageCost(dir, 'plan', 0.5);
+    expect(JSON.parse(await readFile(join(dir, 'cost.json'), 'utf8'))).toEqual({ verify: 1, plan: 0.5 });
+  });
+});
+
+describe('stage allowances', () => {
+  const A = DEFAULT_ALLOWANCES;
+
+  it('the allowance text names the cumulative share (F3)', () => {
+    expect(allowanceShareText('verify', 9.5, 9.5)).toBe('verify share used: $9.50 of $9.50 (spec through verify)');
+    expect(allowanceShareText('spec', 1.2, 1)).toBe('spec share used: $1.20 of $1.00 (spec)');
+  });
+
+  it('allowance borrows unused earlier shares', () => {
+    // $10 cap: spec 10% + plan 10% + build 50% = $7.00 cumulative for build.
+    const s = base({ spentUsd: 1.2, stageSpentUsd: { spec: 0.5, plan: 0.2, build: 0.5 } });
+    expect(allowanceLeftUsd(s, 'build', A)).toBeCloseTo(7 - (0.5 + 0.2 + 0.5));
+    expect(allowanceLeftUsd(s, 'plan', A)).toBeCloseTo(2 - 0.7);
+  });
+
+  it('verify spend does not count against build', () => {
+    const s = base({ stageSpentUsd: { spec: 1, plan: 1, build: 3, verify: 2 } });
+    expect(allowanceLeftUsd(s, 'build', A)).toBeCloseTo(2);
+    expect(allowanceLeftUsd(s, 'verify', A)).toBeCloseTo(9.5 - 7);
+  });
+
+  it('build round 2 limit after a verify round', () => {
+    let s = base({ stageSpentUsd: {} });
+    s = recordCost(s, 'build', 3, A).state;
+    s = recordCost(s, 'verify', 1.5, A).state;
+    s = recordCost(s, 'deliver', 0.2, A).state;
+    expect(s.stageSpentUsd).toEqual({ build: 3, verify: 1.7 });
+    expect(allowanceLeftUsd(s, 'build', A)).toBeCloseTo(4);
+  });
+
+  it('is floored at 0 and recordCost flags overAllowance when strictly over', () => {
+    const s = base({ stageSpentUsd: { spec: 1, plan: 1 } });
+    expect(allowanceLeftUsd(s, 'plan', A)).toBe(0);
+    expect(recordCost(s, 'baseline', 0.01, A).overAllowance).toBe(true);
+    expect(recordCost(base({ stageSpentUsd: { plan: 1.9 } }), 'plan', 0.1, A).overAllowance).toBe(false);
+  });
+
+  it('a stage outside STAGE_GROUP (and inherited keys) is stored by name and never over allowance (P4b-R1)', () => {
+    const s = base({ stageSpentUsd: { spec: 5, plan: 5 } });
+    const r = recordCost(s, 'plugin-review', 1, A);
+    expect(r.overAllowance).toBe(false);
+    expect(r.state.stageSpentUsd).toEqual({ spec: 5, plan: 5, 'plugin-review': 1 });
+    expect(recordCost(base(), 'constructor', 1, A).state.stageSpentUsd).toEqual({ constructor: 1 });
+  });
+
+  it('built-in key names in cost.json or stage names never read inherited values', () => {
+    const cost = JSON.parse('{"constructor":1,"__proto__":2,"toString":"x","build":1.5}');
+    const seeded = seedStageSpend(base(), cost);
+    expect(seeded.stageSpentUsd).toEqual({ build: 1.5 });
+    expect(Object.getPrototypeOf(seeded.stageSpentUsd)).toBe(Object.prototype);
+    // Recording on a state that already has stageSpentUsd, under a built-in stage name, stays valid JSON state.
+    const r = recordCost(recordCost(seeded, 'constructor', 1, A).state, 'build', 0.5, A);
+    expect(r.state.stageSpentUsd).toEqual({ build: 2, constructor: 1 });
+    expect(() => JobStateSchema.parse(r.state)).not.toThrow();
+    expect(seedStageSpend(r.state, cost)).toBe(r.state);
+  });
+
+  it('spec overspend counts only up to its share for later groups (P4b-R2)', () => {
+    const s = base({ spentUsd: 3, stageSpentUsd: { spec: 3 } });
+    expect(allowanceLeftUsd(s, 'plan', A)).toBeCloseTo(1);
+    expect(remainingUsd(s)).toBeCloseTo(7);
+    expect(allowanceLeftUsd(s, 'spec', A)).toBe(0);
+  });
+
+  it('old state without stageSpentUsd is seeded from cost.json', () => {
+    const s = seedStageSpend(base({ spentUsd: 3 }), { spec: 0.5, plan: 0.25, baseline: 0.25, build: 1.5, deliver: 0.5, verify: -1, retro: 'y', 'plugin-review': 1 });
+    expect(s.stageSpentUsd).toEqual({ spec: 0.5, plan: 0.5, build: 1.5, verify: 0.5 });
+    // Already seeded or corrupt input: left alone / empty.
+    expect(seedStageSpend(s, { build: 9 }).stageSpentUsd).toBe(s.stageSpentUsd);
+    expect(seedStageSpend(base(), 'junk').stageSpentUsd).toEqual({});
   });
 });

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
-import type { Role } from './config.js';
+import { DEFAULTS, type Role } from './config.js';
 import { antonHome } from './paths.js';
 
 const entry = z.string().regex(/^[a-z0-9][a-z0-9-]*(:[a-z0-9][a-z0-9-]*)?$/);
@@ -13,6 +13,15 @@ const ROLES = [
   'code_reviewer', 'security_reviewer', 'coach', 'mapper', 'browser_tester', 'plugin_reviewer',
 ] as const satisfies readonly Role[];
 
+export const ALLOWANCE_ORDER = ['spec', 'plan', 'build', 'verify', 'retro'] as const;
+export const DEFAULT_ALLOWANCES = { spec: 10, plan: 10, build: 50, verify: 25, retro: 5 };
+
+const pct = z.number().int().min(0).max(100);
+const allowances = z
+  .object({ spec: pct, plan: pct, build: pct, verify: pct, retro: pct })
+  .strict()
+  .refine((a) => Object.values(a).reduce((x, y) => x + y, 0) === 100, { message: 'budget.allowances must add up to 100' });
+
 export const AntonConfigSchema = z
   .object({
     stages: z
@@ -21,6 +30,10 @@ export const AntonConfigSchema = z
       .optional(),
     kits: z.object({ fallback: entries.optional(), web: entries.optional() }).strict().optional(),
     roles: z.object(Object.fromEntries(ROLES.map((r) => [r, entries.optional()]))).strict().optional(),
+    budget: z
+      .object({ defaultUsd: z.number().positive().optional(), allowances: allowances.optional(), taskBudgets: z.boolean().optional() })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -39,6 +52,14 @@ export async function loadAntonConfig(home = antonHome()): Promise<AntonConfig> 
   } catch (e) {
     throw new Error(`Invalid ~/anton/config.yaml: ${e instanceof Error ? e.message : String(e)}`);
   }
+}
+
+export function budgetSettings(cfg: AntonConfig): { defaultUsd: number; allowances: typeof DEFAULT_ALLOWANCES; taskBudgets: boolean } {
+  return {
+    defaultUsd: cfg.budget?.defaultUsd ?? DEFAULTS.budgetUsd,
+    allowances: cfg.budget?.allowances ?? DEFAULT_ALLOWANCES,
+    taskBudgets: cfg.budget?.taskBudgets ?? true,
+  };
 }
 
 export type StageGroup = 'spec' | 'plan' | 'build' | 'verify';

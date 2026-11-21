@@ -18,6 +18,7 @@ import {
 } from '../docker/container.js';
 import { fallbackKit } from '../kits/fallback/index.js';
 import { runUnattended as defaultRunUnattended } from '../pipeline/runner.js';
+import { readHistory as defaultReadHistory, type HistoryEntry } from '../core/history.js';
 import { ensureRepoMap as defaultEnsureRepoMap } from '../stages/repo-map.js';
 import { runSpec as defaultRunSpec } from '../stages/spec.js';
 
@@ -39,6 +40,8 @@ export type CliDeps = {
   ask?: (questions: string[]) => Promise<string[]>;
   /** Repo file names for kit detection (`git ls-files`, capped). */
   listFiles?: (repo: string) => Promise<string[]>;
+  /** Past jobs for the cost estimate in spec.md (`~/anton/history.jsonl`). */
+  readHistory?: () => Promise<HistoryEntry[]>;
   /** Start the detached background run for a project. */
   spawnRun?: (name: string, jobDir: string) => void;
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
@@ -122,6 +125,7 @@ export function resolveDeps(d: CliDeps = {}): Resolved {
     ensureRepoMap: d.ensureRepoMap ?? ((ctx) => defaultEnsureRepoMap(ctx)),
     ask: d.ask ?? readlineAsk,
     listFiles: d.listFiles ?? ((r) => gitListFiles(r)),
+    readHistory: d.readHistory ?? (() => defaultReadHistory()),
     spawnRun: d.spawnRun ?? defaultSpawnRun,
     kill: d.kill ?? ((pid, sig) => { process.kill(pid, sig); }),
     sleep: d.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
@@ -170,4 +174,4 @@ export async function guard(d: Resolved, body: () => Promise<number>): Promise<n
   }
 }
 
-export const usd = (n: number) => `$${n.toFixed(2)}`;
+export { usd } from '../core/budget.js';

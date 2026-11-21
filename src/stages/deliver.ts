@@ -1,7 +1,10 @@
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
+import type { TokenTotals } from '../agent/protocol.js';
 import { NotRegularFileError, readRegularFile, writeFileAtomic } from '../core/atomic.js';
+import { cacheHitRate, parseCosts, parseUsage, totalUsage } from '../core/budget.js';
+import { appendHistory } from '../core/history.js';
 import { redact } from '../core/secrets.js';
 import { listTags as defaultListTags, tag as defaultTag } from '../core/git.js';
 import type { ReviewFinding } from '../review/code-review.js';
@@ -17,6 +20,8 @@ import type { SpecDoc } from './spec.js';
 export type DeliverDeps = {
   tag?: (repo: string, name: string) => Promise<void>;
   listTags?: (repo: string, pattern: string) => Promise<string[]>;
+  /** Where history.jsonl lives (default: the anton home). */
+  home?: string;
 };
 
 /** The outcome to report. When absent (e.g. after accept-as-is), the latest evidence/results.json is used. */
@@ -170,15 +175,34 @@ function runSection(plan: Plan): string[] {
   return lines;
 }
 
-function costSection(costs: Record<string, number> | undefined): string[] {
+function costSection(
+  costs: Record<string, number>,
+  refused: boolean,
+  costsClean: boolean,
+  usage: Record<string, TokenTotals>,
+  usageRefused: boolean,
+): string[] {
   const lines = ['## Cost and time by stage', ''];
-  const entries = Object.entries(costs ?? {});
+  if (refused) return [...lines, 'cost.json was refused (not a regular file).', '', 'Time by stage: not recorded.'];
+  const entries = Object.entries(costs);
+  const hit = (t: TokenTotals | undefined) => {
+    const r = t && cacheHitRate(t);
+    return r === undefined ? '-' : `${Math.round(r * 100)}%`;
+  };
   if (entries.length === 0) {
     lines.push('No cost recorded.');
   } else {
     const total = entries.reduce((a, [, v]) => a + v, 0);
-    lines.push('| Stage | Cost |', '|---|---|', ...entries.map(([k, v]) => `| ${k} | ${usd(v)} |`), `| **Total** | **${usd(total)}** |`);
+    const totalHit = hit(totalUsage(usage));
+    lines.push(
+      '| Stage | Cost | Cache hit |',
+      '|---|---|---|',
+      ...entries.map(([k, v]) => `| ${k} | ${usd(v)} | ${hit(Object.hasOwn(usage, k) ? usage[k] : undefined)} |`),
+      `| **Total** | **${usd(total)}** | ${totalHit === '-' ? '-' : `**${totalHit}**`} |`,
+    );
   }
+  if (!costsClean) lines.push('', 'cost.json was partly or wholly refused (not valid stage costs).');
+  if (usageRefused) lines.push('', 'usage.json was refused (not a regular file).');
   lines.push('', 'Time by stage: not recorded.');
   return lines;
 }
@@ -215,8 +239,23 @@ export async function runDeliver(
     const raw = await readOptional(join(ctx.jobDir, 'evidence', 'results.json'));
     outcome = raw ? (JSON.parse(raw) as { results: CheckResult[]; runOk: boolean }) : { results: [], runOk: false };
   }
-  const costRaw = await readOptional(join(ctx.jobDir, 'cost.json'));
-  const costs = costRaw ? (JSON.parse(costRaw) as Record<string, number>) : undefined;
+  // cost.json is container-writable: report-only, cleaned like usage.json, never fatal once verify passed.
+  let costs = parseCosts(undefined);
+  let costRefused = false;
+  try {
+    costs = parseCosts(await readRegularFile(join(ctx.jobDir, 'cost.json')));
+  } catch (e) {
+    if (!(e instanceof NotRegularFileError)) throw e;
+    costRefused = true;
+  }
+  let usage: Record<string, TokenTotals> = {};
+  let usageRefused = false;
+  try {
+    usage = parseUsage(await readRegularFile(join(ctx.jobDir, 'usage.json')));
+  } catch (e) {
+    if (!(e instanceof NotRegularFileError)) throw e;
+    usageRefused = true;
+  }
   const sections = await readSections(join(ctx.jobDir, 'evidence', 'results.json'));
   let questions: string | undefined;
   let questionsRefused = false;
@@ -249,7 +288,7 @@ export async function runDeliver(
     ...(change ? [...(await regressionsSection(ctx.jobDir)), ''] : []),
     ...runSection(plan),
     '',
-    ...costSection(costs),
+    ...costSection(costs.costs, costRefused, costs.clean, usage, usageRefused),
     '',
     ...notDoneSection(spec, outcome.results, outcome.runOk),
     '',
@@ -260,6 +299,22 @@ export async function runDeliver(
   const prefix = `anton/${ctx.state.jobId}/delivered-`;
   const existing = await (deps.listTags ?? defaultListTags)(ctx.repo, `${prefix}*`);
   await tagFn(ctx.repo, `${prefix}${existing.length + 1}`);
+  const hit = cacheHitRate(totalUsage(usage));
+  try {
+    await appendHistory(
+    {
+      jobId: ctx.state.jobId, project: ctx.state.project, kind: ctx.state.kind, kit: spec.kit,
+      checks: spec.acceptanceChecks.length, spentUsd: ctx.state.spentUsd,
+      // Host-owned, zod-checked state (keyed by stage group), not container-writable cost.json.
+      stageUsd: ctx.state.stageSpentUsd ?? {},
+      ...(hit === undefined ? {} : { cacheHitRate: hit }), at: new Date().toISOString(),
+    },
+    deps.home,
+    );
+  } catch (e) {
+    // Best effort: failing here would leave a delivered tag without the transition, and a retry would tag again.
+    ctx.warn?.(`Could not record job history: ${e instanceof Error ? e.message : String(e)}`);
+  }
   const state = transition(ctx.state, 'awaiting_final_review');
   await saveState(ctx.jobDir, state);
   return state;

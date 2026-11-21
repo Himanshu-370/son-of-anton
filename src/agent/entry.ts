@@ -8,9 +8,9 @@
  * - `query({ prompt: string | AsyncIterable<SDKUserMessage>, options?: Options }): Query`.
  *   Query is an AsyncGenerator<SDKMessage>.
  * - Options used here: `model` (string), `effort` ('low'|'medium'|'high'|'xhigh'|'max'; it works with
- *   the default adaptive `thinking`, so `thinking` is left unset), `systemPrompt` (a string replaces
+ *   the default adaptive `thinking`, so `thinking` is left unset), `systemPrompt` (`{ type: 'custom', prompt }` replaces
  *   the default prompt; `{ type: 'preset', preset: 'claude_code', append }` keeps Claude Code's
- *   default prompt and appends ours), `cwd`, `maxTurns`, `resume` (a session id),
+ *   default prompt and appends ours; see "Prompt caching" below), `cwd`, `maxTurns`, `resume` (a session id),
  *   `outputFormat: { type: 'json_schema', schema }` (native structured output),
  *   `maxBudgetUsd` (a native budget; it stops with an `error_max_budget_usd` result. It is a
  *   client-side estimate that can overshoot, so the host-side kill from Task 9 stays), and
@@ -35,6 +35,21 @@
  *   result message, so a finished call over the cap is returned, not killed: R4). A cost event is
  *   emitted only when the estimate rises, so cost events never decrease: if the estimate overshot,
  *   the host has already counted the higher figure.
+ * - Prompt caching (Phase 4b, checked 2026-11-21 against the installed sdk.d.ts 0.3.328): preset sessions
+ *   use `{ type: 'preset', preset: 'claude_code', append, excludeDynamicSections: true, snapshot: true }`.
+ *   excludeDynamicSections strips per-run sections (working directory, auto-memory, git status) from the
+ *   system prompt so it stays static and cacheable; the SDK re-injects them as the first user message.
+ *   Replace-mode sessions use `{ type: 'custom', prompt, snapshot: true }`. snapshot records the rendered
+ *   system prompt once per session and reuses it verbatim on later requests and on `resume`, so the
+ *   cached prefix survives a resumed spec turn. Stages keep changing text (rounds, diffs, failures, times)
+ *   in the user prompt; the host's unattended rule puts the jobId on the system prompt's last line only
+ *   (tests/agent/prompt-stability.test.ts guards this).
+ * - Token usage: result messages carry `modelUsage: Record<model, ModelUsage>` (inputTokens, outputTokens,
+ *   cacheReadInputTokens, cacheCreationInputTokens; it covers subagent and auxiliary calls, unlike `usage`).
+ *   The entry sums every model's entry into the terminal event's `usage` ({input, output, cacheRead,
+ *   cacheWrite}); the host adds it to usage.json per stage. No usage when the call ended without a result.
+ * - Task budget: req.taskBudgetTokens maps to the `taskBudget: { total }` option (@alpha in the SDK: an
+ *   API-side token budget the model is told about so it paces itself). Unset: the option is left out.
  * - System prompt choice (req.systemPromptMode): the build roles (frontend/backend/infra) use 'append'
  *   (the preset form): they are long, tool-heavy coding sessions that benefit from Claude Code's
  *   default guidance on tools, editing and running commands, with the role rules appended. The
@@ -75,7 +90,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import type { Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { estimateUsd } from './pricing.js';
-import { AgentRequestSchema, PROTOCOL_VERSION, type AgentEvent, type AgentRequest } from './protocol.js';
+import { AgentRequestSchema, PROTOCOL_VERSION, type AgentEvent, type AgentRequest, type TokenTotals } from './protocol.js';
 
 export type EntryDeps = {
   query?: typeof import('@anthropic-ai/claude-agent-sdk').query;
@@ -90,10 +105,11 @@ export function buildOptions(req: AgentRequest): Options {
   const options: Options = {
     model: req.model,
     effort: req.effort,
+    // Cache-friendly (see header): no per-run dynamic sections, and the prompt is recorded once per session.
     systemPrompt:
       req.systemPromptMode === 'append'
-        ? { type: 'preset', preset: 'claude_code', append: req.systemPrompt }
-        : req.systemPrompt,
+        ? { type: 'preset', preset: 'claude_code', append: req.systemPrompt, excludeDynamicSections: true, snapshot: true }
+        : { type: 'custom', prompt: req.systemPrompt, snapshot: true },
     cwd: '/workspace',
     maxTurns: req.maxTurns,
     maxBudgetUsd: req.budgetUsd,
@@ -115,6 +131,7 @@ export function buildOptions(req: AgentRequest): Options {
     options.skills = [];
   }
   if (req.resumeSessionId) options.resume = req.resumeSessionId;
+  if (req.taskBudgetTokens !== undefined) options.taskBudget = { total: req.taskBudgetTokens };
   if (req.outputSchema) options.outputFormat = { type: 'json_schema', schema: req.outputSchema };
   return options;
 }
@@ -134,6 +151,20 @@ function checkOutput(schema: Record<string, unknown>, value: unknown): { ok: tru
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? { ok: true, value }
     : { ok: false, error: 'output is not a JSON object' };
+}
+
+/** Sums every model's usage on a result message; undefined when the result carries none. */
+function sumUsage(msg: Extract<SDKMessage, { type: 'result' }>): TokenTotals | undefined {
+  const models = Object.values(msg.modelUsage ?? {});
+  if (models.length === 0) return undefined;
+  const t: TokenTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  for (const m of models) {
+    t.input += m.inputTokens ?? 0;
+    t.output += m.outputTokens ?? 0;
+    t.cacheRead += m.cacheReadInputTokens ?? 0;
+    t.cacheWrite += m.cacheCreationInputTokens ?? 0;
+  }
+  return t;
 }
 
 function terminalFromResult(req: AgentRequest, msg: Extract<SDKMessage, { type: 'result' }>): AgentEvent {
@@ -217,6 +248,8 @@ export async function main(requestPath: string, deps: EntryDeps = {}): Promise<v
         // No `cost` event here: the result/error event carries the authoritative total, and a cost
         // event over the cap would make the host kill a finished, paid-for call (R4).
         terminal = terminalFromResult(req, msg);
+        const usage = sumUsage(msg);
+        if (usage && (terminal.type === 'result' || terminal.type === 'error')) terminal = { ...terminal, usage };
       }
     }
   } catch (e) {

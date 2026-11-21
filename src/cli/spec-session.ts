@@ -1,5 +1,6 @@
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
+import { estimateCost } from '../core/history.js';
 import { loadSecrets, secretsEnvFile } from '../core/secrets.js';
 import { loadState, saveState, transition } from '../core/state.js';
 import { selectKit, type KitName } from '../kits/index.js';
@@ -34,14 +35,23 @@ export async function runSpecSession(
   let kit: KitName = 'fallback';
   try {
     const state = await loadState(p.jobDir);
-    const ctx: StageCtx = { project: p.name, repo: p.repoPath, container, jobDir: p.jobDir, state, stage: 'spec', secrets, kit: 'fallback' };
+    let warned = false;
+    // Spec is warn-only: its over-share line prints once per session, then the session goes on.
+    const warn = (line: string) => {
+      if (!warned) d.out(line);
+      warned = true;
+    };
+    const ctx: StageCtx = { project: p.name, repo: p.repoPath, container, jobDir: p.jobDir, state, stage: 'spec', secrets, kit: 'fallback', warn };
     if (mode === 'change') ctx.state = await d.ensureRepoMap(ctx);
     const r = await d.runSpec(ctx, p.description, d.ask, {}, mode);
     services = r.spec.services ?? [];
     // The kit is picked here, not by the PM agent; the user can change the Kit: line at approval.
     const files = mode === 'change' ? await d.listFiles(p.repoPath) : [];
     kit = selectKit(p.description, files).name as KitName;
-    await writeSpec(p.jobDir, { ...r.spec, kit }, secrets);
+    // History is a convenience: an unreadable file must not fail the spec stage.
+    const history = await d.readHistory().catch(() => []);
+    const estimate = estimateCost(history, { kind: mode, kit, checks: r.spec.acceptanceChecks.length });
+    await writeSpec(p.jobDir, { ...r.spec, kit }, secrets, estimate);
     await saveState(p.jobDir, transition(r.state, 'awaiting_spec_approval'));
   } catch (e) {
     // `spec` has no paused edge, so the job can't be resumed: point at abandon + a fresh run.

@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BudgetExceeded, type StageCtx } from '../../src/agent/host-runner.js';
+import { AllowanceExceeded, BudgetExceeded, type StageCtx } from '../../src/agent/host-runner.js';
 import { isRunning } from '../../src/core/lock.js';
 import { jobDir as jobDirOf } from '../../src/core/paths.js';
 import { registerProject } from '../../src/core/registry.js';
@@ -285,6 +285,23 @@ describe('runUnattended', () => {
     expect(f.notify.mock.calls[0]).toEqual(['Son of Anton', expect.stringContaining('budget')]);
   });
 
+  it('runner pauses with allowance and the hint', async () => {
+    const f = fakes({ runBuild: async () => { throw new AllowanceExceeded('build', 7.02, 7); } });
+    await runUnattended('p', f.deps);
+    expect(await loadState(dir)).toMatchObject({ stage: 'paused', pausedFrom: 'build', pauseReason: 'allowance' });
+    expect(f.notify.mock.calls).toEqual([
+      ['Son of Anton', 'p: paused, build share used: $7.02 of $7.00 (spec through build). Resume with: anton resume p --budget <usd>'],
+    ]);
+  });
+
+  it('old state without stageSpentUsd is seeded from cost.json before the stages run', async () => {
+    await writeFile(join(dir, 'cost.json'), JSON.stringify({ spec: 0.5, plan: 0.25, baseline: 0.25 }));
+    let seen: JobState | undefined;
+    const f = fakes({ runPlan: async (ctx: StageCtx) => { seen = ctx.state; throw new Error('stop'); } });
+    await runUnattended('p', f.deps);
+    expect(seen?.stageSpentUsd).toEqual({ spec: 0.5, plan: 0.5 });
+  });
+
   it('container start failure pauses with error and still releases the lock', async () => {
     const f = fakes({ startContainer: async () => { throw new Error('docker run failed: nope'); } });
     await runUnattended('p', f.deps);
@@ -413,6 +430,13 @@ describe('run record', () => {
       other: 1,
       plugins: [{ name: 'cave', version: '1.0.0', commit: 'a'.repeat(40), sha256: 'a'.repeat(64) }],
     });
+  });
+
+  it('non-object run-record.json gives a clear error', async () => {
+    await writeFile(join(dir, 'run-record.json'), '[1]');
+    const started = vi.fn(async (s: string) => `anton-${s}`);
+    await runUnattended('p', fakes({ startContainer: started }).deps);
+    expect(await readFile(join(dir, 'logs', 'error.log'), 'utf8')).toContain('run-record.json is not a JSON object — fix or delete it');
   });
 
   it('a symlinked run-record.json is refused: the job pauses and the target is untouched', async () => {

@@ -72,10 +72,10 @@ describe.skipIf(!process.env.ANTON_E2E)('docker e2e', () => {
       const label = await execa('docker', ['inspect', '-f', '{{index .Config.Labels "anton.mounts"}}', kitName]);
       expect(label.stdout.trim()).toBe('2');
 
-      // The image's entry speaks the current protocol (echoes protocolVersion 3), no API needed.
+      // The image's entry speaks the current protocol (echoes protocolVersion 4), no API needed.
       await writeFile(join(kitRepo, 'bad-request.json'), '{"role": 1}');
       const ev = await runIn(kitName, 'node /opt/anton/entry.js /workspace/bad-request.json');
-      expect(JSON.parse(ev.stdout.trim().split('\n').at(-1)!)).toMatchObject({ type: 'error', protocolVersion: 3 });
+      expect(JSON.parse(ev.stdout.trim().split('\n').at(-1)!)).toMatchObject({ type: 'error', protocolVersion: 4 });
     } finally {
       await stopContainer(kitName);
       await rm(kitRepo, { recursive: true, force: true });

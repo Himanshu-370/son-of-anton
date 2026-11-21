@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { loadAntonConfig, resolveEntries, STAGE_GROUP } from '../../src/core/anton-config.js';
+import { budgetSettings, DEFAULT_ALLOWANCES, loadAntonConfig, resolveEntries, STAGE_GROUP } from '../../src/core/anton-config.js';
 
 async function homeWith(yaml?: string): Promise<string> {
   const home = await mkdtemp(join(tmpdir(), 'anton-cfg-'));
@@ -59,5 +59,24 @@ describe('resolveEntries', () => {
     expect(() => resolveEntries(cfg, { stage: 'bogus', role: 'qa', kit: 'web' })).toThrow(
       'Unknown stage "bogus"',
     );
+  });
+});
+
+describe('budget config', () => {
+  it('allowances must add up to 100', async () => {
+    const y = 'budget:\n  allowances: { spec: 10, plan: 10, build: 50, verify: 25, retro: 6 }\n';
+    await expect(loadAntonConfig(await homeWith(y))).rejects.toThrow('budget.allowances must add up to 100');
+  });
+  it('allowances need all five stages', async () => {
+    const y = 'budget:\n  allowances: { spec: 50, plan: 50 }\n';
+    await expect(loadAntonConfig(await homeWith(y))).rejects.toThrow(/Invalid ~\/anton\/config\.yaml/);
+  });
+  it('defaultUsd must be above 0 (F1)', async () => {
+    await expect(loadAntonConfig(await homeWith('budget:\n  defaultUsd: 0\n'))).rejects.toThrow(/Invalid ~\/anton\/config\.yaml/);
+  });
+  it('budgetSettings fills defaults', async () => {
+    expect(budgetSettings({})).toEqual({ defaultUsd: 10, allowances: DEFAULT_ALLOWANCES, taskBudgets: true });
+    const cfg = await loadAntonConfig(await homeWith('budget:\n  defaultUsd: 3\n  taskBudgets: false\n'));
+    expect(budgetSettings(cfg)).toEqual({ defaultUsd: 3, allowances: DEFAULT_ALLOWANCES, taskBudgets: false });
   });
 });

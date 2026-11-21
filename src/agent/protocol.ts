@@ -5,7 +5,7 @@ import { z } from 'zod';
  * event that does not echo it, so an image built from older agent code (which would, for example,
  * silently drop `tools`) fails closed instead of running with the wrong options.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 export const AgentRequestSchema = z.object({
   role: z.string(),
@@ -41,10 +41,21 @@ export const AgentRequestSchema = z.object({
   plugins: z.array(z.string()).optional(),
   skills: z.array(z.string()).optional(),
   mcpServers: z.record(z.string(), z.unknown()).optional(),
+  /** API-side task budget in tokens; the entry maps it to the SDK's `taskBudget: { total }`. Unset: none. */
+  taskBudgetTokens: z.number().int().min(1).optional(),
   /** Set by the host (runAgent) to PROTOCOL_VERSION; the entry refuses a different value. */
   protocolVersion: z.number().int().optional(),
 });
 export type AgentRequest = z.infer<typeof AgentRequestSchema>;
+
+/** Token totals for one call, summed over every model the call used. */
+export const TokenTotalsSchema = z.object({
+  input: z.number().min(0),
+  output: z.number().min(0),
+  cacheRead: z.number().min(0),
+  cacheWrite: z.number().min(0),
+});
+export type TokenTotals = z.infer<typeof TokenTotalsSchema>;
 
 /** One JSONL line on the agent's stdout. `totalUsd` is cumulative for the call. */
 export const AgentEventSchema = z.discriminatedUnion('type', [
@@ -56,6 +67,8 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
     output: z.unknown(),
     sessionId: z.string(),
     totalUsd: z.number().min(0),
+    /** Token usage from the SDK result's modelUsage; absent when the call ended without a result. */
+    usage: TokenTotalsSchema.optional(),
     /** The entry's PROTOCOL_VERSION. Absent from Phase 1 entries; the host rejects a mismatch. */
     protocolVersion: z.number().int().optional(),
   }),
@@ -65,6 +78,7 @@ export const AgentEventSchema = z.discriminatedUnion('type', [
     totalUsd: z.number().min(0),
     /** Machine-readable cause. 'budget': the SDK stopped at maxBudgetUsd (host throws BudgetExceeded). */
     code: z.enum(['budget']).optional(),
+    usage: TokenTotalsSchema.optional(),
     protocolVersion: z.number().int().optional(),
   }),
 ]);
