@@ -280,7 +280,19 @@ export async function revParse(repo: string, ref: string): Promise<string> {
  */
 export async function cloneShallow(url: string, dest: string): Promise<string> {
   await mkdir(dirname(dest), { recursive: true });
-  await git(dirname(dest), ['-c', 'protocol.ext.allow=never', 'clone', '-q', '--depth', '1', '--no-tags', '--', url, dest]);
+  // Never prompt for a password (git or Git Credential Manager), and never hang past 120 s.
+  const r = await execa('git', [...SAFE, '-c', 'protocol.ext.allow=never', 'clone', '-q', '--depth', '1', '--no-tags', '--', url, dest], {
+    cwd: dirname(dest), env: { ...gitEnv(), GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' }, extendEnv: false,
+    timeout: 120_000, reject: false,
+  });
+  if (r.timedOut) throw new Error(`Timed out cloning ${url} after 120 s`);
+  if (r.exitCode !== 0) {
+    const err = String(r.stderr);
+    if (/terminal prompts disabled|could not read (username|password)|authentication failed|repository not found|returned error: 40[134]/i.test(err)) {
+      throw new Error(`Could not clone ${url} (private or missing repo?)`);
+    }
+    throw new Error(`git clone ${url} failed: ${err.trim()}`);
+  }
   return headSha(dest);
 }
 
