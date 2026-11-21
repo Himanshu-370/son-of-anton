@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
 import type { TokenTotals } from '../agent/protocol.js';
 import { NotRegularFileError, readRegularFile, writeFileAtomic } from '../core/atomic.js';
-import { cacheHitRate, parseUsage, totalUsage } from '../core/budget.js';
+import { cacheHitRate, parseCosts, parseUsage, totalUsage } from '../core/budget.js';
 import { appendHistory } from '../core/history.js';
 import { redact } from '../core/secrets.js';
 import { listTags as defaultListTags, tag as defaultTag } from '../core/git.js';
@@ -175,10 +175,16 @@ function runSection(plan: Plan): string[] {
   return lines;
 }
 
-function costSection(costs: Record<string, number> | undefined, refused: boolean, usage: Record<string, TokenTotals>, usageRefused: boolean): string[] {
+function costSection(
+  costs: Record<string, number>,
+  refused: boolean,
+  costsClean: boolean,
+  usage: Record<string, TokenTotals>,
+  usageRefused: boolean,
+): string[] {
   const lines = ['## Cost and time by stage', ''];
   if (refused) return [...lines, 'cost.json was refused (not a regular file).', '', 'Time by stage: not recorded.'];
-  const entries = Object.entries(costs ?? {});
+  const entries = Object.entries(costs);
   const hit = (t: TokenTotals | undefined) => {
     const r = t && cacheHitRate(t);
     return r === undefined ? '-' : `${Math.round(r * 100)}%`;
@@ -195,6 +201,7 @@ function costSection(costs: Record<string, number> | undefined, refused: boolean
       `| **Total** | **${usd(total)}** | ${totalHit === '-' ? '-' : `**${totalHit}**`} |`,
     );
   }
+  if (!costsClean) lines.push('', 'cost.json was partly or wholly refused (not valid stage costs).');
   if (usageRefused) lines.push('', 'usage.json was refused (not a regular file).');
   lines.push('', 'Time by stage: not recorded.');
   return lines;
@@ -232,11 +239,11 @@ export async function runDeliver(
     const raw = await readOptional(join(ctx.jobDir, 'evidence', 'results.json'));
     outcome = raw ? (JSON.parse(raw) as { results: CheckResult[]; runOk: boolean }) : { results: [], runOk: false };
   }
-  let costs: Record<string, number> | undefined;
+  // cost.json is container-writable: report-only, cleaned like usage.json, never fatal once verify passed.
+  let costs = parseCosts(undefined);
   let costRefused = false;
   try {
-    const costRaw = await readRegularFile(join(ctx.jobDir, 'cost.json'));
-    costs = costRaw ? (JSON.parse(costRaw) as Record<string, number>) : undefined;
+    costs = parseCosts(await readRegularFile(join(ctx.jobDir, 'cost.json')));
   } catch (e) {
     if (!(e instanceof NotRegularFileError)) throw e;
     costRefused = true;
@@ -281,7 +288,7 @@ export async function runDeliver(
     ...(change ? [...(await regressionsSection(ctx.jobDir)), ''] : []),
     ...runSection(plan),
     '',
-    ...costSection(costs, costRefused, usage, usageRefused),
+    ...costSection(costs.costs, costRefused, costs.clean, usage, usageRefused),
     '',
     ...notDoneSection(spec, outcome.results, outcome.runOk),
     '',
@@ -297,7 +304,9 @@ export async function runDeliver(
     await appendHistory(
     {
       jobId: ctx.state.jobId, project: ctx.state.project, kind: ctx.state.kind, kit: spec.kit,
-      checks: spec.acceptanceChecks.length, spentUsd: ctx.state.spentUsd, stageUsd: costs ?? {},
+      checks: spec.acceptanceChecks.length, spentUsd: ctx.state.spentUsd,
+      // Host-owned, zod-checked state (keyed by stage group), not container-writable cost.json.
+      stageUsd: ctx.state.stageSpentUsd ?? {},
       ...(hit === undefined ? {} : { cacheHitRate: hit }), at: new Date().toISOString(),
     },
     deps.home,

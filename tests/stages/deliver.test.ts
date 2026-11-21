@@ -45,14 +45,16 @@ describe('runDeliver', () => {
   });
 
   it('deliver appends one history line without the description', async () => {
-    await writeFile(join(ctx.jobDir, 'cost.json'), JSON.stringify({ spec: 0.5, build: 1 }));
-    ctx.state = { ...ctx.state, kind: 'new' }; // fixture lacks the schema default
+    // I6: stageUsd comes from host-owned state, never from container-writable cost.json.
+    await writeFile(join(ctx.jobDir, 'cost.json'), JSON.stringify({ spec: 0.5, build: 1, weird: 'x', planted: 99 }));
+    ctx.state = { ...ctx.state, kind: 'new', stageSpentUsd: { spec: 0.5, build: 1 } }; // fixture lacks the schema default
     const home = await mkdtemp(join(tmpdir(), 'anton-home-'));
     await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag: vi.fn(async () => {}), listTags: async () => [], home });
     const lines = (await readFile(join(home, 'history.jsonl'), 'utf8')).trim().split('\n');
     expect(lines).toHaveLength(1);
     const h = JSON.parse(lines[0]!);
     expect(h).toMatchObject({ jobId: 'j1', project: 'p', kind: 'new', kit: 'fallback', checks: 2, spentUsd: 1.5, stageUsd: { spec: 0.5, build: 1 } });
+    expect(h.stageUsd).toEqual({ spec: 0.5, build: 1 });
     expect(typeof h.at).toBe('string');
     expect(lines[0]).not.toContain('Prints the sum');
     expect(lines[0]).not.toContain('sums two numbers');
@@ -309,6 +311,23 @@ describe('runDeliver cost.json', () => {
     const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
     expect(md).not.toContain('hostStage');
     expect(md).toContain('cost.json was refused (not a regular file).');
+  });
+
+  it('a cost.json that is not valid JSON does not fail deliver; the report notes it (F2)', async () => {
+    await writeFile(join(ctx.jobDir, 'cost.json'), '{"build": 1');
+    const state = await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag: vi.fn(async () => {}), listTags: async () => [] });
+    expect(state.stage).toBe('awaiting_final_review');
+    expect(await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8')).toContain('cost.json was partly or wholly refused (not valid stage costs).');
+  });
+
+  it('non-number cost.json values are dropped from the report and noted (F2)', async () => {
+    await writeFile(join(ctx.jobDir, 'cost.json'), JSON.stringify({ build: 0.75, plan: 'lots', qa: { x: 1 } }));
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag: vi.fn(async () => {}), listTags: async () => [] });
+    const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    expect(md).toContain('| build | $0.75 |');
+    expect(md).not.toContain('| plan |');
+    expect(md).toContain('**Total** | **$0.75**');
+    expect(md).toContain('cost.json was partly or wholly refused (not valid stage costs).');
   });
 });
 
