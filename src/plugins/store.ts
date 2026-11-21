@@ -8,11 +8,14 @@ import { cloneShallow, headSha } from '../core/git.js';
 import { antonHome } from '../core/paths.js';
 import { marketplaceSlug, parseSpecifier, PLUGIN_NAME, resolvePluginDir, type Clone } from './marketplace.js';
 
+/** Printable plugin versions only: plugin.json is untrusted and `version` is printed to the terminal. */
+const VERSION = /^[\w.+-]{1,64}$/;
+
 const LockEntrySchema = z.object({
   name: z.string().regex(PLUGIN_NAME),
   marketplace: z.string(),
   url: z.string(),
-  version: z.string(),
+  version: z.string().regex(VERSION),
   commit: z.string().regex(/^[0-9a-f]{40,64}$/),
   sha256: z.string().regex(/^[0-9a-f]{64}$/),
   // Relative to <home>/plugins; later joined into host and container paths, so no `..` can get in.
@@ -65,7 +68,7 @@ export async function treeHash(dir: string): Promise<string> {
 async function pluginVersion(dir: string): Promise<string> {
   try {
     const v = (JSON.parse(await readFile(join(dir, '.claude-plugin', 'plugin.json'), 'utf8')) as { version?: unknown }).version;
-    return typeof v === 'string' && v.trim() ? v.trim() : 'unversioned';
+    return typeof v === 'string' && VERSION.test(v.trim()) ? v.trim() : 'unversioned';
   } catch {
     return 'unversioned';
   }

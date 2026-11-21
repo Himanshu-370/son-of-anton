@@ -1,4 +1,4 @@
-import { appendFile, mkdtemp, readdir, readFile } from 'node:fs/promises';
+import { appendFile, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -44,6 +44,14 @@ describe('installPlugin', () => {
     expect(await treeHash(dir)).toBe(e.sha256);
     expect(await readLock(home)).toEqual([e]);
     await expect(verifyInstalled(e, home)).resolves.toBeUndefined();
+  });
+
+  it('a version with control characters is stored as unversioned, and the lock refuses one', async () => {
+    const clone = fakeClone({ [MKT]: await marketplace('cave', { version: '1.0\u001b[31m' }) });
+    const e = await installPlugin('cave@acme/mkt', { home, clone });
+    expect(e.version).toBe('unversioned');
+    await writeFile(join(home, 'plugins.lock'), JSON.stringify([{ ...e, version: '1.0\u001b[31m' }]));
+    await expect(readLock(home)).rejects.toThrow();
   });
 
   it('missing plugin.json gives unversioned; lock:false + destRoot leaves the lock alone', async () => {
