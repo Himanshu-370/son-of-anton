@@ -6,6 +6,7 @@ import { runAgent, type ChildLike, type StageCtx } from '../../src/agent/host-ru
 import type { AgentRequest } from '../../src/agent/protocol.js';
 import { saveState, type JobState } from '../../src/core/state.js';
 import { runBrowserAgent } from '../../src/kits/web/browser.js';
+import { addLesson } from '../../src/lessons/store.js';
 import { installPlugin } from '../../src/plugins/store.js';
 import { updatePlugin } from '../../src/plugins/update.js';
 import { runCodeReview } from '../../src/review/code-review.js';
@@ -163,6 +164,27 @@ describe('prompt stability', () => {
       await runBrowserAgent(ctx, spec.acceptanceChecks, 'http://localhost:3000', `/workspace/.anton/jobs/${JOB}/evidence/round-${round}`, c.fn);
       return one('browser', c.reqs);
     }), ['browser']);
+  });
+
+  it('prompts stay stable with lessons', async () => {
+    await addLesson('build-backend', 'Validate input', process.env.ANTON_HOME);
+    await addLesson('fallback', 'Keep commits small');
+    const ctx = await makeCtx('build', 1);
+    const mk = () => ({
+      stdout: (async function* () { yield JSON.stringify({ type: 'result', ok: true, output: {}, sessionId: 's', totalUsd: 0, protocolVersion: 4 }) + '\n'; })(),
+      kill: vi.fn(),
+      then: (ok: (v: { exitCode: number }) => unknown) => Promise.resolve({ exitCode: 0 }).then(ok),
+    }) as unknown as ChildLike;
+    const req: AgentRequest = { role: 'backend', model: 'm', effort: 'low', systemPrompt: 'rules', prompt: 'p', maxTurns: 1, budgetUsd: 1 };
+    for (let i = 0; i < 2; i++) {
+      vi.setSystemTime(CLOCKS[i]!);
+      await runAgent({ ...ctx, kit: 'fallback', state: { ...ctx.state, round: ROUNDS[i]! } }, req, { spawn: mk, notify: vi.fn() });
+    }
+    const sp = async (f: string) => JSON.parse(await readFile(join(ctx.jobDir, 'requests', f), 'utf8')).systemPrompt as string;
+    const a = await sp('build-1.json');
+    expect(a).toContain('- Validate input\n- Keep commits small');
+    expect(await sp('build-2.json')).toBe(a);
+    expectStable([new Map([['final', a]]), new Map([['final', a]])], ['final']);
   });
 
   it('plugin review system prompt is stable across time', async () => {
