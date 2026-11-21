@@ -5,7 +5,7 @@ import { readRegularFile } from '../core/atomic.js';
 import { allowanceUsage, parseCosts, seedStageSpend, usd, type Allowances } from '../core/budget.js';
 import { redact } from '../core/secrets.js';
 import { JobStateSchema, type JobState } from '../core/state.js';
-import { assertEvidenceDir, assertJobDir, listVerifyCopies } from '../stages/verify.js';
+import { assertJobDir, listVerifyCopies } from '../stages/verify.js';
 
 export const MAX_RECORD_CHARS = 60_000;
 const REPEATED_AT = 25;
@@ -92,7 +92,7 @@ export async function buildRunRecord(ctx: { repo: string; jobDir: string; secret
       : 'No edits: the approved spec matches the proposed spec.';
   }
 
-  const evidenceOk = await assertEvidenceDir(ctx.repo, ctx.jobDir).then(() => true, () => false);
+  const evidenceOk = await subDirOk(ctx.jobDir, 'evidence').catch(() => false);
   const copies = evidenceOk ? await listVerifyCopies(ctx.jobDir).catch(() => []) : [];
   const rounds = await Promise.all(copies.map(async (c) => ({ n: c.n, rec: await readJson(f(`evidence/${c.name}`)) })));
 

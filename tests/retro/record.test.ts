@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { buildRunRecord } from '../../src/retro/record.js';
@@ -84,6 +84,13 @@ describe('buildRunRecord', () => {
     expect(r).toContain('- Read: 25 (repeated)');
     expect(r).toContain('- Bash: 3\n');
     expect(r).not.toContain('thinking');
+  });
+
+  it('a job with no evidence/ folder gets a record and no folder is created', async () => {
+    const r = await build();
+    expect(r).toContain('## Failed checks by round');
+    expect(r).not.toContain('(unreadable)');
+    expect(await stat(join(jobDir, 'evidence')).then(() => true, () => false)).toBe(false);
   });
 
   it('secrets are redacted', async () => {
