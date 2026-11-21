@@ -4,8 +4,8 @@ import { addLesson, cleanLessonText, KIT_LESSON_FILES, LESSON_FILES, MAX_LESSONS
 import { guard, resolveDeps, type CliDeps } from '../deps.js';
 
 const ALL_FILES = [...(Object.values(LESSON_FILES) as string[]), ...KIT_LESSON_FILES];
-// Queue text came from a model: drop control characters (incl. ESC) before it reaches the terminal.
-const safe = (s: string | undefined) => (s ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '');
+// Queue text came from a model: drop control characters (incl. ESC) and format characters (bidi, zero-width).
+const safe = (s: string | undefined) => (s ?? '').replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]|\p{Cf}/gu, '');
 
 function show(p: Proposal): string[] {
   const head = p.kind === 'lesson'

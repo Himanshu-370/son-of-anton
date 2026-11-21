@@ -32,7 +32,8 @@ const path = (file: string, home: string) => join(dir(home), `${file}.md`);
 const idOf = (file: string, text: string) => `L-${sha8(`${file}\n${text}`)}`;
 
 export function cleanLessonText(s: string): string {
-  const t = s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, '').replace(/\s+/g, ' ').trim();
+  // \p{Cf} (zero-width, bidi overrides, BOM) could make the shown text differ from what reaches prompts.
+  const t = s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]|\p{Cf}/gu, '').replace(/\s+/g, ' ').trim();
   if (!t) throw new Error('Lesson is empty');
   if (t.length > MAX_LEN) throw new Error(`Lesson is longer than ${MAX_LEN} characters`);
   return t;

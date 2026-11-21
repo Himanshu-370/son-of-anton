@@ -34,6 +34,12 @@ describe('lessons store', () => {
     expect(() => cleanLessonText(' \n ')).toThrow('Lesson is empty');
   });
 
+  it('invisible and bidi format characters are stripped before saving', async () => {
+    const l = await addLesson('web', 'Run \u202Elint\u200B first\u2066\uFEFF', home);
+    expect(l.text).toBe('Run lint first');
+    expect(await readFile(join(home, 'lessons', 'web.md'), 'utf8')).toBe(`- [${l.id}] Run lint first\n`);
+  });
+
   it('over 300 characters is refused', async () => {
     await expect(addLesson('web', 'x'.repeat(301), home)).rejects.toThrow('Lesson is longer than 300 characters');
   });

@@ -99,6 +99,15 @@ describe('anton lessons', () => {
     expect(h.text()).not.toContain('\u001b');
   });
 
+  it('bidi and zero-width characters are neither shown nor saved', async () => {
+    await appendProposals([prop({ text: 'Run \u202Elint\u200B first', why: 'w\u2067hy' })], home);
+    const h = harness(['a']);
+    await lessonsReviewCommand(h.deps);
+    expect(h.text()).not.toMatch(/[\u200B\u202E\u2067]/);
+    expect(h.text()).toContain('Lesson for web.md: Run lint first');
+    expect((await readLessons('web', home)).map((l) => l.text)).toEqual(['Run lint first']);
+  });
+
   it('empty queue prints No lessons waiting.', async () => {
     const h = harness();
     expect(await lessonsReviewCommand(h.deps)).toBe(0);
