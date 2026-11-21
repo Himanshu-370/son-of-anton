@@ -21,6 +21,7 @@ import { runUnattended as defaultRunUnattended } from '../pipeline/runner.js';
 import { readHistory as defaultReadHistory, type HistoryEntry } from '../core/history.js';
 import { ensureRepoMap as defaultEnsureRepoMap } from '../stages/repo-map.js';
 import { runSpec as defaultRunSpec } from '../stages/spec.js';
+import type { RetroDeps } from '../retro/run.js';
 
 /** Every external effect a command has, injectable for tests. */
 export type CliDeps = {
@@ -56,6 +57,8 @@ export type CliDeps = {
   runAgent?: typeof defaultRunAgent;
   /** Whether stdin is a terminal; when not, `anton plugins update` declines without asking. */
   isTTY?: () => boolean;
+  /** Retro client, env (for ANTHROPIC_API_KEY) and home; `out` comes from the command. */
+  retro?: Omit<RetroDeps, 'out'>;
 };
 
 export type Resolved = Required<Omit<CliDeps, 'exec'>>;
@@ -135,6 +138,7 @@ export function resolveDeps(d: CliDeps = {}): Resolved {
     cloneShallow: d.cloneShallow ?? gitCloneShallow,
     runAgent: d.runAgent ?? defaultRunAgent,
     isTTY: d.isTTY ?? (() => process.stdin.isTTY === true),
+    retro: d.retro ?? {},
   };
 }
 

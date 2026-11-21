@@ -2,7 +2,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { budgetSettings, DEFAULT_ALLOWANCES, loadAntonConfig, resolveEntries, STAGE_GROUP } from '../../src/core/anton-config.js';
+import { budgetSettings, DEFAULT_ALLOWANCES, loadAntonConfig, resolveEntries, retroBatch, STAGE_GROUP } from '../../src/core/anton-config.js';
 
 async function homeWith(yaml?: string): Promise<string> {
   const home = await mkdtemp(join(tmpdir(), 'anton-cfg-'));
@@ -18,6 +18,11 @@ describe('loadAntonConfig', () => {
     await expect(loadAntonConfig(await homeWith('bogus: 1\n'))).rejects.toThrow(
       /Invalid ~\/anton\/config\.yaml/,
     );
+  });
+  it('retro.batch defaults to true, can be false, and rejects unknown keys', async () => {
+    expect(retroBatch(await loadAntonConfig(await homeWith()))).toBe(true);
+    expect(retroBatch(await loadAntonConfig(await homeWith('retro:\n  batch: false\n')))).toBe(false);
+    await expect(loadAntonConfig(await homeWith('retro:\n  bogus: 1\n'))).rejects.toThrow(/Invalid ~\/anton\/config\.yaml/);
   });
   it('bad entry name is rejected', async () => {
     await expect(loadAntonConfig(await homeWith('stages:\n  build: ["Bad Name"]\n'))).rejects.toThrow(

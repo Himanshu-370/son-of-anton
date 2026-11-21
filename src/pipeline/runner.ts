@@ -18,6 +18,7 @@ import {
   stopContainer as dockerStopContainer,
 } from '../docker/container.js';
 import { kitByName } from '../kits/index.js';
+import { LESSON_FILES, readLessons } from '../lessons/store.js';
 import { pluginsForJob } from '../plugins/session.js';
 import type { LockEntry } from '../plugins/store.js';
 import type { Kit } from '../kits/types.js';
@@ -82,7 +83,7 @@ export async function startOrReuseContainer(
 }
 
 /** Merge the plugin pins this job can load into `<jobDir>/run-record.json`, keeping other keys. */
-async function writeRunRecord(repo: string, jobDir: string, used: LockEntry[]): Promise<void> {
+async function writeRunRecord(repo: string, jobDir: string, used: LockEntry[], lessons: string[]): Promise<void> {
   // The container can write the job folder: never follow a planted symlink to a host file.
   await assertJobDir(repo, jobDir);
   const path = join(jobDir, 'run-record.json');
@@ -93,7 +94,14 @@ async function writeRunRecord(repo: string, jobDir: string, used: LockEntry[]): 
   }
   const record = parsed as Record<string, unknown>;
   record.plugins = used.map(({ name, version, commit, sha256 }) => ({ name, version, commit, sha256 }));
+  record.lessons = lessons;
   await writeFileAtomic(path, `${JSON.stringify(record, null, 2)}\n`);
+}
+
+/** Ids of every lesson that can load for this job: all roles' files plus the kit's. */
+async function activeLessonIds(kit: 'fallback' | 'web'): Promise<string[]> {
+  const files = [...Object.values(LESSON_FILES), kit];
+  return (await Promise.all(files.map((f) => readLessons(f)))).flat().map((l) => l.id);
 }
 
 export const allowanceHint = (project: string, group: string, spentUsd: number, limitUsd: number) =>
@@ -206,7 +214,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       const kitName = (await getSpec()).kit;
       const kit = deps.kit ?? kitByName(kitName);
       // Before any container or spend: a listed plugin that is not installed fails here, not mid-stage.
-      await writeRunRecord(repo, jobDir, await pluginsForJob(kitName));
+      await writeRunRecord(repo, jobDir, await pluginsForJob(kitName), await activeLessonIds(kitName));
       startedContainer = true;
       const container = await startContainer(project, repo, kit);
       secrets = await loadSecrets(project);

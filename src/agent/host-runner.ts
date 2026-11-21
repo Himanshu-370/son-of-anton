@@ -6,6 +6,7 @@ import { execIn } from '../docker/container.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { redact } from '../core/secrets.js';
 import { saveState, type JobState } from '../core/state.js';
+import { lessonsBlock } from '../lessons/prompt.js';
 import { pluginsForSession } from '../plugins/session.js';
 import { loadPrompt } from '../stages/prompts.js';
 import { priceFor } from './pricing.js';
@@ -44,6 +45,8 @@ export type RunAgentDeps = {
   notify?: typeof defaultNotify;
   /** Plugins, skills and MCP servers for a session without `tools` (default: config.yaml + plugins.lock). */
   plugins?: (ctx: StageCtx, role: string) => Promise<{ plugins: string[]; skills: string[]; mcpServers: Record<string, unknown> }>;
+  /** Accepted lessons for the session's role and kit (default: ~/.anton/lessons). */
+  lessons?: (role: string, kit: StageCtx['kit']) => Promise<{ text: string }>;
 };
 
 export class BudgetExceeded extends Error {
@@ -143,6 +146,10 @@ export async function runAgent(
     req = { ...req, plugins: p.plugins, skills: p.skills, mcpServers: p.mcpServers };
   }
 
+  // Lessons are operator-curated and change rarely, so they stay in the cache-stable part.
+  const lessons = await (deps.lessons ?? ((r, k) => lessonsBlock(r, k)))(req.role, ctx.kit);
+  if (lessons.text) req = { ...req, systemPrompt: `${req.systemPrompt}\n\n${lessons.text}` };
+
   if (ctx.stage !== 'spec') {
     // Unattended: the jobId is the only varying part and sits on the last line, keeping the rest cache-stable.
     const rule = (await loadPrompt('unattended.md')).replace('{jobId}', ctx.state.jobId).trimEnd();
@@ -167,7 +174,10 @@ export async function runAgent(
     try {
       await write();
     } catch (e) {
-      ctx.warn?.(`Could not update ${name}: ${e instanceof Error ? e.message : String(e)}`);
+      const msg = `Could not update ${name}: ${e instanceof Error ? e.message : String(e)}`;
+      ctx.warn?.(msg);
+      // Unattended runs have no warn sink: leave a trace in the stage log too.
+      await fsp.appendFile(logPath, redact(`warning: ${msg}`, ctx.secrets) + '\n').catch(() => undefined);
     }
   };
 

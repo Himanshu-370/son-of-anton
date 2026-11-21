@@ -8,6 +8,7 @@ import { acceptRiskCommand } from './commands/accept-risk.js';
 import { adoptCommand } from './commands/adopt.js';
 import { approveCommand } from './commands/approve.js';
 import { changeCommand } from './commands/change.js';
+import { lessonsListCommand, lessonsRemoveCommand, lessonsReviewCommand } from './commands/lessons.js';
 import { logsCommand } from './commands/logs.js';
 import { newCommand } from './commands/new.js';
 import { rejectCommand } from './commands/reject.js';
@@ -111,6 +112,20 @@ export function buildProgram(deps: CliDeps = {}): Command {
     .description('Stage the newest version, have a read-only reviewer check what changed, and re-pin on your yes')
     .argument('[name]', 'plugin to update (default: every installed plugin)')
     .action(async (n: string | undefined) => exit(await pluginsUpdateCommand(n, deps)));
+  const lessons = program.command('lessons').description('Review and manage lessons agents learn from (~/anton/lessons)');
+  lessons
+    .command('review')
+    .description('Collect finished Retros, then accept, edit, reject or skip each proposal')
+    .action(async () => exit(await lessonsReviewCommand(deps)));
+  lessons
+    .command('list')
+    .description('Show each lessons file with its lessons')
+    .action(async () => exit(await lessonsListCommand(deps)));
+  lessons
+    .command('remove')
+    .description('Remove a lesson by id')
+    .argument('<id>')
+    .action(async (id: string) => exit(await lessonsRemoveCommand(id, deps)));
   program
     .command('_run', { hidden: true })
     .argument('<project>')

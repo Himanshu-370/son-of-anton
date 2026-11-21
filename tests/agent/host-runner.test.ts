@@ -43,6 +43,18 @@ beforeEach(async () => {
 const result = (total: number, output: unknown = { ok: 1 }) =>
   L({ type: 'result', ok: true, output, sessionId: 'sess', totalUsd: total, protocolVersion: 4 });
 
+describe('runAgent lessons', () => {
+  it('lessons sit before the unattended jobId line', async () => {
+    const spawn = vi.fn(() => fake([result(0)]).child);
+    const lessons = vi.fn(async () => ({ text: '## Lessons\n- be nice', ids: ['L-1'] }));
+    await runAgent(ctx, req, { spawn, notify: vi.fn(), lessons });
+    const sp = JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8')).systemPrompt as string;
+    expect(sp.startsWith('s\n\n## Lessons\n- be nice\n\n')).toBe(true);
+    expect(sp.trimEnd().split('\n').at(-1)).toContain('j1');
+    expect(lessons).toHaveBeenCalledWith('builder', undefined);
+  });
+});
+
 describe('runAgent', () => {
   it('returns output and sessionId from result event', async () => {
     const f = fake([result(0.1, { a: 1 })]);
@@ -226,6 +238,12 @@ describe('runAgent', () => {
     expect(r.output).toEqual({ ok: 2 });
     expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(0.4);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('cost.json'));
+  });
+
+  it('failed cost.json write is logged in the stage log', async () => {
+    await mkdir(join(ctx.jobDir, 'cost.json', 'x'), { recursive: true }); // a folder: the write fails
+    await runAgent(ctx, req, { spawn: () => fake([result(0.4)]).child, notify: vi.fn() });
+    expect(await readFile(join(ctx.jobDir, 'logs', 'build.log'), 'utf8')).toMatch(/^warning: Could not update cost\.json: /m);
   });
 
   it('a usage.json that is a folder still returns the finished result (I5)', async () => {

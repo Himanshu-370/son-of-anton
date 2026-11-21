@@ -30,6 +30,7 @@ import { logsCommand } from '../../src/cli/commands/logs.js';
 import type { SpecDoc } from '../../src/stages/spec.js';
 import { failureReportPath } from '../../src/stages/verify.js';
 import { failuresPath } from '../../src/stages/qa.js';
+import type { RetroClient } from '../../src/retro/run.js';
 
 const DEAD_PID = 999_999;
 
@@ -61,6 +62,8 @@ function harness(extra: Partial<CliDeps> = {}) {
     preflight: async () => undefined,
     spawnRun: (name) => { spawned.push(name); },
     stopContainer: async () => undefined,
+    // No key by default: unit tests never reach the API.
+    retro: { env: {} },
     ...extra,
   };
   return { deps, out, err, spawned, text: () => out.join('\n'), errText: () => err.join('\n') };
@@ -485,9 +488,106 @@ describe('change job branch guard', () => {
     expect(h.text()).toContain('git switch no-such-branch');
     expect(await cur()).toBe('anton/1-init');
   });
+  // Retro may wait on a slow API call; the repo must already be back on fromBranch by then.
+  const branchAtRetro = (cur: () => Promise<string>) => {
+    const seen: string[] = [];
+    const client: RetroClient = {
+      createBatch: async () => { seen.push(await cur()); return 'msgbatch_1'; },
+      getBatch: async () => ({ ended: false }),
+      send: async () => { throw new Error('unused'); },
+    };
+    return { seen, retro: { client: () => client, env: { ANTHROPIC_API_KEY: 'test-key-not-real' } } };
+  };
+  it.each(['approve', 'abandon'] as const)('%s switches back before Retro runs', async (cmd) => {
+    const stage = cmd === 'approve' ? 'awaiting_final_review' : 'paused';
+    const { g, cur } = await changeJob({ stage, round: 1, ...(cmd === 'abandon' ? { pausedFrom: 'build', pauseReason: 'error' } : {}) });
+    await g('switch', '-qc', 'anton/1-init');
+    const r = branchAtRetro(cur);
+    const h = harness({ retro: r.retro });
+    expect(await (cmd === 'approve' ? approveCommand : abandonCommand)('p', h.deps)).toBe(0);
+    expect(r.seen).toEqual(['main']);
+    const lines = h.out.join('\n');
+    expect(lines.indexOf('Switched back to main')).toBeLessThan(lines.indexOf('Retro submitted'));
+  });
+  it.each(['approve', 'abandon'] as const)('%s still submits Retro when switch-back throws', async (cmd) => {
+    const stage = cmd === 'approve' ? 'awaiting_final_review' : 'paused';
+    const { g, cur, dir } = await changeJob({ stage, round: 1, ...(cmd === 'abandon' ? { pausedFrom: 'build', pauseReason: 'error' } : {}) });
+    await g('switch', '-qc', 'anton/1-init');
+    const r = branchAtRetro(cur);
+    const h = harness({ retro: r.retro });
+    const out = h.deps.out!;
+    h.deps.out = (s) => { if (s.startsWith('Switched back')) throw new Error('boom'); out(s); };
+    await (cmd === 'approve' ? approveCommand : abandonCommand)('p', h.deps);
+    expect(r.seen).toHaveLength(1);
+    expect(JSON.parse(await readFile(join(dir, 'retro.json'), 'utf8'))).toMatchObject({ status: 'submitted' });
+  });
   it('new jobs are unaffected by the branch guard', async () => {
     await project('p', { stage: 'awaiting_final_review', round: 1 });
     expect(await approveCommand('p', harness().deps)).toBe(0);
+  });
+});
+
+describe('retro hooks', () => {
+  const fakeRetro = (opts: { throws?: boolean } = {}) => {
+    const batches: unknown[] = [];
+    const client: RetroClient = {
+      createBatch: async (_id, params) => {
+        if (opts.throws) throw new Error('network down');
+        batches.push(params);
+        return 'msgbatch_1';
+      },
+      getBatch: async () => ({ ended: false }),
+      send: async () => { throw new Error('unused'); },
+    };
+    return { batches, retro: { client: () => client, env: { ANTHROPIC_API_KEY: 'test-key-not-real' } } };
+  };
+  const retroJson = async (dir: string) => JSON.parse(await readFile(join(dir, 'retro.json'), 'utf8'));
+
+  it('final accept submits one retro and records submitted', async () => {
+    const { dir } = await project('p', { stage: 'awaiting_final_review', round: 1 });
+    const f = fakeRetro();
+    const h = harness({ retro: f.retro });
+    expect(await approveCommand('p', h.deps)).toBe(0);
+    expect((await loadState(dir)).stage).toBe('done');
+    expect(f.batches).toHaveLength(1);
+    expect(JSON.stringify(f.batches[0])).toContain('Outcome: approved');
+    expect(await retroJson(dir)).toMatchObject({ status: 'submitted', batchId: 'msgbatch_1' });
+    expect(h.text()).toContain('Retro submitted; review lessons later with: anton lessons review');
+  });
+
+  it('abandon submits a retro with outcome abandoned', async () => {
+    const { dir } = await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'error', round: 1 });
+    const f = fakeRetro();
+    const h = harness({ retro: f.retro });
+    expect(await abandonCommand('p', h.deps)).toBe(0);
+    expect(f.batches).toHaveLength(1);
+    expect(JSON.stringify(f.batches[0])).toContain('Outcome: abandoned');
+    expect(await retroJson(dir)).toMatchObject({ status: 'submitted' });
+  });
+
+  it('spec approval does not run a retro', async () => {
+    const { dir } = await project('p', { stage: 'plan' });
+    const f = fakeRetro();
+    expect(await approveCommand('p', harness({ retro: f.retro }).deps)).toBe(1);
+    expect(f.batches).toHaveLength(0);
+    await expect(readFile(join(dir, 'retro.json'), 'utf8')).rejects.toThrow();
+  });
+
+  it('no API key: skipped with reason, approve still succeeds', async () => {
+    const { dir } = await project('p', { stage: 'awaiting_final_review', round: 1 });
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(0);
+    expect(await retroJson(dir)).toMatchObject({ status: 'skipped', reason: 'no ANTHROPIC_API_KEY' });
+    expect(h.text()).toContain('retro skipped: no ANTHROPIC_API_KEY');
+  });
+
+  it('client throws: failed with reason, approve still succeeds', async () => {
+    const { dir } = await project('p', { stage: 'awaiting_final_review', round: 1 });
+    const h = harness({ retro: fakeRetro({ throws: true }).retro });
+    expect(await approveCommand('p', h.deps)).toBe(0);
+    expect((await loadState(dir)).stage).toBe('done');
+    expect(await retroJson(dir)).toMatchObject({ status: 'failed', reason: 'network down' });
+    expect(h.text()).toContain('retro failed: network down');
   });
 });
 

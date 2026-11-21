@@ -2,6 +2,7 @@ import { commitAll, tag } from '../../core/git.js';
 import { assertOnJobBranch } from '../../core/job.js';
 import { loadSecrets } from '../../core/secrets.js';
 import { saveState, transition } from '../../core/state.js';
+import { submitRetro } from '../../retro/run.js';
 import { readApprovedSpec } from '../../stages/spec.js';
 import { guard, resolveDeps, resolveJob, type CliDeps } from '../deps.js';
 import { preflightOr2, switchBackFromJob } from './shared.js';
@@ -29,7 +30,12 @@ export async function approveCommand(project: string, deps: CliDeps = {}): Promi
     if (state.stage === 'awaiting_final_review') {
       await saveState(job.jobDir, transition(state, 'done'));
       d.out(`${project}: delivery approved. Done.`);
-      await switchBackFromJob(d, job.repo, state);
+      // Switch back first: Retro may wait on the API, and Ctrl-C then must not strand the repo on anton/<id>.
+      try {
+        await switchBackFromJob(d, job.repo, state);
+      } finally {
+        await submitRetro(job, 'approved', { ...d.retro, out: d.out });
+      }
       return 0;
     }
     d.err(`Nothing to approve (stage: ${state.stage})`);

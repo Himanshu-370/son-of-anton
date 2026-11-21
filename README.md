@@ -152,6 +152,21 @@ roles:
 
 Their effect on quality and cost has not been measured yet; that comes with the Phase 5 bench.
 
+## Lessons
+
+After a job ends, anton looks back at it and suggests small lessons for future jobs. Nothing is applied until you accept it.
+
+- **When Retro runs:** once per job, on the final `anton approve` or on `anton abandon`. It makes one call to `claude-haiku-5-5` with a redacted record of the job (spec edits, failed checks, reject notes, reviewer findings, questions and assumptions, cost and tool use per stage; at most 60,000 characters). It costs cents.
+- **How it is paid:** by default it goes through the Message Batches API at half price, and the results are collected later. Set `retro: { batch: false }` in `~/anton/config.yaml` to send it directly instead. The cost comes out of the retro share (5%, which may borrow what earlier stages left unspent) and the job cap. Without `ANTHROPIC_API_KEY`, or without enough budget, Retro is skipped with a reason. It never blocks approve or abandon.
+- **`retro.json`:** in the job folder; its status is `submitted`, `done`, `failed` or `skipped` (with a reason).
+- **What it proposes:** at most 5 lessons and 2 plugin suggestions per job.
+- **`anton lessons review`:** collects finished Retros, then shows each proposal (target, text, why, source project and job) and asks accept, edit, reject or skip. With no terminal it only lists them. It ends with `Accepted N, rejected M, kept K.`
+- **Plugin suggestions:** accepting one only prints the `anton plugins add` command. Nothing is installed and your config is not edited.
+- **`anton lessons list`** shows each lesson file with its count out of 20 and the lesson ids. **`anton lessons remove <id>`** deletes one.
+- **Where lessons live:** `~/anton/lessons/<file>.md`, for example `build-frontend.md` or `security-reviewer.md`. The folder is a git repo: each accept or remove is a commit. Each file holds at most 20 lessons, one line each, up to 300 characters.
+- **Who sees what:** each agent gets only the file for its own role and the file for its kit, in the stable part of its system prompt. A job's `run-record.json` lists the lesson ids that were active.
+- **Trust:** the job record is treated as data, and Retro's output is untrusted until you accept it.
+
 ## Where things live
 
 - Projects: `~/anton/projects/<name>/` (override the root with `ANTON_HOME`), each a git repo with one commit per plan task.

@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AllowanceExceeded, BudgetExceeded, type StageCtx } from '../../src/agent/host-runner.js';
+import { addLesson } from '../../src/lessons/store.js';
 import { isRunning } from '../../src/core/lock.js';
 import { jobDir as jobDirOf } from '../../src/core/paths.js';
 import { registerProject } from '../../src/core/registry.js';
@@ -429,7 +430,17 @@ describe('run record', () => {
     expect(JSON.parse(await readFile(join(dir, 'run-record.json'), 'utf8'))).toEqual({
       other: 1,
       plugins: [{ name: 'cave', version: '1.0.0', commit: 'a'.repeat(40), sha256: 'a'.repeat(64) }],
+      lessons: [],
     });
+  });
+
+  it('run-record lists active lesson ids', async () => {
+    const home = process.env.ANTON_HOME!;
+    const a = await addLesson('build-backend', 'Validate input', home);
+    const b = await addLesson('fallback', 'Keep commits small', home);
+    await addLesson('web', 'not this kit', home);
+    await runUnattended('p', fakes().deps);
+    expect(JSON.parse(await readFile(join(dir, 'run-record.json'), 'utf8')).lessons).toEqual([a.id, b.id]);
   });
 
   it('non-object run-record.json gives a clear error', async () => {

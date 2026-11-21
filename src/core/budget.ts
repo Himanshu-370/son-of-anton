@@ -6,6 +6,8 @@ import { DEFAULTS } from './config.js';
 import type { JobState } from './state.js';
 
 export type Allowances = typeof DEFAULT_ALLOWANCES;
+/** A stage group, or `retro` (the last group, so it may borrow everything earlier groups left). */
+export type AllowanceGroup = (typeof ALLOWANCE_ORDER)[number];
 
 export const usd = (n: number) => `$${n.toFixed(2)}`;
 
@@ -24,7 +26,7 @@ const spentOf = (m: Record<string, number> | undefined, key: string): number => 
  * it, and its spend is everything those groups spent. P4b-R2: spec is warn-only, so for later groups
  * its spend counts only up to its own share (the job cap still covers the real spend).
  */
-export function allowanceUsage(s: JobState, group: StageGroup, allowances: Allowances = DEFAULT_ALLOWANCES): { spentUsd: number; limitUsd: number } {
+export function allowanceUsage(s: JobState, group: AllowanceGroup, allowances: Allowances = DEFAULT_ALLOWANCES): { spentUsd: number; limitUsd: number } {
   const upTo = ALLOWANCE_ORDER.slice(0, ALLOWANCE_ORDER.indexOf(group) + 1);
   const pct = upTo.reduce((a, g) => a + allowances[g], 0);
   const specShare = (s.budgetUsd * allowances.spec) / 100;
@@ -39,7 +41,7 @@ export function allowanceShareText(group: StageGroup | string, spentUsd: number,
   return `${group} share used: ${usd(spentUsd)} of ${usd(limitUsd)} (${range})`;
 }
 
-export function allowanceLeftUsd(s: JobState, group: StageGroup, allowances: Allowances = DEFAULT_ALLOWANCES): number {
+export function allowanceLeftUsd(s: JobState, group: AllowanceGroup, allowances: Allowances = DEFAULT_ALLOWANCES): number {
   const { spentUsd, limitUsd } = allowanceUsage(s, group, allowances);
   return Math.max(0, limitUsd - spentUsd);
 }
