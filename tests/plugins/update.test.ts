@@ -17,11 +17,15 @@ beforeEach(async () => {
 const OK = { verdict: 'ok', findings: [] };
 
 /** Pins cave v1, then (unless `same`) points the marketplace at a v1.1.0 with a changed hook. */
-async function setup(o: { same?: boolean; answer?: string; tty?: boolean; output?: unknown; review?: (req: AgentRequest, ctx: StageCtx) => Promise<void> } = {}) {
+async function setup(o: { same?: boolean; bumpOnly?: boolean; answer?: string; tty?: boolean; output?: unknown; review?: (req: AgentRequest, ctx: StageCtx) => Promise<void> } = {}) {
   const map: Record<string, string> = { [MKT]: await marketplace('cave', { plugin: { 'hooks/run.sh': 'echo v1\n' } }) };
-  const clone = fakeClone(map);
+  const clone = vi.fn(fakeClone(map));
   const old = await installPlugin('cave@acme/mkt', { home, clone });
-  if (!o.same) {
+  clone.mockClear();
+  if (o.bumpOnly) {
+    // A new marketplace commit that leaves the plugin's own files unchanged.
+    map[MKT] = await marketplace('cave', { plugin: { 'hooks/run.sh': 'echo v1\n' }, extra: { 'OTHER.md': 'unrelated\n' } });
+  } else if (!o.same) {
     map[MKT] = await marketplace('cave', { plugin: { 'hooks/run.sh': 'echo v2\n', 'README.md': 'new\n' }, version: '1.1.0' });
   }
   const events: string[] = [];
@@ -85,6 +89,16 @@ describe('updatePlugin', () => {
     expect(s.deps.runAgent).not.toHaveBeenCalled();
     expect(s.deps.startContainer).not.toHaveBeenCalled();
     expect(s.deps.ask).not.toHaveBeenCalled();
+    expect(await readLock(home)).toEqual([s.old]);
+    expect(await readdir(reviewsDir()).catch(() => [])).toEqual([]);
+  });
+
+  it('a new marketplace commit with the same plugin content is up to date: no review, no re-pin', async () => {
+    const s = await setup({ bumpOnly: true });
+    expect(await updatePlugin('cave', s.deps)).toBe('up_to_date');
+    expect(s.deps.cloneShallow).toHaveBeenCalled();
+    expect(s.deps.runAgent).not.toHaveBeenCalled();
+    expect(s.deps.startContainer).not.toHaveBeenCalled();
     expect(await readLock(home)).toEqual([s.old]);
     expect(await readdir(reviewsDir()).catch(() => [])).toEqual([]);
   });

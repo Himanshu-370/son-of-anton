@@ -27,12 +27,13 @@ export async function bareRepo(files: Record<string, string>, links: Record<stri
   return `file://${join(root, 'bare.git')}`;
 }
 
-/** A marketplace with one plugin entry; `plugin` files go under `plugins/<name>/`; `version: null` omits plugin.json. */
+/** A marketplace with one plugin entry; `plugin` files go under `plugins/<name>/`, `extra` at the repo root; `version: null` omits plugin.json. */
 export async function marketplace(
   name: string,
-  { source = `./plugins/${name}` as unknown, plugin = {} as Record<string, string>, links = {} as Record<string, string>, version = '1.0.0' as string | null } = {},
+  { source = `./plugins/${name}` as unknown, plugin = {} as Record<string, string>, links = {} as Record<string, string>, version = '1.0.0' as string | null, extra = {} as Record<string, string> } = {},
 ): Promise<string> {
   const files: Record<string, string> = {
+    ...extra, // marketplace files outside the plugin folder
     '.claude-plugin/marketplace.json': JSON.stringify({ name: 'mkt', plugins: [{ name, source }] }),
     [`plugins/${name}/skills/hello/SKILL.md`]: '# hello\n',
     ...Object.fromEntries(Object.entries(plugin).map(([p, c]) => [`plugins/${name}/${p}`, c])),

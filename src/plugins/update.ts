@@ -120,7 +120,8 @@ export async function updatePlugin(name: string, d: UpdateDeps): Promise<'up_to_
   try {
     // Same specifier as `add` (owner/repo or URL), so the marketplace matches the lock entry.
     const next = await installPlugin(`${name}@${pinned.marketplace}`, { home, clone: d.cloneShallow }, { lock: false, destRoot: staging });
-    if (next.commit === pinned.commit) return 'up_to_date';
+    // Same content under a new marketplace commit (relative-path sources): nothing to review, keep the pin.
+    if (next.commit === pinned.commit || next.sha256 === pinned.sha256) return 'up_to_date';
 
     reviewDir = join(reviews, `${name}-${next.commit.slice(0, 12)}`);
     await rm(reviewDir, { recursive: true, force: true });
