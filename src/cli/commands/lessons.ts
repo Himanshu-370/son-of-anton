@@ -1,6 +1,6 @@
 import { collectRetros } from '../../retro/run.js';
 import { readProposals, removeProposal, type Proposal } from '../../lessons/proposals.js';
-import { addLesson, cleanLessonText, KIT_LESSON_FILES, LESSON_FILES, MAX_LESSONS_PER_FILE, readLessons, removeLesson } from '../../lessons/store.js';
+import { addLesson, cleanLessonText, DuplicateLessonError, KIT_LESSON_FILES, LESSON_FILES, MAX_LESSONS_PER_FILE, readLessons, removeLesson } from '../../lessons/store.js';
 import { guard, resolveDeps, type CliDeps } from '../deps.js';
 
 const ALL_FILES = [...(Object.values(LESSON_FILES) as string[]), ...KIT_LESSON_FILES];
@@ -58,6 +58,11 @@ export async function lessonsReviewCommand(deps: CliDeps = {}): Promise<number> 
           d.out(`  Added ${l.id} to ${p.target}.md`);
           await removeProposal(p.id, home); accepted++; continue;
         } catch (e) {
+          if (e instanceof DuplicateLessonError) {
+            // Already in the file: keeping the proposal would ask again forever.
+            d.out(`  Already saved: ${e.id}`);
+            await removeProposal(p.id, home); accepted++; continue;
+          }
           d.out(`  Not added: ${safe(e instanceof Error ? e.message : String(e))}`);
         }
       }

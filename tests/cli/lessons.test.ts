@@ -75,6 +75,16 @@ describe('anton lessons', () => {
     expect(h.text()).toContain('Accepted 0, rejected 0, kept 1.');
   });
 
+  it('accepting a lesson already saved drops the proposal and says so', async () => {
+    const l = await addLesson('web', 'Run the linter first', home);
+    await appendProposals([prop()], home);
+    const h = harness(['a']);
+    await lessonsReviewCommand(h.deps);
+    expect(h.text()).toContain(`Already saved: ${l.id}`);
+    expect(await readProposals(home)).toEqual([]);
+    expect(await readLessons('web', home)).toEqual([l]);
+  });
+
   it('a tampered target is refused and the proposal kept', async () => {
     await appendProposals([prop({ target: '../../evil' })], home);
     const h = harness(['a']);

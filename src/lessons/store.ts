@@ -26,6 +26,12 @@ export const KIT_LESSON_FILES = ['fallback', 'web'];
 
 export type Lesson = { id: string; text: string };
 
+export class DuplicateLessonError extends Error {
+  constructor(readonly id: string, file: string) {
+    super(`Duplicate lesson ${id} in ${file}.md`);
+  }
+}
+
 const LINE = /^- \[(L-[0-9a-f]{8})\] (.+)$/;
 const dir = (home: string) => join(home, 'lessons');
 const path = (file: string, home: string) => join(dir(home), `${file}.md`);
@@ -59,7 +65,7 @@ export async function addLesson(file: string, text: string, home = antonHome()):
   const clean = cleanLessonText(text);
   const lesson = { id: idOf(file, clean), text: clean };
   const all = await readLessons(file, home);
-  if (all.some((l) => l.id === lesson.id)) throw new Error(`Duplicate lesson ${lesson.id} in ${file}.md`);
+  if (all.some((l) => l.id === lesson.id)) throw new DuplicateLessonError(lesson.id, file);
   if (all.length >= MAX_LESSONS_PER_FILE) {
     throw new Error(`${file}.md has ${MAX_LESSONS_PER_FILE} lessons — remove one with anton lessons remove <id>`);
   }
