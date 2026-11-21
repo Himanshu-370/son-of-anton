@@ -170,4 +170,4 @@ export async function guard(d: Resolved, body: () => Promise<number>): Promise<n
   }
 }
 
-export const usd = (n: number) => `$${n.toFixed(2)}`;
+export { usd } from '../core/budget.js';

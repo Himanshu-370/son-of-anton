@@ -1,6 +1,8 @@
+import { budgetSettings, loadAntonConfig } from '../../core/anton-config.js';
+import { allowanceUsage, stageGroup } from '../../core/budget.js';
 import { assertOnJobBranch } from '../../core/job.js';
 import { saveState, transition, unpause } from '../../core/state.js';
-import { ACTIVE_STAGES } from '../../pipeline/runner.js';
+import { ACTIVE_STAGES, allowanceHint, seededState } from '../../pipeline/runner.js';
 import { guard, parseBudget, resolveDeps, resolveJob, usd, type CliDeps } from '../deps.js';
 import { preflightOr2, refuseIfRunning } from './shared.js';
 
@@ -26,6 +28,7 @@ export async function resumeCommand(
       return 1;
     }
     await assertOnJobBranch(job.repo, job.state);
+    state = await seededState(job.repo, job.jobDir, state);
     if (opts.acceptAsIs && !(paused && (state.pausedFrom === 'verify' || state.pausedFrom === 'build'))) {
       d.err(`--accept-as-is only works when paused during build or verify (stage: ${state.stage}${paused ? `, paused from: ${state.pausedFrom}` : ''})`);
       return 1;
@@ -35,6 +38,13 @@ export async function resumeCommand(
       d.err(`Budget cap reached (${usd(state.spentUsd)} of ${usd(state.budgetUsd)} spent). Resume with: anton resume ${project} --budget <usd>`);
       return 1;
     }
+    const group = paused && state.pauseReason === 'allowance' ? stageGroup(state.pausedFrom ?? '') : undefined;
+    if (group && budget === undefined && !opts.acceptAsIs) {
+      const a = allowanceUsage(state, group, budgetSettings(await loadAntonConfig()).allowances);
+      d.err(allowanceHint(project, group, a.spentUsd, a.limitUsd));
+      return 1;
+    }
+    // A new cap raises every allowance with it: they are shares of budgetUsd.
     if (budget !== undefined) {
       if (budget <= state.spentUsd) {
         d.err(`--budget must be more than the ${usd(state.spentUsd)} already spent`);

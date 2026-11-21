@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BudgetExceeded, type StageCtx } from '../../src/agent/host-runner.js';
+import { AllowanceExceeded, BudgetExceeded, type StageCtx } from '../../src/agent/host-runner.js';
 import { isRunning } from '../../src/core/lock.js';
 import { jobDir as jobDirOf } from '../../src/core/paths.js';
 import { registerProject } from '../../src/core/registry.js';
@@ -283,6 +283,23 @@ describe('runUnattended', () => {
     expect(await loadState(dir)).toMatchObject({ stage: 'paused', pausedFrom: 'build', pauseReason: 'budget_cap' });
     expect(f.notify).toHaveBeenCalledTimes(1);
     expect(f.notify.mock.calls[0]).toEqual(['Son of Anton', expect.stringContaining('budget')]);
+  });
+
+  it('runner pauses with allowance and the hint', async () => {
+    const f = fakes({ runBuild: async () => { throw new AllowanceExceeded('build', 7.02, 7); } });
+    await runUnattended('p', f.deps);
+    expect(await loadState(dir)).toMatchObject({ stage: 'paused', pausedFrom: 'build', pauseReason: 'allowance' });
+    expect(f.notify.mock.calls).toEqual([
+      ['Son of Anton', 'p: paused, build allowance used ($7.02 of $7.00). Resume with: anton resume p --budget <usd>'],
+    ]);
+  });
+
+  it('old state without stageSpentUsd is seeded from cost.json before the stages run', async () => {
+    await writeFile(join(dir, 'cost.json'), JSON.stringify({ spec: 0.5, plan: 0.25, baseline: 0.25 }));
+    let seen: JobState | undefined;
+    const f = fakes({ runPlan: async (ctx: StageCtx) => { seen = ctx.state; throw new Error('stop'); } });
+    await runUnattended('p', f.deps);
+    expect(seen?.stageSpentUsd).toEqual({ spec: 0.5, plan: 0.5 });
   });
 
   it('container start failure pauses with error and still releases the lock', async () => {

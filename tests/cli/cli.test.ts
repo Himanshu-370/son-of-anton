@@ -13,6 +13,8 @@ import { approveCommand } from '../../src/cli/commands/approve.js';
 import { newCommand } from '../../src/cli/commands/new.js';
 import { rejectCommand } from '../../src/cli/commands/reject.js';
 import { resumeCommand } from '../../src/cli/commands/resume.js';
+import { allowanceLeftUsd } from '../../src/core/budget.js';
+import { DEFAULT_ALLOWANCES } from '../../src/core/anton-config.js';
 import { statusCommand } from '../../src/cli/commands/status.js';
 import { stopCommand } from '../../src/cli/commands/stop.js';
 import { changeCommand } from '../../src/cli/commands/change.js';
@@ -127,6 +129,34 @@ describe('anton resume', () => {
     expect(h.spawned).toEqual(['p']);
   });
 
+  it('resume without --budget on allowance refuses', async () => {
+    await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'allowance', round: 1, spentUsd: 7.02, stageSpentUsd: { plan: 1, build: 6.02 } });
+    const h = harness();
+    expect(await resumeCommand('p', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('p: paused, build allowance used ($7.02 of $7.00). Resume with: anton resume p --budget <usd>');
+    expect(h.spawned).toEqual([]);
+  });
+
+  it('resume --budget raises every allowance', async () => {
+    const { dir } = await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'allowance', round: 1, spentUsd: 7.02, stageSpentUsd: { plan: 1, build: 6.02 } });
+    const h = harness();
+    expect(await resumeCommand('p', { budget: '20' }, h.deps)).toBe(0);
+    const s = await loadState(dir);
+    expect(s).toMatchObject({ stage: 'build', budgetUsd: 20 });
+    expect(allowanceLeftUsd(s, 'plan', DEFAULT_ALLOWANCES)).toBeCloseTo(3);
+    expect(allowanceLeftUsd(s, 'build', DEFAULT_ALLOWANCES)).toBeCloseTo(14 - 7.02);
+    expect(allowanceLeftUsd(s, 'verify', DEFAULT_ALLOWANCES)).toBeCloseTo(19 - 7.02);
+    expect(h.spawned).toEqual(['p']);
+  });
+
+  it('resume seeds stageSpentUsd from cost.json for an old job', async () => {
+    const { dir } = await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'error', round: 1, spentUsd: 2 });
+    await writeFile(join(dir, 'cost.json'), JSON.stringify({ plan: 0.5, build: 1.5 }));
+    const h = harness();
+    expect(await resumeCommand('p', {}, h.deps)).toBe(0);
+    expect((await loadState(dir)).stageSpentUsd).toEqual({ plan: 0.5, build: 1.5 });
+  });
+
   it('--accept-as-is on round_cap → stage deliver and background run spawned', async () => {
     const { dir } = await project('p', { stage: 'paused', pausedFrom: 'verify', pauseReason: 'round_cap', round: 3 });
     const h = harness();
@@ -219,6 +249,15 @@ describe('anton status', () => {
     const h = harness();
     await statusCommand('q', h.deps);
     expect(h.text()).toMatch(/q\s+paused\s+3\s+\$0\.00 \/ \$10\.00\s+round_cap/);
+  });
+});
+
+describe('anton status: allowance', () => {
+  it('shows spend over cap and the allowance pause reason', async () => {
+    await project('q', { stage: 'paused', pausedFrom: 'build', pauseReason: 'allowance', round: 1, spentUsd: 7.02 });
+    const h = harness();
+    await statusCommand('q', h.deps);
+    expect(h.text()).toMatch(/q\s+paused\s+1\s+\$7\.02 \/ \$10\.00\s+allowance/);
   });
 });
 
@@ -616,6 +655,27 @@ describe('secrets', () => {
     const h = harness({ openEditor: async () => { throw new Error('should not open'); } });
     expect(await secretsEditCommand('../x', h.deps)).toBe(1);
     expect(h.errText()).toContain('Project names may only use a-z, 0-9 and -');
+  });
+
+  it('spec over its share warns once and continues', async () => {
+    const repo = join(home, 'r');
+    await mkdir(repo, { recursive: true });
+    await execa('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+    const jobDir = jobDirOf(repo, '1-x');
+    await mkdir(jobDir, { recursive: true });
+    await saveState(jobDir, {
+      jobId: '1-x', project: 'app', stage: 'spec', round: 0, maxRounds: 3, budgetUsd: 10, spentUsd: 0,
+      warned80: false, completedTasks: [], updatedAt: '',
+    });
+    const spec: SpecDoc = { title: 'T', summary: 's', outOfScope: [], kit: 'fallback', tech: [], acceptanceChecks: [{ id: 'AC-1', text: 't' }] };
+    const h = harness({
+      startContainer: async () => 'c',
+      // Three over-share warnings across turns of one session.
+      runSpec: async (ctx) => { for (let i = 0; i < 3; i++) ctx.warn?.('Spec has used its 10% share ($1.00); continuing up to the job cap.'); return { spec, state: ctx.state }; },
+      onSigint: () => () => undefined,
+    });
+    expect(await runSpecSession(resolveDeps(h.deps), { name: 'app', repoPath: repo, jobDir, description: 'd', image: 'img', jobId: '1-x' }, 'new')).toBe(0);
+    expect(h.out.filter((l) => l.includes('Spec has used its 10% share ($1.00); continuing up to the job cap.'))).toHaveLength(1);
   });
 
   it('spec session prints secret names, never values; passes env file', async () => {

@@ -1,6 +1,7 @@
 import * as fsp from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { appendStageCost, recordCost, remainingUsd } from '../core/budget.js';
+import { budgetSettings, loadAntonConfig } from '../core/anton-config.js';
+import { allowanceUsage, appendStageCost, recordCost, remainingUsd, stageGroup, usd } from '../core/budget.js';
 import { execIn } from '../docker/container.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { redact } from '../core/secrets.js';
@@ -20,6 +21,8 @@ export type StageCtx = {
   kit?: 'fallback' | 'web';
   /** Project secrets, loaded once by the runner. Optional: redact treats undefined as none. */
   secrets?: Record<string, string>;
+  /** Prints a warning to the user (the attended spec session); unset means none. */
+  warn?: (line: string) => void;
 };
 
 /** Minimal process shape; satisfied by an execa child and by test fakes. */
@@ -41,6 +44,18 @@ export class BudgetExceeded extends Error {
   constructor(message = 'budget exceeded') {
     super(message);
     this.name = 'BudgetExceeded';
+  }
+}
+
+/** A stage group used up its allowance (the job cap may still have room). */
+export class AllowanceExceeded extends BudgetExceeded {
+  constructor(
+    public readonly group: string,
+    public readonly spentUsd: number,
+    public readonly limitUsd: number,
+  ) {
+    super(`${group} allowance used (${usd(spentUsd)} of ${usd(limitUsd)})`);
+    this.name = 'AllowanceExceeded';
   }
 }
 
@@ -75,6 +90,30 @@ export async function runAgent(
   deps: RunAgentDeps = {},
 ): Promise<{ output: unknown; sessionId: string; state: JobState; totalUsd: number }> {
   if (remainingUsd(ctx.state) <= 0) throw new BudgetExceeded('no budget remaining');
+  // P4b-R1: only runner stages have an allowance; any other stage is limited by the job cap alone.
+  const group = stageGroup(ctx.stage);
+  const allowances = group ? budgetSettings(await loadAntonConfig()).allowances : undefined;
+  const specWarning = () =>
+    `Spec has used its ${allowances!.spec}% share (${usd(allowanceUsage(ctx.state, 'spec', allowances).limitUsd)}); continuing up to the job cap.`;
+  const overAllowance = (s: JobState) => {
+    const a = allowanceUsage(s, group!, allowances);
+    return new AllowanceExceeded(group!, a.spentUsd, a.limitUsd);
+  };
+  let budgetUsd = Math.min(req.budgetUsd, remainingUsd(ctx.state));
+  /** The session's budget is the allowance's remainder, so the SDK's own budget stop means the allowance ran out. */
+  let allowanceBound = false;
+  if (group === 'spec') {
+    // Spec is warn-only: it may spend up to the job cap.
+    const a = allowanceUsage(ctx.state, 'spec', allowances);
+    if (a.spentUsd >= a.limitUsd) ctx.warn?.(specWarning());
+  } else if (group) {
+    const a = allowanceUsage(ctx.state, group, allowances);
+    const left = a.limitUsd - a.spentUsd;
+    if (left <= 0) throw new AllowanceExceeded(group, a.spentUsd, a.limitUsd);
+    allowanceBound = left < budgetUsd;
+    budgetUsd = Math.min(budgetUsd, left);
+  }
+  req = { ...req, budgetUsd };
   const spawn = deps.spawn ?? ((c, a) => execIn(c, a) as unknown as ChildLike);
   const notify = deps.notify ?? defaultNotify;
   if (req.tools) {
@@ -112,7 +151,7 @@ export async function runAgent(
     const inc = totalUsd - lastTotal;
     if (inc <= 0) return;
     lastTotal = totalUsd;
-    const r = recordCost(state, ctx.stage, inc);
+    const r = recordCost(state, ctx.stage, inc, allowances);
     state = r.state;
     await appendStageCost(ctx.jobDir, ctx.stage, inc);
     await saveState(ctx.jobDir, state);
@@ -121,6 +160,12 @@ export async function runAgent(
       killed = true;
       child.kill('SIGTERM');
       throw new BudgetExceeded();
+    }
+    if (r.overAllowance && group === 'spec') ctx.warn?.(specWarning());
+    else if (r.overAllowance && killOnCap) {
+      killed = true;
+      child.kill('SIGTERM');
+      throw overAllowance(state);
     }
   };
 
@@ -151,8 +196,8 @@ export async function runAgent(
       case 'error':
         await applyTotal(ev.totalUsd, child, false);
         checkProtocol(ev.protocolVersion);
-        // The SDK's own budget stop pauses the job as budget_cap, like the host-side kill.
-        if (ev.code === 'budget') throw new BudgetExceeded(ev.message);
+        // The SDK's own budget stop pauses the job like the host-side kill: allowance when the allowance set the session budget, else budget_cap.
+        if (ev.code === 'budget') throw allowanceBound ? overAllowance(state) : new BudgetExceeded(ev.message);
         throw new AgentError(ev.message);
     }
   };

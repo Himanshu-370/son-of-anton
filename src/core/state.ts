@@ -17,7 +17,7 @@ export const STAGES = [
 ] as const;
 export type Stage = (typeof STAGES)[number];
 
-export const PAUSE_REASONS = ['round_cap', 'budget_cap', 'no_progress', 'error', 'interrupted'] as const;
+export const PAUSE_REASONS = ['round_cap', 'budget_cap', 'no_progress', 'error', 'interrupted', 'allowance'] as const;
 export type PauseReason = (typeof PAUSE_REASONS)[number];
 
 export const JobStateSchema = z.object({
@@ -34,6 +34,8 @@ export const JobStateSchema = z.object({
   maxRounds: z.number().int().min(1),
   budgetUsd: z.number().min(0),
   spentUsd: z.number().min(0),
+  /** Spend per allowance group (spec, plan, build, verify); other stages under their own name. */
+  stageSpentUsd: z.record(z.string(), z.number().min(0)).optional(),
   warned80: z.boolean(),
   completedTasks: z.array(z.string()),
   lastFailureSignature: z.string().optional(),

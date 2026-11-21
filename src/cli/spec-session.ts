@@ -34,7 +34,13 @@ export async function runSpecSession(
   let kit: KitName = 'fallback';
   try {
     const state = await loadState(p.jobDir);
-    const ctx: StageCtx = { project: p.name, repo: p.repoPath, container, jobDir: p.jobDir, state, stage: 'spec', secrets, kit: 'fallback' };
+    let warned = false;
+    // Spec is warn-only: its over-share line prints once per session, then the session goes on.
+    const warn = (line: string) => {
+      if (!warned) d.out(line);
+      warned = true;
+    };
+    const ctx: StageCtx = { project: p.name, repo: p.repoPath, container, jobDir: p.jobDir, state, stage: 'spec', secrets, kit: 'fallback', warn };
     if (mode === 'change') ctx.state = await d.ensureRepoMap(ctx);
     const r = await d.runSpec(ctx, p.description, d.ask, {}, mode);
     services = r.spec.services ?? [];

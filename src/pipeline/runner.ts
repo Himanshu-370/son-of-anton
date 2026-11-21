@@ -1,7 +1,8 @@
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
-import { BudgetExceeded, type StageCtx } from '../agent/host-runner.js';
+import { AllowanceExceeded, BudgetExceeded, type StageCtx } from '../agent/host-runner.js';
 import { readRegularFile, writeFileAtomic } from '../core/atomic.js';
+import { seedStageSpend, usd } from '../core/budget.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
 import { assertOnJobBranch, currentJobId } from '../core/job.js';
 import { acquireLock as defaultAcquireLock } from '../core/lock.js';
@@ -95,6 +96,24 @@ async function writeRunRecord(repo: string, jobDir: string, used: LockEntry[]): 
   await writeFileAtomic(path, `${JSON.stringify(record, null, 2)}\n`);
 }
 
+export const allowanceHint = (project: string, group: string, spentUsd: number, limitUsd: number) =>
+  `${project}: paused, ${group} allowance used (${usd(spentUsd)} of ${usd(limitUsd)}). Resume with: anton resume ${project} --budget <usd>`;
+
+/** Jobs from before stage allowances: fill stageSpentUsd from cost.json (the runner and resume call this). */
+export async function seededState(repo: string, jobDir: string, s: JobState): Promise<JobState> {
+  if (s.stageSpentUsd) return s;
+  // cost.json lives in the container-writable job folder: never follow a planted symlink.
+  await assertJobDir(repo, jobDir);
+  const raw = await readRegularFile(join(jobDir, 'cost.json'));
+  let cost: unknown;
+  try {
+    cost = raw === undefined ? undefined : JSON.parse(raw);
+  } catch {
+    // Corrupt: seed nothing; spentUsd still holds the job total and the cap still applies.
+  }
+  return seedStageSpend(s, cost);
+}
+
 async function readJson(path: string): Promise<unknown> {
   return JSON.parse(await fsp.readFile(path, 'utf8'));
 }
@@ -180,6 +199,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
     }
     try {
       await assertOnJobBranch(repo, state, deps.currentBranch);
+      state = await seededState(repo, jobDir, state);
       let spec: SpecDoc | undefined;
       let plan: Plan | undefined;
       const getSpec = async () => (spec ??= SpecDocBaseSchema.parse(await readJson(join(jobDir, 'spec.approved.json'))));
@@ -228,7 +248,8 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
         final = `${project}: ready for review. See REPORT.md, then: anton approve ${project}`;
       }
     } catch (e) {
-      const reason: PauseReason = e instanceof BudgetExceeded ? 'budget_cap' : 'error';
+      // AllowanceExceeded subclasses BudgetExceeded, so it is tested first.
+      const reason: PauseReason = e instanceof AllowanceExceeded ? 'allowance' : e instanceof BudgetExceeded ? 'budget_cap' : 'error';
       const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
       log(`${reason}: ${e instanceof Error ? e.message : String(e)}`);
       if (reason === 'error') {
@@ -239,7 +260,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       const latest = await loadState(jobDir);
       if (ACTIVE_STAGES.includes(latest.stage)) {
         await saveState(jobDir, pause(latest, reason));
-        final = pauseMessage(project, reason);
+        final = e instanceof AllowanceExceeded ? allowanceHint(project, e.group, e.spentUsd, e.limitUsd) : pauseMessage(project, reason);
       }
     }
   } finally {

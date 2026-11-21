@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdtemp, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
-import { runAgent, BudgetExceeded, AgentError, type StageCtx, type ChildLike } from '../../src/agent/host-runner.js';
+import { runAgent, BudgetExceeded, AgentError, AllowanceExceeded, type StageCtx, type ChildLike } from '../../src/agent/host-runner.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
 
@@ -155,6 +155,7 @@ describe('runAgent', () => {
 
   it('notifies once at 80%', async () => {
     await setState({ budgetUsd: 10 });
+    ctx.stage = 'verify'; // verify may use 95% cumulative, so 9.5 stays inside its allowance
     const notify = vi.fn();
     const f = fake([L({ type: 'cost', totalUsd: 8.5 }), L({ type: 'cost', totalUsd: 9 }), result(9.5)]);
     await runAgent(ctx, req, { spawn: () => f.child, notify });
@@ -256,5 +257,66 @@ describe('runAgent redaction', () => {
     const reqText = await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8');
     expect(reqText).not.toContain('FAKE_SECRET_VALUE_123');
     expect(JSON.parse(reqText).prompt).toBe('use [REDACTED:API_KEY]');
+  });
+
+  describe('stage allowances', () => {
+    const reqFile = async (name: string) => JSON.parse(await readFile(join(ctx.jobDir, 'requests', name), 'utf8'));
+
+    it('session budget is clamped to the allowance', async () => {
+      // $10 cap: build may use $7.00 cumulative; $6.00 is gone, so $1.00 is left.
+      await setState({ budgetUsd: 10, spentUsd: 6, stageSpentUsd: { plan: 1, build: 5 } });
+      await runAgent(ctx, req, { spawn: () => fake([result(0.1)]).child, notify: vi.fn() });
+      expect((await reqFile('build-1.json')).budgetUsd).toBeCloseTo(1);
+    });
+
+    it('session budget is clamped to the job remainder for a stage outside the allowance groups', async () => {
+      await setState({ budgetUsd: 10, spentUsd: 9, stageSpentUsd: { build: 9 } });
+      ctx.stage = 'plugin-review';
+      await runAgent(ctx, { ...req, tools: ['Read'] }, { spawn: () => fake([result(0.1)]).child, notify: vi.fn() });
+      expect((await reqFile('plugin-review-1.json')).budgetUsd).toBeCloseTo(1);
+    });
+
+    it('allowance used up throws AllowanceExceeded before spawning', async () => {
+      await setState({ budgetUsd: 10, spentUsd: 7, stageSpentUsd: { spec: 1, plan: 1, build: 5 } });
+      const spawn = vi.fn(() => fake([result(0)]).child);
+      const p = runAgent(ctx, req, { spawn, notify: vi.fn() });
+      await expect(p).rejects.toBeInstanceOf(AllowanceExceeded);
+      await expect(p).rejects.toBeInstanceOf(BudgetExceeded);
+      await expect(p).rejects.toMatchObject({ group: 'build', spentUsd: 7, limitUsd: 7 });
+      expect(spawn).not.toHaveBeenCalled();
+    });
+
+    it('mid-call allowance overrun kills the session', async () => {
+      await setState({ budgetUsd: 10, spentUsd: 6.5, stageSpentUsd: { build: 6.5 } });
+      const f = fake([L({ type: 'cost', totalUsd: 0.3 }), L({ type: 'cost', totalUsd: 0.6 }), result(0.7)]);
+      await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toBeInstanceOf(AllowanceExceeded);
+      expect(f.kill).toHaveBeenCalledTimes(1);
+      expect((await loadState(ctx.jobDir)).stageSpentUsd).toEqual({ build: expect.closeTo(7.1, 5) });
+    });
+
+    it("the SDK's budget stop on an allowance-bound session is AllowanceExceeded", async () => {
+      await setState({ budgetUsd: 10, spentUsd: 6, stageSpentUsd: { build: 6 } });
+      const f = fake([L({ type: 'error', message: 'error_max_budget_usd', code: 'budget', totalUsd: 0.9, protocolVersion: 3 })]);
+      await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toBeInstanceOf(AllowanceExceeded);
+    });
+
+    it('a result over the allowance returns output without killing (R4)', async () => {
+      await setState({ budgetUsd: 10, spentUsd: 6.5, stageSpentUsd: { build: 6.5 } });
+      const f = fake([result(0.8, { done: 1 })]);
+      expect((await runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).output).toEqual({ done: 1 });
+      expect(f.kill).not.toHaveBeenCalled();
+    });
+
+    it('spec over its share warns and continues up to the job cap', async () => {
+      await setState({ stage: 'spec', budgetUsd: 10, spentUsd: 1, stageSpentUsd: { spec: 1 } });
+      ctx.stage = 'spec';
+      const warn = vi.fn();
+      ctx.warn = warn;
+      const f = fake([L({ type: 'cost', totalUsd: 2 }), result(2.5, { s: 1 })]);
+      expect((await runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).output).toEqual({ s: 1 });
+      expect(f.kill).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith('Spec has used its 10% share ($1.00); continuing up to the job cap.');
+      expect((await reqFile('spec-1.json')).budgetUsd).toBeCloseTo(5);
+    });
   });
 });
