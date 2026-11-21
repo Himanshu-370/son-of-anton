@@ -50,12 +50,13 @@ export async function readHistory(home = antonHome()): Promise<HistoryEntry[]> {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
     throw e;
   }
+  // Job ids are unique only within a project (every new project starts at 1-init): key by both.
   const out = new Map<string, HistoryEntry>(); // a re-delivery appends again: the last line per job wins
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     try {
       const r = HistoryEntrySchema.safeParse(JSON.parse(line));
-      if (r.success) out.set(r.data.jobId, r.data);
+      if (r.success) out.set(`${r.data.project}\0${r.data.jobId}`, r.data);
     } catch {
       // corrupt line: skip
     }

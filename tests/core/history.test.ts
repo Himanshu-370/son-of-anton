@@ -45,6 +45,15 @@ describe('history', () => {
     expect(h.map((x) => [x.jobId, x.spentUsd])).toEqual([['a', 9], ['b', 2]]);
   });
 
+  it('the same jobId in two projects gives two entries (C1)', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'anton-hist-'));
+    await appendHistory(e(1, { jobId: '1-init', project: 'alpha' }), home);
+    await appendHistory(e(2, { jobId: '1-init', project: 'beta' }), home);
+    await appendHistory(e(5, { jobId: '1-init', project: 'alpha' }), home);
+    const h = await readHistory(home);
+    expect(h.map((x) => [x.project, x.spentUsd])).toEqual([['alpha', 5], ['beta', 2]]);
+  });
+
   it('a half-written last line does not fuse with the next one', async () => {
     const home = await mkdtemp(join(tmpdir(), 'anton-hist-'));
     await writeFile(join(home, 'history.jsonl'), '{"jobId":"x","proj');
