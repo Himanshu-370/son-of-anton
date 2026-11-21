@@ -1,6 +1,8 @@
 import { collectRetros } from '../../retro/run.js';
 import { readProposals, removeProposal, type Proposal } from '../../lessons/proposals.js';
 import { addLesson, cleanLessonText, DuplicateLessonError, KIT_LESSON_FILES, LESSON_FILES, MAX_LESSONS_PER_FILE, readLessons, removeLesson } from '../../lessons/store.js';
+import { readHistory } from '../../core/history.js';
+import { lessonStats, runSummary } from '../../lessons/stats.js';
 import { guard, resolveDeps, type CliDeps } from '../deps.js';
 
 const ALL_FILES = [...(Object.values(LESSON_FILES) as string[]), ...KIT_LESSON_FILES];
@@ -73,17 +75,51 @@ export async function lessonsReviewCommand(deps: CliDeps = {}): Promise<number> 
   });
 }
 
-/** `anton lessons list`: every lessons file with its count and each lesson's id and text. */
-export async function lessonsListCommand(deps: CliDeps = {}): Promise<number> {
+/** `anton lessons list`: every lessons file with its count and each lesson's id and text; `--stats` adds the scoreboard. */
+export async function lessonsListCommand(deps: CliDeps = {}, opts: { stats?: boolean } = {}): Promise<number> {
   const d = resolveDeps(deps);
   return guard(d, async () => {
+    const byFile: Record<string, Awaited<ReturnType<typeof readLessons>>> = {};
     for (const file of ALL_FILES) {
-      const ls = await readLessons(file, d.retro.home);
+      const ls = byFile[file] = await readLessons(file, d.retro.home);
+      if (opts.stats) continue;
       d.out(`${file}.md (${ls.length}/${MAX_LESSONS_PER_FILE})`);
       for (const l of ls) d.out(`  ${l.id}  ${safe(l.text)}`);
     }
+    if (opts.stats) printStats(d.out, await readHistory(d.retro.home), byFile);
     return 0;
   });
+}
+
+const pct = (x?: number) => (x === undefined ? '-' : `${Math.round(x * 100)}%`);
+const num = (x?: number) => (x === undefined ? '-' : String(Math.round(x * 100) / 100));
+const usd = (x?: number) => (x === undefined ? '-' : `$${x.toFixed(2)}`);
+const nums = (m: { firstTryPass?: number; rounds?: number; costUsd?: number; rejects?: number }) =>
+  `first-try ${pct(m.firstTryPass)}, rounds ${num(m.rounds)}, cost ${usd(m.costUsd)}, rejects ${num(m.rejects)}`;
+
+function printStats(out: (s: string) => void, history: Awaited<ReturnType<typeof readHistory>>, byFile: Parameters<typeof lessonStats>[1]) {
+  const { rows, cacheTrend } = runSummary(history);
+  out('Recent runs:');
+  if (!rows.length) out('  none yet');
+  for (const r of rows) {
+    out(safe(`  ${r.at.slice(0, 10)}  ${r.project}  ${r.kit}  first-try ${pct(r.firstTryPass)}  rounds ${num(r.rounds)}  cost ${usd(r.spentUsd)}  rejects ${num(r.rejects)}  cache ${pct(r.cacheHitRate)}${r.bench ? `  bench ${r.bench}` : ''}`));
+  }
+  if (cacheTrend) {
+    out(`Cache hit rate: last 5 runs ${pct(cacheTrend.recent)}, 5 before ${pct(cacheTrend.previous)}`);
+    if (cacheTrend.dropped) out('  warning: cache hit rate dropped more than 15 points. A prompt change may be breaking the cache.');
+  }
+  const stats = lessonStats(history, byFile);
+  for (const file of Object.keys(byFile)) {
+    out(`\n${file}.md`);
+    for (const s of stats.filter((x) => x.file === file)) {
+      out(safe(`  ${s.id}  ${s.text}`));
+      out(`    with (${s.withRuns} runs): ${nums(s.with)}`);
+      out(`    without (${s.withoutRuns} runs): ${nums(s.without)}`);
+      out(`    verdict: ${s.verdict}`);
+      if (s.verdict === 'no_benefit') out(`    → consider: anton lessons remove ${s.id}`);
+    }
+  }
+  out("\nThese numbers are noisy with few runs — they inform your review, they don't decide.");
 }
 
 /** `anton lessons remove <id>`. */

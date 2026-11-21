@@ -120,7 +120,8 @@ export function buildProgram(deps: CliDeps = {}): Command {
   lessons
     .command('list')
     .description('Show each lessons file with its lessons')
-    .action(async () => exit(await lessonsListCommand(deps)));
+    .option('--stats', 'show recent runs, the cache trend and per-lesson with/without numbers')
+    .action(async (o: { stats?: boolean }) => exit(await lessonsListCommand(deps, { stats: o.stats })));
   lessons
     .command('remove')
     .description('Remove a lesson by id')
