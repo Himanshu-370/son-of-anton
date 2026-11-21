@@ -53,6 +53,22 @@ describe('anton plugins', () => {
     expect(t).toContain('role security_reviewer: cave (ignored: read-only role)');
   });
 
+  it('list shows whether each plugin has hooks', async () => {
+    const h = harness({ cloneShallow: fakeClone({
+      'https://github.com/acme/mkt.git': await marketplace('cave'),
+      'https://github.com/acme/other.git': await marketplace('bat', { plugin: { 'hooks/hooks.json': '{}' } }),
+      'https://github.com/acme/third.git': await marketplace('owl', {
+        version: null, plugin: { '.claude-plugin/plugin.json': JSON.stringify({ name: 'owl', version: '1.0.0', hooks: './h.json' }) },
+      }),
+    }) });
+    for (const s of ['cave@acme/mkt', 'bat@acme/other', 'owl@acme/third']) expect(await pluginsAddCommand(s, h.deps)).toBe(0);
+    const l = harness();
+    expect(await pluginsListCommand(l.deps)).toBe(0);
+    expect(l.text()).toMatch(/cave .* hooks: no/);
+    expect(l.text()).toMatch(/bat .* hooks: yes/);
+    expect(l.text()).toMatch(/owl .* hooks: yes/);
+  });
+
   it('list with nothing installed or configured', async () => {
     const l = harness();
     expect(await pluginsListCommand(l.deps)).toBe(0);

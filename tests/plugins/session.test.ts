@@ -67,6 +67,14 @@ describe('pluginsForSession', () => {
     expect(r.mcpServers).toEqual({});
   });
 
+  it('a plugin:skill entry naming a skill the plugin lacks throws', async () => {
+    await installBoth();
+    await config('roles:\n  backend: ["cave:nosuch"]\n');
+    await expect(pluginsForSession({ stage: 'build', kit: 'fallback' }, 'backend', { home })).rejects.toThrow(
+      'Plugin cave has no skill "nosuch" — check config.yaml',
+    );
+  });
+
   it('read-only roles get nothing', async () => {
     await installBoth();
     await config('stages:\n  verify: [cave]\n');

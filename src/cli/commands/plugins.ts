@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { loadAntonConfig, READ_ONLY_ROLES } from '../../core/anton-config.js';
 import type { Role } from '../../core/config.js';
 import { antonHome } from '../../core/paths.js';
+import { hasHooks } from '../../plugins/session.js';
 import { installPlugin, readLock } from '../../plugins/store.js';
 import { updatePlugin } from '../../plugins/update.js';
 import { guard, resolveDeps, type CliDeps } from '../deps.js';
@@ -29,7 +30,10 @@ export async function pluginsListCommand(deps: CliDeps = {}): Promise<number> {
     if (!lock.length) d.out('No plugins installed.');
     else {
       d.out('Installed (plugins.lock):');
-      for (const e of lock) d.out(`  ${e.name}  ${e.version}  ${e.marketplace}  ${e.commit.slice(0, 12)}`);
+      for (const e of lock) {
+        const hooks = (await hasHooks(e)) ? 'yes' : 'no';
+        d.out(`  ${e.name}  ${e.version}  ${e.marketplace}  ${e.commit.slice(0, 12)}  hooks: ${hooks}`);
+      }
     }
     const installed = new Set(lock.map((e) => e.name));
     const show = (entries: string[]) =>

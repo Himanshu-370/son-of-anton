@@ -1,4 +1,4 @@
-import { readdir, readFile } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
 import { loadAntonConfig, resolveEntries, STAGE_GROUP } from '../core/anton-config.js';
 import { ROLE_MODELS, type Role } from '../core/config.js';
@@ -22,7 +22,9 @@ export type SessionPlugins = {
 function lookup(names: string[], lock: LockEntry[]): Map<LockEntry, { whole: boolean; skills: string[] }> {
   const out = new Map<LockEntry, { whole: boolean; skills: string[] }>();
   for (const name of names) {
-    const [plugin, skill] = name.split(':') as [string, string | undefined];
+    const parts = name.split(':');
+    if (parts.length > 2 || parts.some((p) => !p)) throw new Error(`Invalid plugin entry "${name}" in config.yaml (use <plugin> or <plugin>:<skill>)`);
+    const [plugin, skill] = parts as [string, string | undefined];
     const entry = lock.find((e) => e.name === plugin);
     if (!entry) {
       throw new Error(`Plugin ${plugin} is listed in config.yaml but not installed — run: anton plugins add ${plugin}@<marketplace>`);
@@ -67,6 +69,15 @@ async function pluginServers(hostDir: string): Promise<Record<string, unknown>> 
   return { ...servers, ...extra };
 }
 
+const exists = (path: string) => stat(path).then(() => true, () => false);
+
+/** True when the installed plugin has a `hooks/` folder or a plugin.json `hooks` field (shown by `plugins list`). */
+export async function hasHooks(entry: LockEntry, home = antonHome()): Promise<boolean> {
+  const hostDir = join(home, 'plugins', entry.dir);
+  const manifest = await readJson(join(hostDir, '.claude-plugin', 'plugin.json')).catch(() => undefined);
+  return (isObject(manifest) && manifest.hooks !== undefined) || exists(join(hostDir, 'hooks'));
+}
+
 /** `plugin:<dir>` for every `skills/<dir>/SKILL.md` in the plugin. */
 async function allSkills(name: string, hostDir: string): Promise<string[]> {
   const dirs = await readdir(join(hostDir, 'skills'), { withFileTypes: true }).catch(() => []);
@@ -100,8 +111,15 @@ export async function pluginsForSession(
     const root = `${CONTAINER_PLUGINS}/${entry.dir}`;
     result.used.push(entry);
     result.plugins.push(root);
+    for (const s of use.skills) {
+      const skill = s.slice(entry.name.length + 1);
+      if (!(await exists(join(hostDir, 'skills', skill, 'SKILL.md')))) {
+        throw new Error(`Plugin ${entry.name} has no skill "${skill}" — check config.yaml`);
+      }
+    }
     result.skills.push(...(use.whole ? await allSkills(entry.name, hostDir) : use.skills));
-    // A `plugin:skill` entry selects one skill, not the plugin's servers.
+    // A `plugin:skill` entry selects one skill, not the plugin's servers. The SDK still loads the whole
+    // plugin, so its hooks, agents and commands run in this session (ruling P4a-R7; README says so).
     if (!use.whole) continue;
     const servers = await pluginServers(hostDir);
     for (const [server, cfg] of Object.entries(servers)) {

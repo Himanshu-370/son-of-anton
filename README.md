@@ -110,7 +110,7 @@ Each acceptance check shows what it was proven against. A service is `real` only
 Plugins (marketplace skills and tools) let agents use extra skills, for example a test-driven-development skill in build. Nothing loads unless you list it.
 
 - `anton plugins add <plugin>@<owner>/<repo>` (or `<plugin>@<https git url>`) installs a plugin from its marketplace repo and pins it. Only relative-path, `github` and `url` plugin sources are supported; symlinks, sources that escape the repo, and silent re-pins are refused.
-- `anton plugins list` shows what is pinned and what each stage, kit and role loads. It marks `NOT INSTALLED` entries and roles whose list is ignored.
+- `anton plugins list` shows what is pinned and what each stage, kit and role loads. It marks `NOT INSTALLED` entries and roles whose list is ignored, and shows `hooks: yes` or `hooks: no` for each installed plugin.
 - `anton plugins update [name]` fetches the new version into a staging area. A read-only reviewer agent (budget $1) reads the diff of the hooks, scripts and MCP files, and its findings are printed. The pin moves only if you type `y` or `yes` in a terminal; anything else keeps the old version.
 
 Pins live in `~/anton/plugins.lock` (name, marketplace, version, commit, sha256). Each pinned version sits in its own folder, `~/anton/plugins/<marketplace>/<plugin>/<commit>/`, and is mounted read-only in the container at `/opt/anton/plugins`. If a plugin is missing or was edited, the job pauses with an error. Each job's `run-record.json` lists the plugin versions it used.
@@ -129,7 +129,7 @@ roles:
   frontend: [some-plugin]
 ```
 
-An entry is `plugin` (the whole plugin) or `plugin:skill` (one skill). `kits` apply in plan, build and verify. Each session gets only the plugins and skills it resolves to. Read-only roles (code reviewer, security reviewer, browser tester, mapper, plugin reviewer) never load plugins, whatever the config says. MCP servers come only from plugins listed for that stage, kit or role; a repo's own `.mcp.json` never loads.
+An entry is `plugin` (the whole plugin) or `plugin:skill` (one skill). A `plugin:skill` entry hides the plugin's other skills, but that plugin's hooks, agents and commands still run in that session; only its MCP servers are left out. A `plugin:skill` entry naming a skill the plugin does not have stops the job with an error. `kits` apply in plan, build and verify. Each session gets only the plugins and skills it resolves to. Read-only roles (code reviewer, security reviewer, browser tester, mapper, plugin reviewer) never load plugins, whatever the config says. MCP servers come only from plugins listed for that stage, kit or role; a repo's own `.mcp.json` never loads.
 
 ### Unattended stages
 
