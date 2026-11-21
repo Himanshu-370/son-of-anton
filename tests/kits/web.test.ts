@@ -23,8 +23,9 @@ const st = (): JobState => ({
 });
 
 function setup(opts: { xml?: string; ready?: boolean; alive?: boolean; repo?: string; jobDir?: string; tail?: string } = {}) {
-  const repo = opts.repo ?? '/r';
-  const jobDir = opts.jobDir ?? mkdtempSync(join(tmpdir(), 'web-job-'));
+  const repo = opts.repo ?? mkdtempSync(join(tmpdir(), 'web-repo-'));
+  const jobDir = opts.jobDir ?? join(repo, '.anton', 'jobs', 'j1');
+  mkdirSync(jobDir, { recursive: true });
   const stage: StageCtx = { project: 'p', repo, container: 'c', jobDir, stage: 'verify', state: st() };
   const calls: string[] = [];
   const runIn = async (_c: string, cmd: string) => {
@@ -234,20 +235,56 @@ describe('webKit.verify', () => {
     expect(out.results.every((r) => r.status === 'fail')).toBe(true);
   });
 
-  it('files that keep changing after 3 restores fail every check (fail closed)', async () => {
+  it('unsettled restore throws so the job pauses', async () => {
     const s = setup();
     let n = 0;
-    const out = await webKit.verify(s.ctx, {
+    await expect(webKit.verify(s.ctx, {
       runIn: s.runIn,
       runAgent: agent(allPass),
       porcelainStatus: async () => (n++ === 0 ? new Map() : new Map([['w.txt', `?? ${n}`]])),
       restorePaths: async () => {},
       sleep: async () => {},
+    })).rejects.toThrow('Browser session left project files changing: w.txt. Check them, then run anton resume.');
+  });
+
+  it('changed-files note lists at most 20 paths', async () => {
+    const s = setup();
+    const names = Array.from({ length: 25 }, (_, i) => `f${String(i).padStart(2, '0')}.txt`);
+    let n = 0;
+    const out = await webKit.verify(s.ctx, {
+      runIn: s.runIn,
+      runAgent: agent(allPass),
+      porcelainStatus: async () => (n++ === 0 ? new Map() : n === 2 ? new Map(names.map((f) => [f, '?? x'])) : new Map()),
+      restorePaths: async () => {},
+      ignoredPaths: async () => new Set<string>(),
+      sleep: async () => {},
     });
-    for (const r of out.results) {
-      expect(r.status).toBe('fail');
-      expect(r.browser?.note).toMatch(/kept changing.*w\.txt/);
-    }
+    const note = out.results[0]!.browser!.note;
+    expect(note).toContain('f19.txt, and 5 more.');
+    expect(note).not.toContain('f20.txt');
+  });
+
+  it('note leaves out paths that are ignored after the restore', async () => {
+    const repo = mkdtempSync(join(tmpdir(), 'web-repo-'));
+    const g = (...a: string[]) => execFileSync('git', a, { cwd: repo });
+    g('init', '-q');
+    writeFileSync(join(repo, '.gitignore'), 'cache/\n');
+    g('add', '.');
+    g('-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-qm', 'init');
+    mkdirSync(join(repo, 'cache'));
+    writeFileSync(join(repo, 'cache', 'x.js'), 'x\n');
+    const jobDir = join(repo, '.anton', 'jobs', 'j1');
+    mkdirSync(jobDir, { recursive: true });
+    const s = setup({ repo, jobDir });
+    const out = await webKit.verify(s.ctx, {
+      runIn: s.runIn,
+      runAgent: agent(async () => {
+        writeFileSync(join(repo, '.gitignore'), '');
+        return allPass;
+      }),
+      sleep: async () => {},
+    });
+    expect(out.results[0]!.browser!.note).toBe('The browser session (agent or app) changed project files: .gitignore. If the app writes these at runtime, add them to .gitignore.');
   });
 
   it('an edit to an already-dirty file is caught and reported', async () => {

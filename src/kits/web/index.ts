@@ -2,7 +2,7 @@ import { lstat, mkdir, rm } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { runAgent as defaultRunAgent } from '../../agent/host-runner.js';
-import { porcelainStatus as defaultStatus, restorePaths as defaultRestore } from '../../core/git.js';
+import { ignoredPaths as defaultIgnored, porcelainStatus as defaultStatus, restorePaths as defaultRestore } from '../../core/git.js';
 import type { JobState } from '../../core/state.js';
 import { runIn as dockerRunIn } from '../../docker/container.js';
 import { fallbackKit } from '../fallback/index.js';
@@ -25,6 +25,7 @@ export type WebVerifyDeps = {
   runAgent?: typeof defaultRunAgent;
   porcelainStatus?: typeof defaultStatus;
   restorePaths?: typeof defaultRestore;
+  ignoredPaths?: typeof defaultIgnored;
   sleep?: (ms: number) => Promise<void>;
 };
 
@@ -35,13 +36,13 @@ export type WebVerifyDeps = {
  */
 async function restoreChanges(
   repo: string, before: Map<string, string>, status: typeof defaultStatus, restore: typeof defaultRestore,
-): Promise<{ changed: string[]; unsettled: string[] }> {
+): Promise<{ changed: string[]; unsettled: string[]; absent: string[] }> {
   const restored = new Set<string>();
   for (let i = 0; ; i++) {
     const now = await status(repo);
     const todo = changedPaths(before, now).filter((p) => !restored.has(p) || now.has(p));
-    if (!todo.length) return { changed: [...restored].sort(), unsettled: [] };
-    if (i === 3) return { changed: [...new Set([...restored, ...todo])].sort(), unsettled: todo };
+    if (!todo.length) return { changed: [...restored].sort(), unsettled: [], absent: [...restored].filter((p) => !before.has(p) && !now.has(p)) };
+    if (i === 3) return { changed: [...new Set([...restored, ...todo])].sort(), unsettled: todo, absent: [] };
     for (const p of todo) restored.add(p);
     await restore(repo, todo);
   }
@@ -74,6 +75,7 @@ async function verify(ctx: VerifyContext, deps: WebVerifyDeps = {}): Promise<Ver
   let agent: { checks: BrowserCheck[]; state: JobState } | undefined;
   let changed: string[] = [];
   let unsettled: string[] = [];
+  let absent: string[] = [];
   let tail: string;
   try {
     ready = await startApp(runIn, ctx.container, serve, url, `${boxEvidence}/app.log`, sleep);
@@ -84,7 +86,7 @@ async function verify(ctx: VerifyContext, deps: WebVerifyDeps = {}): Promise<Ver
       } finally {
         // Nothing may keep writing between the snapshot and the next stage: stop the app and any leftover process.
         await runIn(ctx.container, KILL_ALL);
-        ({ changed, unsettled } = await restoreChanges(stage.repo, before, status, deps.restorePaths ?? defaultRestore));
+        ({ changed, unsettled, absent } = await restoreChanges(stage.repo, before, status, deps.restorePaths ?? defaultRestore));
       }
     }
   } finally {
@@ -98,7 +100,11 @@ async function verify(ctx: VerifyContext, deps: WebVerifyDeps = {}): Promise<Ver
     const failureReport = `### App did not start\n\`${serve}\` did not answer at ${url} within ${READY_TRIES} s, or exited. Last lines of app.log:\n\`\`\`\n${tail}\n\`\`\``;
     return { ...base, results, runOk: false, failureReport };
   }
-  const results = mergeBrowser(base.results, agent!.checks, changed, screens, unsettled);
+  if (unsettled.length) throw new Error(`Browser session left project files changing: ${unsettled.join(', ')}. Check them, then run anton resume.`);
+  // A path the session created and the restore removed is noise when HEAD's rules ignore it (a rewritten
+  // .gitignore exposes node_modules and the like): the .gitignore edit is the news.
+  const ignored = absent.length ? await (deps.ignoredPaths ?? defaultIgnored)(stage.repo, absent) : new Set<string>();
+  const results = mergeBrowser(base.results, agent!.checks, changed.filter((p) => !ignored.has(p)), screens);
   return { ...base, results, failureReport: browserReport(results), state: agent!.state };
 }
 

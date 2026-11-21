@@ -12,6 +12,7 @@ import { logsCommand } from './commands/logs.js';
 import { newCommand } from './commands/new.js';
 import { rejectCommand } from './commands/reject.js';
 import { resumeCommand } from './commands/resume.js';
+import { pluginsAddCommand, pluginsListCommand, pluginsUpdateCommand } from './commands/plugins.js';
 import { secretsEditCommand } from './commands/secrets.js';
 import { runCommand } from './commands/run.js';
 import { statusCommand } from './commands/status.js';
@@ -95,6 +96,21 @@ export function buildProgram(deps: CliDeps = {}): Command {
     .description("Create and open a project's secrets file")
     .argument('<project>')
     .action(async (p: string) => exit(await secretsEditCommand(p, deps)));
+  const plugins = program.command('plugins').description('Install and inspect pinned plugins (~/anton/plugins.lock)');
+  plugins
+    .command('add')
+    .description('Install a plugin from a marketplace repo and pin it')
+    .argument('<specifier>', '<plugin>@<owner>/<repo> or <plugin>@<https git url>')
+    .action(async (s: string) => exit(await pluginsAddCommand(s, deps)));
+  plugins
+    .command('list')
+    .description('Show installed plugins and what each stage, kit and role loads')
+    .action(async () => exit(await pluginsListCommand(deps)));
+  plugins
+    .command('update')
+    .description('Stage the newest version, have a read-only reviewer check what changed, and re-pin on your yes')
+    .argument('[name]', 'plugin to update (default: every installed plugin)')
+    .action(async (n: string | undefined) => exit(await pluginsUpdateCommand(n, deps)));
   program
     .command('_run', { hidden: true })
     .argument('<project>')

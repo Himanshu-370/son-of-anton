@@ -5,6 +5,8 @@ import { execIn } from '../docker/container.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { redact } from '../core/secrets.js';
 import { saveState, type JobState } from '../core/state.js';
+import { pluginsForSession } from '../plugins/session.js';
+import { loadPrompt } from '../stages/prompts.js';
 import { AgentEventSchema, PROTOCOL_VERSION, type AgentRequest } from './protocol.js';
 
 export type StageCtx = {
@@ -14,6 +16,8 @@ export type StageCtx = {
   jobDir: string;
   state: JobState;
   stage: string;
+  /** The job's kit, for config.yaml `kits:` plugins. Unset means fallback (e.g. the spec session). */
+  kit?: 'fallback' | 'web';
   /** Project secrets, loaded once by the runner. Optional: redact treats undefined as none. */
   secrets?: Record<string, string>;
 };
@@ -29,6 +33,8 @@ export type ChildLike = {
 export type RunAgentDeps = {
   spawn?: (container: string, args: string[]) => ChildLike;
   notify?: typeof defaultNotify;
+  /** Plugins, skills and MCP servers for a session without `tools` (default: config.yaml + plugins.lock). */
+  plugins?: (ctx: StageCtx, role: string) => Promise<{ plugins: string[]; skills: string[]; mcpServers: Record<string, unknown> }>;
 };
 
 export class BudgetExceeded extends Error {
@@ -71,6 +77,21 @@ export async function runAgent(
   if (remainingUsd(ctx.state) <= 0) throw new BudgetExceeded('no budget remaining');
   const spawn = deps.spawn ?? ((c, a) => execIn(c, a) as unknown as ChildLike);
   const notify = deps.notify ?? defaultNotify;
+  if (req.tools) {
+    // Read-only isolation (P2-R2): a reviewer never loads plugins, skills or MCP servers.
+    if (req.plugins?.length || req.skills?.length || Object.keys(req.mcpServers ?? {}).length) {
+      throw new AgentError('read-only sessions cannot load plugins');
+    }
+  } else {
+    const p = await (deps.plugins ?? ((c, r) => pluginsForSession(c, r)))(ctx, req.role);
+    req = { ...req, plugins: p.plugins, skills: p.skills, mcpServers: p.mcpServers };
+  }
+
+  if (ctx.stage !== 'spec') {
+    // Unattended: the jobId is the only varying part and sits on the last line, keeping the rest cache-stable.
+    const rule = (await loadPrompt('unattended.md')).replace('{jobId}', ctx.state.jobId).trimEnd();
+    req = { ...req, systemPrompt: `${req.systemPrompt}\n\n${rule}` };
+  }
 
   const file = await nextRequestFile(ctx.jobDir, ctx.stage);
   await fsp.writeFile(

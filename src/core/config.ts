@@ -16,7 +16,8 @@ export type Role =
   | 'security_reviewer'
   | 'coach'
   | 'mapper'
-  | 'browser_tester';
+  | 'browser_tester'
+  | 'plugin_reviewer';
 
 export type Area = 'frontend' | 'backend' | 'infra';
 
@@ -35,6 +36,7 @@ export const ROLE_MODELS: Record<Role, ModelConfig> = {
   coach: { model: 'claude-haiku-5-5', effort: 'low' },
   mapper: { model: 'claude-sonnet-5-5', effort: 'low' },
   browser_tester: { model: 'claude-sonnet-5-5', effort: 'medium' },
+  plugin_reviewer: { model: 'claude-sonnet-5-5', effort: 'high' },
 };
 
 export const DEFAULTS: {

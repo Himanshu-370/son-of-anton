@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { StageCtx } from '../../src/agent/host-runner.js';
@@ -19,12 +19,14 @@ const plan: Plan = {
 };
 let ctx: StageCtx;
 beforeEach(async () => {
-  const jobDir = await mkdtemp(join(tmpdir(), 'anton-deliver-'));
+  const repo = await mkdtemp(join(tmpdir(), 'anton-deliver-'));
+  const jobDir = join(repo, '.anton', 'jobs', 'j1');
+  await mkdir(jobDir, { recursive: true });
   const state: JobState = {
     jobId: 'j1', project: 'p', stage: 'deliver', round: 2, maxRounds: 3, budgetUsd: 10, spentUsd: 1.5,
     warned80: false, completedTasks: ['T1'], updatedAt: 'x',
   };
-  ctx = { project: 'p', repo: '/r', container: 'c', jobDir, stage: 'deliver', state };
+  ctx = { project: 'p', repo, container: 'c', jobDir, stage: 'deliver', state };
 });
 const results: CheckResult[] = [
   { id: 'AC-1', status: 'pass', tests: ['AC-1: sums'] },
@@ -53,11 +55,11 @@ describe('runDeliver', () => {
     expect(md).toContain('Assumed integers only.');
     expect(md).toMatch(/## Not done\n\nNothing/);
 
-    const order = ['# Sum CLI', '## Acceptance checks', '## How to run', '## Cost and time by stage', '## Assumptions', '## Not done']
+    const order = ['# Sum CLI', '## Acceptance checks', '## Questions and assumptions', '## Security', '## How to run', '## Cost and time by stage', '## Not done']
       .map((h) => md.indexOf(h));
     expect(order.every((v, i) => v >= 0 && (i === 0 || v > order[i - 1]!))).toBe(true);
 
-    expect(tag).toHaveBeenCalledWith('/r', 'anton/j1/delivered-1');
+    expect(tag).toHaveBeenCalledWith(ctx.repo, 'anton/j1/delivered-1');
     expect(state.stage).toBe('awaiting_final_review');
     expect((await loadState(ctx.jobDir)).stage).toBe('awaiting_final_review');
   });
@@ -105,7 +107,7 @@ describe('runDeliver', () => {
     const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
     expect(md).toContain('| AC-2 | rejects \\| junk | fail (no_test) | — |');
     expect(md).toMatch(/## Not done\n\n- AC-2: rejects \| junk \(no_test\)\n- The smoke run command failed/);
-    expect(md).toContain('No assumptions recorded');
+    expect(md).not.toContain('## Questions and assumptions');
     expect(md).toContain('No cost recorded');
     expect(state.stage).toBe('awaiting_final_review');
   });
@@ -114,8 +116,8 @@ describe('runDeliver', () => {
     const tag = vi.fn(async () => {});
     const listTags = vi.fn(async () => ['anton/j1/delivered-1']);
     await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag, listTags });
-    expect(listTags).toHaveBeenCalledWith('/r', 'anton/j1/delivered-*');
-    expect(tag).toHaveBeenCalledWith('/r', 'anton/j1/delivered-2');
+    expect(listTags).toHaveBeenCalledWith(ctx.repo, 'anton/j1/delivered-*');
+    expect(tag).toHaveBeenCalledWith(ctx.repo, 'anton/j1/delivered-2');
   });
 
   describe('code review and security sections', () => {
@@ -271,6 +273,49 @@ describe('runDeliver change jobs', () => {
     expect(md.indexOf('SEC-old00001')).toBeGreaterThan(pre);
     expect(md.indexOf('SEC-new00001')).toBeLessThan(pre);
     expect(md.indexOf('SEC-missing1')).toBeLessThan(pre); // missing flag counts as new
+  });
+});
+
+describe('runDeliver questions section', () => {
+  const deps = { tag: vi.fn(async () => {}), listTags: async () => [] };
+  it('report includes questions and assumptions', async () => {
+    await writeFile(join(ctx.jobDir, 'questions.md'), '- Q: tabs? / Assumed: spaces.\n');
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, deps);
+    const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    expect(md).toMatch(/## Questions and assumptions\n\n {4}- Q: tabs\? \/ Assumed: spaces\./);
+    expect(md.indexOf('## Questions and assumptions')).toBeLessThan(md.indexOf('## Security'));
+  });
+  it('a heading line in questions.md does not become a REPORT heading', async () => {
+    await writeFile(join(ctx.jobDir, 'questions.md'), '# Injected heading\n- Assumed spaces.\n');
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, deps);
+    const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    expect(md).not.toMatch(/^# Injected heading/m);
+    expect(md).toContain('    # Injected heading');
+  });
+  it('a symlinked questions.md is refused, not read into the report', async () => {
+    const host = join(await mkdtemp(join(tmpdir(), 'anton-host-')), 'notes.txt');
+    await writeFile(host, 'HOST_ONLY_TEXT\n');
+    await symlink(host, join(ctx.jobDir, 'questions.md'));
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, deps);
+    const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    expect(md).not.toContain('HOST_ONLY_TEXT');
+    expect(md).toContain('questions.md was refused because it is not a regular file');
+  });
+  it('a symlinked job folder is refused before anything is read or written', async () => {
+    const elsewhere = await mkdtemp(join(tmpdir(), 'anton-host-'));
+    const linked = join(ctx.repo, '.anton', 'jobs', 'j2');
+    await symlink(elsewhere, linked);
+    await expect(runDeliver({ ...ctx, jobDir: linked }, spec, plan, { results, runOk: true }, deps)).rejects.toThrow(/not a real folder/);
+    await expect(readFile(join(elsewhere, 'REPORT.md'), 'utf8')).rejects.toThrow();
+  });
+  it('no questions file: no section', async () => {
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, deps);
+    expect(await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8')).not.toContain('## Questions and assumptions');
+  });
+  it('empty questions file: no section', async () => {
+    await writeFile(join(ctx.jobDir, 'questions.md'), '\n  \n');
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, deps);
+    expect(await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8')).not.toContain('## Questions and assumptions');
   });
 });
 

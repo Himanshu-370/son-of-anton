@@ -1,7 +1,7 @@
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
-import { writeFileAtomic } from '../core/atomic.js';
+import { NotRegularFileError, readRegularFile, writeFileAtomic } from '../core/atomic.js';
 import { redact } from '../core/secrets.js';
 import { listTags as defaultListTags, tag as defaultTag } from '../core/git.js';
 import type { ReviewFinding } from '../review/code-review.js';
@@ -10,7 +10,7 @@ import type { SecurityFinding } from '../security/review.js';
 import { saveState, transition, type JobState } from '../core/state.js';
 import type { CheckResult } from '../kits/types.js';
 import { failuresPath, FailureItemSchema } from './qa.js';
-import { listVerifyCopies } from './verify.js';
+import { assertJobDir, listVerifyCopies } from './verify.js';
 import type { Plan } from './plan.js';
 import type { SpecDoc } from './spec.js';
 
@@ -183,6 +183,14 @@ function costSection(costs: Record<string, number> | undefined): string[] {
   return lines;
 }
 
+/** questions.md as an indented block, so its lines can never become REPORT headings; a refused file gets a note. */
+function questionsSection(questions: string | undefined, refused: boolean): string[] {
+  const head = ['## Questions and assumptions', ''];
+  if (refused) return [...head, 'questions.md was refused because it is not a regular file.', ''];
+  if (!questions) return [];
+  return [...head, ...questions.split('\n').map((l) => `    ${l}`), ''];
+}
+
 function notDoneSection(spec: SpecDoc, results: CheckResult[], runOk: boolean): string[] {
   const text = new Map(spec.acceptanceChecks.map((c) => [c.id, c.text]));
   const items = results
@@ -201,6 +209,7 @@ export async function runDeliver(
   deps: DeliverDeps = {},
 ): Promise<JobState> {
   const tagFn = deps.tag ?? defaultTag;
+  await assertJobDir(ctx.repo, ctx.jobDir);
   let outcome = verifyResult;
   if (!outcome) {
     const raw = await readOptional(join(ctx.jobDir, 'evidence', 'results.json'));
@@ -209,7 +218,14 @@ export async function runDeliver(
   const costRaw = await readOptional(join(ctx.jobDir, 'cost.json'));
   const costs = costRaw ? (JSON.parse(costRaw) as Record<string, number>) : undefined;
   const sections = await readSections(join(ctx.jobDir, 'evidence', 'results.json'));
-  const questions = (await readOptional(join(ctx.jobDir, 'questions.md')))?.trim();
+  let questions: string | undefined;
+  let questionsRefused = false;
+  try {
+    questions = (await readRegularFile(join(ctx.jobDir, 'questions.md')))?.trim();
+  } catch (e) {
+    if (!(e instanceof NotRegularFileError)) throw e;
+    questionsRefused = true;
+  }
 
   const change = ctx.state.kind === 'change' && !!ctx.state.branch;
   const md = [
@@ -227,16 +243,13 @@ export async function runDeliver(
     '',
     ...codeReviewSection(sections),
     '',
+    ...questionsSection(questions, questionsRefused),
     ...(await securitySection(ctx.jobDir, sections)),
     '',
     ...(change ? [...(await regressionsSection(ctx.jobDir)), ''] : []),
     ...runSection(plan),
     '',
     ...costSection(costs),
-    '',
-    '## Assumptions',
-    '',
-    questions || 'No assumptions recorded.',
     '',
     ...notDoneSection(spec, outcome.results, outcome.runOk),
     '',

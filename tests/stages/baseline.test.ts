@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -18,13 +18,15 @@ const xml = `<testsuite><testcase classname="a" name="adds"/><testcase name="bad
 const finding = { tool: 'gitleaks' as const, ruleId: 'r', severity: 'high' as const, file: 'f.ts', key: 'k', message: 'm' };
 
 async function ctx(): Promise<StageCtx> {
-  const jobDir = await mkdtemp(join(tmpdir(), 'anton-baseline-'));
+  const repo = await mkdtemp(join(tmpdir(), 'anton-baseline-'));
+  const jobDir = join(repo, '.anton', 'jobs', 'j');
+  await mkdir(jobDir, { recursive: true });
   const state: JobState = {
     jobId: 'j', kind: 'change', project: 'p', stage: 'baseline', round: 0, maxRounds: 3, budgetUsd: 10, spentUsd: 0,
     warned80: false, completedTasks: [], updatedAt: 'x',
   };
   await saveState(jobDir, state);
-  return { project: 'p', repo: '/r', container: 'c', jobDir, stage: 'baseline', state };
+  return { project: 'p', repo, container: 'c', jobDir, stage: 'baseline', state };
 }
 const fakeRun = (installExit: number) => async (_c: string, cmd: string) => {
   if (cmd === 'npm i') return { exitCode: installExit, stdout: '', stderr: '' };
@@ -64,6 +66,15 @@ describe('runBaseline', () => {
 });
 
 describe('runBaseline guard', () => {
+  it('baseline refuses a symlinked evidence dir', async () => {
+    const c = await ctx();
+    const target = await mkdtemp(join(tmpdir(), 'host-target-'));
+    await symlink(target, join(c.jobDir, 'evidence'));
+    let kitCalled = false;
+    const k: Kit = { ...kit(0), baseline: async () => { kitCalled = true; return { passingTests: [], ran: true }; } };
+    await expect(runBaseline(c, k, plan, { runScanners: scanners, resetWorktree: reset, isClean: async () => true })).rejects.toThrow(/symlink/);
+    expect(kitCalled).toBe(false);
+  });
   it('refuses a tree that was dirty before the kit ran; no kit call, no reset', async () => {
     const c = await ctx();
     let kitCalled = false;

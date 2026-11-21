@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
-import { lstat, readFile, readlink, rm } from 'node:fs/promises';
-import { isAbsolute, relative, resolve } from 'node:path';
+import { lstat, mkdir, readFile, readlink, rm } from 'node:fs/promises';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { execa } from 'execa';
 import { writeFileAtomic } from './atomic.js';
 import { redact } from './secrets.js';
@@ -170,6 +170,16 @@ export async function restorePaths(repo: string, paths: string[]): Promise<void>
   for (const p of notInHead) if (untracked.has(p)) await rm(resolve(repo, p), { force: true, recursive: true });
 }
 
+/** The subset of repo-relative `paths` that git ignores under the current ignore rules. */
+export async function ignoredPaths(repo: string, paths: string[]): Promise<Set<string>> {
+  if (!paths.length) return new Set();
+  const r = await execa('git', [...SAFE, 'check-ignore', '-z', '--stdin'], {
+    cwd: repo, env: gitEnv(), extendEnv: false, input: paths.join('\0') + '\0', reject: false,
+  });
+  if (r.exitCode !== 0 && r.exitCode !== 1) throw new Error(`git check-ignore failed: ${String(r.stderr)}`);
+  return new Set(String(r.stdout).split('\0').filter(Boolean));
+}
+
 /** Create and switch to a new branch; git's error surfaces if it already exists. */
 export async function createBranch(repo: string, name: string): Promise<void> {
   await git(repo, ['switch', '-c', name]);
@@ -246,10 +256,44 @@ export async function changedFilesSince(repo: string, sha: string): Promise<stri
   return out.split('\n').map((l) => l.trim()).filter(Boolean);
 }
 
+/**
+ * Unified diff of two paths outside any repo (`git diff --no-index a b`, run in `cwd`; either side may
+ * be `/dev/null`). Exit 1 means "they differ", not failure.
+ */
+export async function diffNoIndex(cwd: string, a: string, b: string): Promise<string> {
+  const r = await execa('git', [...SAFE, 'diff', '--no-index', '--no-color', '--no-ext-diff', '--', a, b], {
+    cwd, env: gitEnv(), extendEnv: false, reject: false,
+  });
+  if (r.exitCode !== 0 && r.exitCode !== 1) throw new Error(`git diff --no-index failed: ${String(r.stderr)}`);
+  return String(r.stdout);
+}
+
 /** The commit sha a ref (tag, branch, sha) points to. Throws if it does not resolve to a commit. */
 export async function revParse(repo: string, ref: string): Promise<string> {
   if (ref === '' || ref.startsWith('-') || /\s/.test(ref)) throw new Error(`invalid ref for revParse: ${JSON.stringify(ref)}`);
   return (await git(repo, ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).trim();
+}
+
+/**
+ * Clone `url` (untrusted) into `dest` at depth 1 and return its HEAD sha. Same hook/config blocking as
+ * every call; `ext::` (runs a command) is refused, and `--` keeps a URL starting with `-` from being an option.
+ */
+export async function cloneShallow(url: string, dest: string): Promise<string> {
+  await mkdir(dirname(dest), { recursive: true });
+  // Never prompt for a password (git or Git Credential Manager), and never hang past 120 s.
+  const r = await execa('git', [...SAFE, '-c', 'protocol.ext.allow=never', 'clone', '-q', '--depth', '1', '--no-tags', '--', url, dest], {
+    cwd: dirname(dest), env: { ...gitEnv(), GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'never' }, extendEnv: false,
+    timeout: 120_000, reject: false,
+  });
+  if (r.timedOut) throw new Error(`Timed out cloning ${url} after 120 s`);
+  if (r.exitCode !== 0) {
+    const err = String(r.stderr);
+    if (/terminal prompts disabled|could not read (username|password)|authentication failed|repository not found|returned error: 40[134]/i.test(err)) {
+      throw new Error(`Could not clone ${url} (private or missing repo?)`);
+    }
+    throw new Error(`git clone ${url} failed: ${err.trim()}`);
+  }
+  return headSha(dest);
 }
 
 export async function headSha(repo: string): Promise<string> {

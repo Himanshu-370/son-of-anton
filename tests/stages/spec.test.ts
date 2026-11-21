@@ -76,7 +76,7 @@ describe('runSpec cost accounting across resumed turns', () => {
     let call = 0;
     const spawn = (): ChildLike => {
       const t = turns[call++]!;
-      const line = JSON.stringify({ type: 'result', ok: true, output: t.output, sessionId: 'sess', totalUsd: t.totalUsd, protocolVersion: 2 }) + '\n';
+      const line = JSON.stringify({ type: 'result', ok: true, output: t.output, sessionId: 'sess', totalUsd: t.totalUsd, protocolVersion: 3 }) + '\n';
       return {
         stdout: (async function* () { yield line; })(),
         kill: () => undefined,
@@ -85,7 +85,7 @@ describe('runSpec cost accounting across resumed turns', () => {
     };
     const run = (async (c: StageCtx, req: AgentRequest) => {
       reqs.push(req);
-      return runAgent(c, req, { spawn, notify: async () => undefined });
+      return runAgent(c, req, { spawn, notify: async () => undefined, plugins: async () => ({ plugins: [], skills: [], mcpServers: {} }) });
     }) as typeof runAgent;
     const r = await runSpec(ctx, 'habit app', async (q) => q.map(() => 'yes'), { runAgent: run });
     expect(r.state.spentUsd).toBeCloseTo(2.0, 10);
@@ -177,6 +177,13 @@ describe('writeSpec / readApprovedSpec', () => {
     // `\s*` must not cross a newline: "Kit:" followed by a blank line is an empty value, not the next line.
     await writeFile(join(ctx.jobDir, 'spec.md'), md.replace('Kit: web', 'Kit:'));
     await expect(readApprovedSpec(ctx.jobDir)).rejects.toThrow('Unknown kit ""');
+  });
+
+  it('Kit line with CRLF reads as web', async () => {
+    await writeSpec(ctx.jobDir, { ...spec, kit: 'fallback' });
+    const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');
+    await writeFile(join(ctx.jobDir, 'spec.md'), md.replace('Kit: fallback\n', 'Kit: web\r\n'));
+    expect((await readApprovedSpec(ctx.jobDir)).kit).toBe('web');
   });
 
   it('unknown kit in spec.md throws', async () => {

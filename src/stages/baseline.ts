@@ -4,6 +4,7 @@ import { z } from 'zod';
 import type { StageCtx } from '../agent/host-runner.js';
 import { writeFileAtomic } from '../core/atomic.js';
 import { redact } from '../core/secrets.js';
+import { assertEvidenceDir } from './verify.js';
 import { isClean as defaultIsClean, resetWorktree as defaultResetWorktree } from '../core/git.js';
 import { saveState, transition, type JobState } from '../core/state.js';
 import type { Kit } from '../kits/types.js';
@@ -19,9 +20,11 @@ export async function runBaseline(ctx: StageCtx, kit: Kit, plan: Plan, deps: Bas
   if (!(await (deps.isClean ?? defaultIsClean)(ctx.repo))) {
     throw new Error('The working tree has uncommitted changes, so the baseline cannot run safely. Commit or stash them, then resume.');
   }
+  await assertEvidenceDir(ctx.repo, ctx.jobDir);
   try {
-    const { passingTests, ran } = await kit.baseline({ container: ctx.container, jobDir: ctx.jobDir, commands: plan.commands, secrets: ctx.secrets });
+    const { passingTests, ran } = await kit.baseline({ container: ctx.container, jobDir: ctx.jobDir, repo: ctx.repo, commands: plan.commands, secrets: ctx.secrets });
     const { findings, unavailable } = await (deps.runScanners ?? defaultRunScanners)(ctx.container);
+    await assertEvidenceDir(ctx.repo, ctx.jobDir); // scanners ran in the container since the first check
     await writeFileAtomic(
       join(ctx.jobDir, 'evidence', 'baseline.json'),
       redact(JSON.stringify({ passingTests, ran, scannerRefs: findings.map(scannerRef), unavailable }, null, 2) + '\n', ctx.secrets),

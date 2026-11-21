@@ -3,7 +3,7 @@ import { access, chmod, mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execa } from 'execa';
-import { commitAll, SecretInDiff, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse, changedFilesSince, isClean, createBranch, resetWorktree } from '../../src/core/git.js';
+import { cloneShallow, commitAll, SecretInDiff, tag, headSha, ensureAntonIgnored, listTags, diffSince, revParse, changedFilesSince, isClean, createBranch, resetWorktree } from '../../src/core/git.js';
 
 const git = (repo: string, ...args: string[]) =>
   execa('git', ['-c', 'commit.gpgsign=false', ...args], { cwd: repo });
@@ -274,5 +274,36 @@ describe('commitAll secret guard', () => {
     expect(await commitAll(repo, 'one', { API_TOKEN: 'FAKE_SECRET_VALUE_123' })).toMatch(/^[0-9a-f]{40}$/);
     await writeFile(join(repo, 'b.txt'), 'FAKE_SECRET_VALUE_123');
     expect(await commitAll(repo, 'two', {})).toMatch(/^[0-9a-f]{40}$/);
+  });
+});
+
+describe('cloneShallow', () => {
+  const realPath = process.env.PATH;
+  afterEach(() => { process.env.PATH = realPath; });
+
+  /** A fake `git` first on PATH: records the clone's env, then exits with `code` after printing `stderr`. */
+  async function fakeGit(code: number, stderr = ''): Promise<string> {
+    const bin = await mkdtemp(join(tmpdir(), 'anton-fakegit-'));
+    const out = join(bin, 'env.txt');
+    await writeFile(join(bin, 'git'), `#!/bin/sh\ncase "$*" in *clone*) env > '${out}';; esac\nprintf '%s' '${stderr}' >&2\nexit ${code}\n`);
+    await chmod(join(bin, 'git'), 0o755);
+    process.env.PATH = `${bin}:${realPath}`;
+    return out;
+  }
+
+  it('clones with git prompts and credential-manager prompts disabled', async () => {
+    const out = await fakeGit(0);
+    await mkdir(join(repo, 'dest')); // the fake clone creates nothing
+    await cloneShallow('https://example.invalid/acme/mkt.git', join(repo, 'dest'));
+    const env = await readFile(out, 'utf8');
+    expect(env).toMatch(/^GIT_TERMINAL_PROMPT=0$/m);
+    expect(env).toMatch(/^GCM_INTERACTIVE=never$/m);
+  });
+
+  it('an auth failure gives a clear error', async () => {
+    await fakeGit(128, "fatal: could not read Username for 'https://example.invalid': terminal prompts disabled");
+    await expect(cloneShallow('https://example.invalid/acme/private.git', join(repo, 'dest'))).rejects.toThrow(
+      'Could not clone https://example.invalid/acme/private.git (private or missing repo?)',
+    );
   });
 });

@@ -5,7 +5,7 @@ import { z } from 'zod';
  * event that does not echo it, so an image built from older agent code (which would, for example,
  * silently drop `tools`) fails closed instead of running with the wrong options.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 export const AgentRequestSchema = z.object({
   role: z.string(),
@@ -33,6 +33,14 @@ export const AgentRequestSchema = z.object({
    * option, so no other built-in tool exists for the session. Omitted: SDK defaults.
    */
   tools: z.array(z.string()).optional(),
+  /**
+   * Plugin folders inside the container (`/opt/anton/plugins/<dir>`), the `plugin:skill` names to
+   * enable, and the MCP servers the host resolved from those plugins. Set by runAgent for sessions
+   * without `tools`; a read-only session carrying any of them is refused.
+   */
+  plugins: z.array(z.string()).optional(),
+  skills: z.array(z.string()).optional(),
+  mcpServers: z.record(z.string(), z.unknown()).optional(),
   /** Set by the host (runAgent) to PROTOCOL_VERSION; the entry refuses a different value. */
   protocolVersion: z.number().int().optional(),
 });

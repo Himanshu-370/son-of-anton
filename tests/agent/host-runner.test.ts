@@ -28,6 +28,8 @@ async function setState(over: Partial<JobState>) {
 }
 
 beforeEach(async () => {
+  // No config.yaml or plugins.lock here: sessions load no plugins unless a test injects them.
+  process.env.ANTON_HOME = await mkdtemp(join(tmpdir(), 'anton-hr-home-'));
   const jobDir = await mkdtemp(join(tmpdir(), 'anton-hr-'));
   const state: JobState = {
     jobId: 'j1', project: 'proj', stage: 'build', round: 1, maxRounds: 3, budgetUsd: 100,
@@ -38,7 +40,7 @@ beforeEach(async () => {
 });
 
 const result = (total: number, output: unknown = { ok: 1 }) =>
-  L({ type: 'result', ok: true, output, sessionId: 'sess', totalUsd: total, protocolVersion: 2 });
+  L({ type: 'result', ok: true, output, sessionId: 'sess', totalUsd: total, protocolVersion: 3 });
 
 describe('runAgent', () => {
   it('returns output and sessionId from result event', async () => {
@@ -56,12 +58,12 @@ describe('runAgent', () => {
     expect(JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8')).role).toBe('builder');
   });
 
-  it('stamps protocolVersion 2 on the request file', async () => {
+  it('stamps protocolVersion 3 on the request file', async () => {
     await runAgent(ctx, req, { spawn: () => fake([result(0)]).child, notify: vi.fn() });
-    expect(JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8')).protocolVersion).toBe(2);
+    expect(JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8')).protocolVersion).toBe(3);
   });
 
-  it('a result without protocolVersion 2 (stale image) throws AgentError and still records its cost', async () => {
+  it('a result without protocolVersion 3 (stale image) throws AgentError and still records its cost', async () => {
     const f = fake([L({ type: 'result', ok: true, output: {}, sessionId: 's', totalUsd: 0.4 })]);
     const p = runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() });
     await expect(p).rejects.toBeInstanceOf(AgentError);
@@ -75,6 +77,35 @@ describe('runAgent', () => {
     const p = runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() });
     await expect(p).rejects.toBeInstanceOf(AgentError);
     await expect(p).rejects.toThrow('agent entry is out of date (protocol none) — run: npm run build:image');
+  });
+
+  it('builder session gets plugin paths, expanded skills and host MCP servers', async () => {
+    const plugins = vi.fn(async () => ({
+      plugins: ['/opt/anton/plugins/a/cave/0123456789ab'], skills: ['cave:hello'], mcpServers: { db: { command: 'x' } }, used: [],
+    }));
+    await runAgent({ ...ctx, kit: 'web' }, { ...req, role: 'backend' }, { spawn: () => fake([result(0)]).child, notify: vi.fn(), plugins });
+    expect(plugins).toHaveBeenCalledWith(expect.objectContaining({ stage: 'build', kit: 'web' }), 'backend');
+    expect(JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8'))).toMatchObject({
+      plugins: ['/opt/anton/plugins/a/cave/0123456789ab'], skills: ['cave:hello'], mcpServers: { db: { command: 'x' } },
+    });
+  });
+
+  it('with no config and no lock a session gets empty plugins, skills and MCP servers', async () => {
+    await runAgent(ctx, req, { spawn: () => fake([result(0)]).child, notify: vi.fn() });
+    expect(JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8'))).toMatchObject({
+      plugins: [], skills: [], mcpServers: {},
+    });
+  });
+
+  it('read-only request with plugins is refused', async () => {
+    const spawn = vi.fn(() => fake([result(0)]).child);
+    const plugins = vi.fn();
+    await expect(runAgent(ctx, { ...req, tools: ['Read'], plugins: ['/opt/anton/plugins/x'] }, { spawn, notify: vi.fn(), plugins }))
+      .rejects.toThrow(new AgentError('read-only sessions cannot load plugins'));
+    expect(spawn).not.toHaveBeenCalled();
+    // A read-only session never resolves plugins.
+    await runAgent(ctx, { ...req, tools: ['Read'] }, { spawn, notify: vi.fn(), plugins });
+    expect(plugins).not.toHaveBeenCalled();
   });
 
   it('numbers request files incrementally', async () => {
@@ -100,7 +131,7 @@ describe('runAgent', () => {
   });
 
   it('on error event, cost is still recorded and AgentError thrown', async () => {
-    const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'boom', totalUsd: 0.7, protocolVersion: 2 })]);
+    const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'boom', totalUsd: 0.7, protocolVersion: 3 })]);
     await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toThrow(AgentError);
     expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(0.7);
   });
@@ -180,16 +211,37 @@ describe('runAgent', () => {
   });
 
   it("an error event with code 'budget' (SDK maxBudgetUsd stop) throws BudgetExceeded, cost recorded", async () => {
-    const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'error_max_budget_usd', code: 'budget', totalUsd: 0.6, protocolVersion: 2 })]);
+    const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'error_max_budget_usd', code: 'budget', totalUsd: 0.6, protocolVersion: 3 })]);
     await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toBeInstanceOf(BudgetExceeded);
     expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(0.6);
   });
 
   it('error event crossing cap throws AgentError', async () => {
     await setState({ budgetUsd: 1 });
-    const f = fake([L({ type: 'error', message: 'boom', totalUsd: 1.5, protocolVersion: 2 })]);
+    const f = fake([L({ type: 'error', message: 'boom', totalUsd: 1.5, protocolVersion: 3 })]);
     await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toThrow(AgentError);
     expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(1.5);
+  });
+});
+
+describe('runAgent unattended rule', () => {
+  const sent = async (c: StageCtx, r: AgentRequest) => {
+    await runAgent(c, r, { spawn: vi.fn(() => fake([result(0.1)]).child), notify: vi.fn() });
+    return JSON.parse(await readFile(join(c.jobDir, 'requests', `${c.stage}-1.json`), 'utf8')).systemPrompt as string;
+  };
+  it('unattended instruction appended outside spec', async () => {
+    const sp = await sent(ctx, req);
+    expect(sp.startsWith('s\n\n')).toBe(true);
+    expect(sp).toContain('no human is present');
+    expect(sp.trimEnd().split('\n').pop()).toContain('/workspace/.anton/jobs/j1/questions.md');
+    expect(sp).not.toContain('{jobId}');
+    // read-only reviewer sessions get it too
+    ctx.stage = 'verify';
+    expect(await sent(ctx, { ...req, tools: ['Read'] })).toContain('no human is present');
+  });
+  it('spec session has no unattended instruction', async () => {
+    ctx.stage = 'spec';
+    expect(await sent(ctx, req)).toBe('s');
   });
 });
 

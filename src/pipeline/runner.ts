@@ -1,6 +1,7 @@
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import { BudgetExceeded, type StageCtx } from '../agent/host-runner.js';
+import { readRegularFile, writeFileAtomic } from '../core/atomic.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
 import { assertOnJobBranch, currentJobId } from '../core/job.js';
 import { acquireLock as defaultAcquireLock } from '../core/lock.js';
@@ -11,10 +12,13 @@ import { loadSecrets, redact, secretsEnvFile } from '../core/secrets.js';
 import { loadState, pause, saveState, transition, type JobState, type PauseReason } from '../core/state.js';
 import {
   ensureImage,
+  MOUNTS_VERSION,
   startContainer as dockerStartContainer,
   stopContainer as dockerStopContainer,
 } from '../docker/container.js';
 import { kitByName } from '../kits/index.js';
+import { pluginsForJob } from '../plugins/session.js';
+import type { LockEntry } from '../plugins/store.js';
 import type { Kit } from '../kits/types.js';
 import { runBaseline as defaultRunBaseline } from '../stages/baseline.js';
 import { runBuild as defaultRunBuild } from '../stages/build.js';
@@ -22,7 +26,7 @@ import { runDeliver as defaultRunDeliver, type DeliverInput } from '../stages/de
 import { failuresPath } from '../stages/qa.js';
 import { PlanSchema, runPlan as defaultRunPlan, type Plan } from '../stages/plan.js';
 import { SpecDocBaseSchema, type SpecDoc } from '../stages/spec.js';
-import { runVerify as defaultRunVerify, type VerifyDeps, type VerifyResult } from '../stages/verify.js';
+import { assertJobDir, runVerify as defaultRunVerify, type VerifyDeps, type VerifyResult } from '../stages/verify.js';
 
 export const containerName = (slug: string) => `anton-${slug}`;
 
@@ -49,7 +53,8 @@ export type RunnerDeps = {
 };
 
 /**
- * Reuse a running `anton-<slug>` container when it runs the kit's image; otherwise start a fresh one
+ * Reuse a running `anton-<slug>` container when it runs the kit's image with the current mounts
+ * (`anton.mounts` label); otherwise start a fresh one
  * (startContainer removes the old one first, e.g. a spec-session container on the fallback image).
  */
 export async function startOrReuseContainer(
@@ -66,9 +71,24 @@ export async function startOrReuseContainer(
   const r = await exec('docker', ['inspect', '-f', '{{.State.Running}}', name]);
   if (r.exitCode === 0 && r.stdout.trim() === 'true') {
     const img = await exec('docker', ['inspect', '-f', '{{.Config.Image}}', name]);
-    if (img.exitCode === 0 && img.stdout.trim() === image) return name;
+    // A container from before the plugin-store mount lacks the label and is replaced.
+    const mounts = await exec('docker', ['inspect', '-f', '{{index .Config.Labels "anton.mounts"}}', name]);
+    if (img.exitCode === 0 && img.stdout.trim() === image && mounts.exitCode === 0 && mounts.stdout.trim() === MOUNTS_VERSION) {
+      return name;
+    }
   }
   return dockerStartContainer(slug, repo, image, exec, { envFile });
+}
+
+/** Merge the plugin pins this job can load into `<jobDir>/run-record.json`, keeping other keys. */
+async function writeRunRecord(repo: string, jobDir: string, used: LockEntry[]): Promise<void> {
+  // The container can write the job folder: never follow a planted symlink to a host file.
+  await assertJobDir(repo, jobDir);
+  const path = join(jobDir, 'run-record.json');
+  const raw = await readRegularFile(path);
+  const record = (raw === undefined ? {} : JSON.parse(raw)) as Record<string, unknown>;
+  record.plugins = used.map(({ name, version, commit, sha256 }) => ({ name, version, commit, sha256 }));
+  await writeFileAtomic(path, `${JSON.stringify(record, null, 2)}\n`);
 }
 
 async function readJson(path: string): Promise<unknown> {
@@ -159,12 +179,15 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       let spec: SpecDoc | undefined;
       let plan: Plan | undefined;
       const getSpec = async () => (spec ??= SpecDocBaseSchema.parse(await readJson(join(jobDir, 'spec.approved.json'))));
-      const kit = deps.kit ?? kitByName((await getSpec()).kit);
+      const kitName = (await getSpec()).kit;
+      const kit = deps.kit ?? kitByName(kitName);
+      // Before any container or spend: a listed plugin that is not installed fails here, not mid-stage.
+      await writeRunRecord(repo, jobDir, await pluginsForJob(kitName));
       startedContainer = true;
       const container = await startContainer(project, repo, kit);
       secrets = await loadSecrets(project);
       const getPlan = async () => (plan ??= PlanSchema.parse(await readJson(join(jobDir, 'plan.json'))));
-      const ctx = (stage: string): StageCtx => ({ project, repo, container, jobDir, state, stage, secrets });
+      const ctx = (stage: string): StageCtx => ({ project, repo, container, jobDir, state, stage, secrets, kit: kitName });
       let lastVerify: DeliverInput;
 
       while (ACTIVE_STAGES.includes(state.stage)) {
