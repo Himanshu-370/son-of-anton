@@ -105,6 +105,53 @@ Each acceptance check shows what it was proven against. A service is `real` only
 
 `anton secrets edit <project>` opens a private file (`~/anton/secrets/<project>.env`, mode 0600) of `KEY=value` lines, for example `STRIPE_SECRET_KEY=your-key-here`. Values follow Docker env-file rules: `KEY=value`, no quotes, no spaces around `=`, no `export`. The values reach the job container as environment variables only. Every file anton writes (logs, evidence, `REPORT.md`) has those values replaced with a placeholder before it is saved.
 
+## Plugins
+
+Plugins (marketplace skills and tools) let agents use extra skills, for example a test-driven-development skill in build. Nothing loads unless you list it.
+
+- `anton plugins add <plugin>@<owner>/<repo>` (or `<plugin>@<https git url>`) installs a plugin from its marketplace repo and pins it. Only relative-path, `github` and `url` plugin sources are supported; symlinks, sources that escape the repo, and silent re-pins are refused.
+- `anton plugins list` shows what is pinned and what each stage, kit and role loads. It marks `NOT INSTALLED` entries and roles whose list is ignored.
+- `anton plugins update [name]` fetches the new version into a staging area. A read-only reviewer agent (budget $1) reads the diff of the hooks, scripts and MCP files, and its findings are printed. The pin moves only if you type `y` or `yes` in a terminal; anything else keeps the old version.
+
+Pins live in `~/anton/plugins.lock` (name, marketplace, version, commit, sha256). Each pinned version sits in its own folder, `~/anton/plugins/<marketplace>/<plugin>/<commit>/`, and is mounted read-only in the container at `/opt/anton/plugins`. If a plugin is missing or was edited, the job pauses with an error. Each job's `run-record.json` lists the plugin versions it used.
+
+### Choosing what loads: `~/anton/config.yaml`
+
+```yaml
+stages:
+  spec:   [superpowers:brainstorming]
+  plan:   [superpowers:writing-plans]
+  build:  [superpowers:test-driven-development, superpowers:systematic-debugging]
+  verify: [superpowers:verification-before-completion, code-review]
+kits:
+  web:    [frontend-design, webapp-testing]
+roles:
+  frontend: [some-plugin]
+```
+
+An entry is `plugin` (the whole plugin) or `plugin:skill` (one skill). `kits` apply in plan, build and verify. Each session gets only the plugins and skills it resolves to. Read-only roles (code reviewer, security reviewer, browser tester, mapper, plugin reviewer) never load plugins, whatever the config says. MCP servers come only from plugins listed for that stage, kit or role; a repo's own `.mcp.json` never loads.
+
+### Unattended stages
+
+Only spec talks to you. In every other stage no human is present, so the agent may not ask questions (the ask-the-user tool is blocked). It writes questions and the assumptions it made to `.anton/jobs/<jobId>/questions.md` and carries on. `REPORT.md` lists them under `## Questions and assumptions`: read them before you approve.
+
+### Trust
+
+Plugin code runs inside the job container with the same access as the builder agent: your repo and any project secrets. Only add plugins you trust, and read the review on every update.
+
+### Caveman and Ponytail (optional, off by default)
+
+Two community plugins aim to cut tokens: Caveman (`caveman@JuliusBrussee/caveman`) and Ponytail (`ponytail@DietrichGebert/ponytail`). If you want to try them, add them with `anton plugins add` and list them under the builder roles only:
+
+```yaml
+roles:
+  frontend: [caveman, ponytail]
+  backend:  [caveman, ponytail]
+  infra:    [caveman, ponytail]
+```
+
+Their effect on quality and cost has not been measured yet; that comes with the Phase 5 bench.
+
 ## Where things live
 
 - Projects: `~/anton/projects/<name>/` (override the root with `ANTON_HOME`), each a git repo with one commit per plan task.
@@ -121,6 +168,7 @@ npm test                                   # unit tests, no Docker or API needed
 ANTON_E2E=1 npm run test:e2e               # also runs Docker-only e2e tests
 ANTON_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/new-project.e2e.test.ts
 ANTON_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/change-job.e2e.test.ts   # adopts a tiny repo, runs a change
+ANTON_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/plugins.e2e.test.ts      # a builder session loads a fixture plugin
 ANTON_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/web-job.e2e.test.ts      # builds a static web page, checks Kit: web and a screenshot in REPORT.md
 ```
 
