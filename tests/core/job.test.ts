@@ -42,6 +42,14 @@ describe('config budget', () => {
   });
 });
 
+describe('invalid config', () => {
+  it('invalid config.yaml leaves no project directory behind', async () => {
+    await writeFile(join(process.env.ANTON_HOME!, 'config.yaml'), 'bogus: 1\n');
+    await expect(createNewProject('A CLI that cleans Downloads')).rejects.toThrow(/Invalid ~\/anton\/config\.yaml/);
+    await expect(stat(join(process.env.ANTON_HOME!, 'projects'))).rejects.toThrow();
+  });
+});
+
 describe('createNewProject', () => {
   it('creates repo, job folder and initial state', async () => {
     const p = await createNewProject('A CLI that cleans Downloads');

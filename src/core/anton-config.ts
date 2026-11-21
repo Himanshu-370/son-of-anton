@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
-import type { Role } from './config.js';
+import { DEFAULTS, type Role } from './config.js';
 import { antonHome } from './paths.js';
 
 const entry = z.string().regex(/^[a-z0-9][a-z0-9-]*(:[a-z0-9][a-z0-9-]*)?$/);
@@ -56,7 +56,7 @@ export async function loadAntonConfig(home = antonHome()): Promise<AntonConfig> 
 
 export function budgetSettings(cfg: AntonConfig): { defaultUsd: number; allowances: typeof DEFAULT_ALLOWANCES; taskBudgets: boolean } {
   return {
-    defaultUsd: cfg.budget?.defaultUsd ?? 10,
+    defaultUsd: cfg.budget?.defaultUsd ?? DEFAULTS.budgetUsd,
     allowances: cfg.budget?.allowances ?? DEFAULT_ALLOWANCES,
     taskBudgets: cfg.budget?.taskBudgets ?? true,
   };

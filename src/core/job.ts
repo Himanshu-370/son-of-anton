@@ -19,6 +19,8 @@ export async function createNewProject(
   description: string,
   opts: { budgetUsd?: number } = {},
 ): Promise<NewProject> {
+  // Read config before any filesystem work: an invalid config.yaml must leave nothing behind.
+  const budgetUsd = opts.budgetUsd ?? budgetSettings(await loadAntonConfig()).defaultUsd;
   const name = await uniqueName(slugify(description));
   const repoPath = projectDir(name);
   const jobId = '1-init';
@@ -33,7 +35,7 @@ export async function createNewProject(
     stage: 'spec',
     round: 0,
     maxRounds: DEFAULTS.maxRounds,
-    budgetUsd: opts.budgetUsd ?? budgetSettings(await loadAntonConfig()).defaultUsd,
+    budgetUsd: budgetUsd,
     spentUsd: 0,
     warned80: false,
     completedTasks: [],
@@ -105,6 +107,7 @@ export async function createChangeJob(
   description: string,
   opts: { budgetUsd?: number } = {},
 ): Promise<NewProject & { branch: string }> {
+  const budgetUsd = opts.budgetUsd ?? budgetSettings(await loadAntonConfig()).defaultUsd;
   const { repoPath } = await getProject(project);
   let n = 1;
   try {
@@ -141,7 +144,7 @@ export async function createChangeJob(
       stage: 'spec',
       round: 0,
       maxRounds: DEFAULTS.maxRounds,
-      budgetUsd: opts.budgetUsd ?? budgetSettings(await loadAntonConfig()).defaultUsd,
+      budgetUsd: budgetUsd,
       spentUsd: 0,
       warned80: false,
       completedTasks: [],
