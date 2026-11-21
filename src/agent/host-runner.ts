@@ -8,6 +8,7 @@ import { redact } from '../core/secrets.js';
 import { saveState, type JobState } from '../core/state.js';
 import { pluginsForSession } from '../plugins/session.js';
 import { loadPrompt } from '../stages/prompts.js';
+import { priceFor } from './pricing.js';
 import { AgentEventSchema, PROTOCOL_VERSION, type AgentRequest } from './protocol.js';
 
 export type StageCtx = {
@@ -84,6 +85,11 @@ async function nextRequestFile(jobDir: string, stage: string): Promise<string> {
   return `${stage}-${n}.json`;
 }
 
+/** Tokens the session may spend on input at its model's price for the dollar cap, capped at 5M. */
+export function taskBudgetTokens(model: string, capUsd: number): number {
+  return Math.min(5_000_000, Math.floor((capUsd * 1e6) / priceFor(model).inPerM));
+}
+
 export async function runAgent(
   ctx: StageCtx,
   req: AgentRequest,
@@ -92,7 +98,8 @@ export async function runAgent(
   if (remainingUsd(ctx.state) <= 0) throw new BudgetExceeded('no budget remaining');
   // P4b-R1: only runner stages have an allowance; any other stage is limited by the job cap alone.
   const group = stageGroup(ctx.stage);
-  const allowances = group ? budgetSettings(await loadAntonConfig()).allowances : undefined;
+  const settings = budgetSettings(await loadAntonConfig());
+  const allowances = group ? settings.allowances : undefined;
   const specWarning = () =>
     `Spec has used its ${allowances!.spec}% share (${usd(allowanceUsage(ctx.state, 'spec', allowances).limitUsd)}); continuing up to the job cap.`;
   const overAllowance = (s: JobState) => {
@@ -114,6 +121,8 @@ export async function runAgent(
     budgetUsd = Math.min(budgetUsd, left);
   }
   req = { ...req, budgetUsd };
+  const tokens = taskBudgetTokens(req.model, budgetUsd);
+  if (settings.taskBudgets && tokens >= 1) req = { ...req, taskBudgetTokens: tokens };
   const spawn = deps.spawn ?? ((c, a) => execIn(c, a) as unknown as ChildLike);
   const notify = deps.notify ?? defaultNotify;
   if (req.tools) {

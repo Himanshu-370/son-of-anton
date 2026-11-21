@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdtemp, readFile, readdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { runAgent, BudgetExceeded, AgentError, AllowanceExceeded, type StageCtx, type ChildLike } from '../../src/agent/host-runner.js';
@@ -347,5 +347,27 @@ describe('usage tracking', () => {
   it('cache hit rate formula and empty case', () => {
     expect(cacheHitRate(u(100, 999, 620, 280))).toBeCloseTo(0.62);
     expect(cacheHitRate(u(0, 50, 0, 0))).toBeUndefined();
+  });
+
+  describe('task budgets', () => {
+    const sonnet = { ...req, model: 'claude-sonnet-5-5' };
+    const sent = async () => JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8')).taskBudgetTokens;
+    const go = (r: AgentRequest) => runAgent(ctx, r, { spawn: () => fake([result(0)]).child, notify: vi.fn() });
+
+    it('task budget follows the clamped dollar cap', async () => {
+      await go({ ...sonnet, budgetUsd: 3 });
+      expect(await sent()).toBe(1_500_000);
+    });
+
+    it('task budget is capped at 5M', async () => {
+      await go({ ...sonnet, budgetUsd: 50 });
+      expect(await sent()).toBe(5_000_000);
+    });
+
+    it('taskBudgets: false sends no task budget', async () => {
+      await writeFile(join(process.env.ANTON_HOME!, 'config.yaml'), 'budget:\n  taskBudgets: false\n');
+      await go({ ...sonnet, budgetUsd: 3 });
+      expect(await sent()).toBeUndefined();
+    });
   });
 });
