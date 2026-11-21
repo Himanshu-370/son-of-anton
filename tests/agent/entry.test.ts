@@ -284,9 +284,9 @@ describe('entry main', () => {
     }
   });
 
-  it('builder keeps project settings; reviewer keeps none', async () => {
+  it('no session loads repo settings: builder and reviewer both get settingSources []', async () => {
     const builder = await run(baseReq, async function* () { yield success(0); });
-    expect(builder.calls[0]!.options.settingSources).toEqual(['project']);
+    expect(builder.calls[0]!.options.settingSources).toEqual([]);
     const reviewer = await run({ ...baseReq, tools: ['Read', 'Grep'] }, async function* () { yield success(0); });
     expect(reviewer.calls[0]!.options.settingSources).toEqual([]);
   });

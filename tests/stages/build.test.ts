@@ -156,6 +156,7 @@ describe('runBuild', () => {
       const f = fakes();
       await runBuild(ctx, spec, multi, undefined, f.deps);
       const build = await loadPrompt('build.md');
+      expect(build).toContain('CLAUDE.md'); // repo settings are not auto-loaded (P4a-R6)
       for (const r of f.reqs) {
         expect(r.systemPrompt).toBe(`${build}\n\n${await loadPrompt(`role-${r.role}.md`)}`);
       }

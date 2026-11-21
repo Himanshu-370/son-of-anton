@@ -129,7 +129,7 @@ roles:
   frontend: [some-plugin]
 ```
 
-An entry is `plugin` (the whole plugin) or `plugin:skill` (one skill). A `plugin:skill` entry hides the plugin's other skills, but that plugin's hooks, agents and commands still run in that session; only its MCP servers are left out. A `plugin:skill` entry naming a skill the plugin does not have stops the job with an error. `kits` apply in plan, build and verify. Each session gets only the plugins and skills it resolves to. Read-only roles (code reviewer, security reviewer, browser tester, mapper, plugin reviewer) never load plugins, whatever the config says. MCP servers come only from plugins listed for that stage, kit or role; a repo's own `.mcp.json` never loads.
+An entry is `plugin` (the whole plugin) or `plugin:skill` (one skill). A `plugin:skill` entry hides the plugin's other skills, but that plugin's hooks, agents and commands still run in that session; only its MCP servers are left out. A `plugin:skill` entry naming a skill the plugin does not have stops the job with an error. `kits` apply in plan, build and verify. Each session gets only the plugins and skills it resolves to. Read-only roles (code reviewer, security reviewer, browser tester, mapper, plugin reviewer) never load plugins, whatever the config says. MCP servers come only from plugins listed for that stage, kit or role. A repo's own `.claude/settings.json`, `.claude/skills` and `.mcp.json` never load in any session; builders are told to read the repo's `CLAUDE.md` and `AGENTS.md` themselves.
 
 ### Unattended stages
 

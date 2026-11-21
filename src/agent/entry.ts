@@ -58,8 +58,9 @@
  *   paths with `skipMcpDiscovery: true` (so a plugin's own .mcp.json is not read in the container),
  *   `skills: req.skills ?? []` (a context filter: only listed `plugin:skill` names are enabled) and
  *   `disallowedTools: ['AskUserQuestion']` (no one answers mid-run questions; the spec stage asks
- *   through its own loop). Sessions without `tools` get `settingSources: ['project']`: the repo's
- *   CLAUDE.md is kept, user and local settings are not loaded.
+ *   through its own loop). Every session, builders included, gets `settingSources: []` (ruling P4a-R6):
+ *   a repo's own `.claude/settings.json`, `.claude/skills` and `.mcp.json` never load, so a repo cannot
+ *   turn on unlisted plugins. build.md tells builders to read the repo's CLAUDE.md and AGENTS.md instead.
  * - SDK budget stop: an `error_max_budget_usd` result becomes an error event with `code: 'budget'`,
  *   which the host maps to BudgetExceeded (job pauses as budget_cap) rather than a generic error.
  * - Protocol version: result/error events carry `protocolVersion: PROTOCOL_VERSION`; the host refuses
@@ -103,7 +104,7 @@ export function buildOptions(req: AgentRequest): Options {
     mcpServers: (req.mcpServers ?? {}) as NonNullable<Options['mcpServers']>,
     plugins: (req.plugins ?? []).map((path) => ({ type: 'local' as const, path, skipMcpDiscovery: true })),
     skills: req.skills ?? [],
-    settingSources: ['project'],
+    settingSources: [],
   };
   if (req.tools) {
     options.tools = req.tools;
@@ -112,7 +113,6 @@ export function buildOptions(req: AgentRequest): Options {
     options.mcpServers = {};
     options.plugins = [];
     options.skills = [];
-    options.settingSources = [];
   }
   if (req.resumeSessionId) options.resume = req.resumeSessionId;
   if (req.outputSchema) options.outputFormat = { type: 'json_schema', schema: req.outputSchema };
