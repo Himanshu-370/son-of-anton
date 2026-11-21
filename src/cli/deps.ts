@@ -3,7 +3,7 @@ import { mkdirSync, openSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
-import type { StageCtx } from '../agent/host-runner.js';
+import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
 import { cloneShallow as gitCloneShallow, listFiles as gitListFiles } from '../core/git.js';
 import { currentJobId } from '../core/job.js';
@@ -49,6 +49,10 @@ export type CliDeps = {
   exit?: (code: number) => void;
   /** Shallow git clone (`anton plugins add`); returns the HEAD sha. */
   cloneShallow?: (url: string, dest: string) => Promise<string>;
+  /** Agent session runner (`anton plugins update`'s review). */
+  runAgent?: typeof defaultRunAgent;
+  /** Whether stdin is a terminal; when not, `anton plugins update` declines without asking. */
+  isTTY?: () => boolean;
 };
 
 export type Resolved = Required<Omit<CliDeps, 'exec'>>;
@@ -125,6 +129,8 @@ export function resolveDeps(d: CliDeps = {}): Resolved {
     onSigint: d.onSigint ?? defaultOnSigint,
     exit: d.exit ?? ((code) => { process.exit(code); }),
     cloneShallow: d.cloneShallow ?? gitCloneShallow,
+    runAgent: d.runAgent ?? defaultRunAgent,
+    isTTY: d.isTTY ?? (() => process.stdin.isTTY === true),
   };
 }
 

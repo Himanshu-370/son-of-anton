@@ -10,7 +10,7 @@ const entries = z.array(entry);
 
 const ROLES = [
   'pm', 'tech_lead', 'frontend', 'backend', 'infra', 'qa',
-  'code_reviewer', 'security_reviewer', 'coach', 'mapper', 'browser_tester',
+  'code_reviewer', 'security_reviewer', 'coach', 'mapper', 'browser_tester', 'plugin_reviewer',
 ] as const satisfies readonly Role[];
 
 export const AntonConfigSchema = z
@@ -52,7 +52,7 @@ export const STAGE_GROUP: Record<string, StageGroup> = {
   deliver: 'verify',
 };
 
-export const READ_ONLY_ROLES: Role[] = ['code_reviewer', 'security_reviewer', 'browser_tester', 'mapper'];
+export const READ_ONLY_ROLES: Role[] = ['code_reviewer', 'security_reviewer', 'browser_tester', 'mapper', 'plugin_reviewer'];
 
 export function resolveEntries(
   cfg: AntonConfig,

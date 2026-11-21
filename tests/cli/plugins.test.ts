@@ -1,9 +1,10 @@
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CliDeps } from '../../src/cli/deps.js';
-import { pluginsAddCommand, pluginsListCommand } from '../../src/cli/commands/plugins.js';
+import { pluginsAddCommand, pluginsListCommand, pluginsUpdateCommand } from '../../src/cli/commands/plugins.js';
+import { readLock } from '../../src/plugins/store.js';
 import { fakeClone, marketplace } from '../plugins/fixture.js';
 
 let home: string;
@@ -56,5 +57,36 @@ describe('anton plugins', () => {
     const l = harness();
     expect(await pluginsListCommand(l.deps)).toBe(0);
     expect(l.text()).toContain('No plugins installed');
+  });
+
+  it('update with no name updates every locked plugin, one at a time', async () => {
+    const map: Record<string, string> = {
+      'https://github.com/acme/mkt.git': await marketplace('cave'),
+      'https://github.com/acme/other.git': await marketplace('bat'),
+    };
+    const h = harness({ cloneShallow: fakeClone(map) });
+    expect(await pluginsAddCommand('cave@acme/mkt', h.deps)).toBe(0);
+    expect(await pluginsAddCommand('bat@acme/other', h.deps)).toBe(0);
+    const before = await readLock();
+    map['https://github.com/acme/mkt.git'] = await marketplace('cave', { plugin: { 'run.sh': 'echo 2\n' }, version: '2.0.0' });
+    const runAgent = vi.fn(async (ctx: { state: unknown }) => ({ output: { verdict: 'ok', findings: [] }, sessionId: 's', state: ctx.state, totalUsd: 0 }));
+    const u = harness({
+      cloneShallow: fakeClone(map), isTTY: () => true, ask: async () => ['y'],
+      ensureImage: async () => 'img', startContainer: async (slug) => `anton-${slug}`, stopContainer: async () => undefined,
+      runAgent: runAgent as unknown as CliDeps['runAgent'],
+    });
+    expect(await pluginsUpdateCommand(undefined, u.deps)).toBe(0);
+    expect(runAgent).toHaveBeenCalledTimes(1);
+    expect(u.text()).toContain('bat is up to date');
+    expect(u.text()).toContain('Updated cave');
+    const after = await readLock();
+    expect(after.find((e) => e.name === 'bat')).toEqual(before.find((e) => e.name === 'bat'));
+    expect(after.find((e) => e.name === 'cave')!.version).toBe('2.0.0');
+  });
+
+  it('update of an unknown plugin exits 1', async () => {
+    const h = harness();
+    expect(await pluginsUpdateCommand('ghost', h.deps)).toBe(1);
+    expect(h.errText()).toContain('Plugin ghost is not installed');
   });
 });

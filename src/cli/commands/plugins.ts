@@ -3,6 +3,7 @@ import { loadAntonConfig, READ_ONLY_ROLES } from '../../core/anton-config.js';
 import type { Role } from '../../core/config.js';
 import { antonHome } from '../../core/paths.js';
 import { installPlugin, readLock } from '../../plugins/store.js';
+import { updatePlugin } from '../../plugins/update.js';
 import { guard, resolveDeps, type CliDeps } from '../deps.js';
 
 /** `anton plugins add <specifier>`: install, pin, and show how to enable it. */
@@ -45,6 +46,20 @@ export async function pluginsListCommand(deps: CliDeps = {}): Promise<number> {
       }
     }
     d.out(lines.length ? `Loaded by (config.yaml):\n${lines.join('\n')}` : 'No plugins listed in config.yaml.');
+    return 0;
+  });
+}
+
+/** `anton plugins update [name]`: review and, on a yes, re-pin the named plugin or every locked one, one at a time. */
+export async function pluginsUpdateCommand(name: string | undefined, deps: CliDeps = {}): Promise<number> {
+  const d = resolveDeps(deps);
+  return guard(d, async () => {
+    const names = name ? [name] : (await readLock()).map((e) => e.name);
+    if (!names.length) d.out('No plugins installed.');
+    for (const n of names) {
+      const r = await updatePlugin(n, d);
+      d.out(r === 'up_to_date' ? `${n} is up to date` : r === 'updated' ? `Updated ${n}` : `Kept ${n} at its pinned version`);
+    }
     return 0;
   });
 }

@@ -256,6 +256,18 @@ export async function changedFilesSince(repo: string, sha: string): Promise<stri
   return out.split('\n').map((l) => l.trim()).filter(Boolean);
 }
 
+/**
+ * Unified diff of two paths outside any repo (`git diff --no-index a b`, run in `cwd`; either side may
+ * be `/dev/null`). Exit 1 means "they differ", not failure.
+ */
+export async function diffNoIndex(cwd: string, a: string, b: string): Promise<string> {
+  const r = await execa('git', [...SAFE, 'diff', '--no-index', '--no-color', '--no-ext-diff', '--', a, b], {
+    cwd, env: gitEnv(), extendEnv: false, reject: false,
+  });
+  if (r.exitCode !== 0 && r.exitCode !== 1) throw new Error(`git diff --no-index failed: ${String(r.stderr)}`);
+  return String(r.stdout);
+}
+
 /** The commit sha a ref (tag, branch, sha) points to. Throws if it does not resolve to a commit. */
 export async function revParse(repo: string, ref: string): Promise<string> {
   if (ref === '' || ref.startsWith('-') || /\s/.test(ref)) throw new Error(`invalid ref for revParse: ${JSON.stringify(ref)}`);
