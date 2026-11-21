@@ -76,7 +76,7 @@ export type UpdateDeps = {
   cloneShallow: Clone;
   out: (line: string) => void;
   ask: (questions: string[]) => Promise<string[]>;
-  /** False (stdin not a terminal): the update is declined without asking. */
+  /** False (stdin not a terminal): the update is declined before staging, without a review. */
   isTTY: () => boolean;
   ensureImage: () => Promise<string>;
   startContainer: (slug: string, repo: string, image: string) => Promise<string>;
@@ -112,6 +112,11 @@ export async function updatePlugin(name: string, d: UpdateDeps): Promise<'up_to_
   const home = d.home ?? antonHome();
   const pinned = (await readLock(home)).find((e) => e.name === name);
   if (!pinned) throw new Error(`Plugin ${name} is not installed`);
+  // Ruling P4a-R5: no one can accept without a terminal, so spend nothing (no clone, container or review).
+  if (!d.isTTY()) {
+    d.out('Run anton plugins update in a terminal to review and accept updates.');
+    return 'declined';
+  }
   const reviews = join(home, 'plugins', '.reviews');
   const staging = join(reviews, `.staging-${randomUUID()}`);
   let reviewDir: string | undefined;
@@ -164,10 +169,6 @@ export async function updatePlugin(name: string, d: UpdateDeps): Promise<'up_to_
     d.out(`Security review: ${review.verdict}`);
     for (const f of review.findings) d.out(`  [${f.severity}] ${clean(f.file)}: ${clean(f.note)}`);
 
-    if (!d.isTTY()) {
-      d.out(`Not a terminal: kept ${name} at ${label(pinned)}.`);
-      return 'declined';
-    }
     const [answer] = await d.ask([`Accept the update to ${name} ${label(pinned)} → ${label(next)}? [y/N]`]);
     if (!/^(y|yes)$/i.test((answer ?? '').trim())) return 'declined';
 

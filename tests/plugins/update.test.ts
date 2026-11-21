@@ -143,12 +143,17 @@ describe('updatePlugin', () => {
     expect(await readLock(home)).toEqual([s.old]);
   });
 
-  it('non-TTY declines without asking', async () => {
+  it('non-TTY declines before staging or review', async () => {
     const s = await setup({ tty: false, answer: 'y' });
     expect(await updatePlugin('cave', s.deps)).toBe('declined');
+    expect(s.text()).toContain('Run anton plugins update in a terminal to review and accept updates.');
+    expect(s.deps.cloneShallow).not.toHaveBeenCalled();
+    expect(s.deps.ensureImage).not.toHaveBeenCalled();
+    expect(s.deps.startContainer).not.toHaveBeenCalled();
+    expect(s.deps.runAgent).not.toHaveBeenCalled();
     expect(s.deps.ask).not.toHaveBeenCalled();
     expect(await readLock(home)).toEqual([s.old]);
-    expect(await readdir(reviewsDir())).toEqual([]);
+    expect(await readdir(reviewsDir()).catch(() => [])).toEqual([]);
   });
 
   it('review container is removed even when the review throws', async () => {
