@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { cp, lstat, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join, posix, relative } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { z } from 'zod';
 import type { runAgent as defaultRunAgent, StageCtx } from '../agent/host-runner.js';
@@ -28,10 +28,19 @@ const REVIEW_JSON_SCHEMA = z.toJSONSchema(ReviewSchema) as Record<string, unknow
 const REVIEW_SLUG = 'plugin-review';
 const REVIEW_CONTAINER = `anton-${REVIEW_SLUG}`;
 
-/** Files that can run code; only these get a patch, the rest are listed by name. */
+/** Files that can run code or steer the agent; only these get a patch, the rest are listed by name. */
 const CODE_FILE = (p: string) =>
-  p.startsWith('hooks/') || p.startsWith('bin/') || p === '.claude-plugin/plugin.json' ||
-  /(^|\/)\.mcp\.json$/.test(p) || /\.(sh|js|mjs|cjs|ts|py)$/.test(p);
+  p.startsWith('hooks/') || p.startsWith('bin/') || p.startsWith('commands/') || p.startsWith('agents/') ||
+  p === '.claude-plugin/plugin.json' || /(^|\/)\.(mcp|lsp)\.json$/.test(p) || /\.(sh|js|mjs|cjs|ts|py)$/.test(p);
+
+const isExec = async (dir: string, p: string) => ((await lstat(join(dir, p))).mode & 0o111) !== 0;
+
+/** Hook file paths named by plugin.json `hooks` (a path or a list of paths; inline hooks are in plugin.json itself). */
+async function manifestHookPaths(dir: string): Promise<string[]> {
+  const m = await readFile(join(dir, '.claude-plugin', 'plugin.json'), 'utf8').then((t) => JSON.parse(t) as unknown, () => undefined);
+  const h = m && typeof m === 'object' ? (m as { hooks?: unknown }).hooks : undefined;
+  return (Array.isArray(h) ? h : [h]).filter((x): x is string => typeof x === 'string').map((x) => posix.normalize(x));
+}
 
 /** Text from the plugin or the agent, safe to print: no ANSI sequences or control characters. */
 const clean = (s: string) => stripVTControlCharacters(s).replace(/[\u0000-\u001f\u007f-\u009f]/g, '');
@@ -58,14 +67,20 @@ export async function pluginDiff(
   const added = [...after].filter((p) => !before.has(p)).sort();
   const removed = [...before].filter((p) => !after.has(p)).sort();
   const changed: string[] = [];
+  const exec = new Set<string>();
+  for (const p of before) if (await isExec(oldDir, p)) exec.add(p);
+  for (const p of after) if (await isExec(newDir, p)) exec.add(p);
   for (const p of [...after].filter((x) => before.has(x)).sort()) {
     const [a, b] = await Promise.all([readFile(join(oldDir, p)), readFile(join(newDir, p))]);
-    if (!a.equals(b)) changed.push(p);
+    // A mode change (e.g. a file made executable) counts as a change.
+    if (!a.equals(b) || (await isExec(oldDir, p)) !== (await isExec(newDir, p))) changed.push(p);
   }
+  const hookPaths = new Set([...await manifestHookPaths(oldDir), ...await manifestHookPaths(newDir)]);
+  const isCode = (p: string) => CODE_FILE(p) || exec.has(p) || hookPaths.has(p);
   const cwd = dirname(oldDir);
   const side = (dir: string, p: string, present: boolean) => (present ? relative(cwd, join(dir, p)) : '/dev/null');
   const patches: string[] = [];
-  for (const p of [...added, ...removed, ...changed].filter(CODE_FILE).sort()) {
+  for (const p of [...added, ...removed, ...changed].filter(isCode).sort()) {
     patches.push(await diffNoIndex(cwd, side(oldDir, p, before.has(p)), side(newDir, p, after.has(p))));
   }
   return { added, removed, changed, patch: patches.join('') };
@@ -96,7 +111,7 @@ function renderPrompt(pinned: LockEntry, next: LockEntry, d: Awaited<ReturnType<
     '',
     fenceText(JSON.stringify({ added: d.added, removed: d.removed, changed: d.changed }, null, 2), 'json'),
     '',
-    '## Diff of hooks, scripts, bin and MCP/plugin manifests',
+    '## Diff of hooks, scripts, bin, commands, agents, executable files and MCP/LSP/plugin manifests',
     '',
     'Full trees: `/workspace/old/` (pinned) and `/workspace/new/` (staged). Full diff: `/workspace/diff.patch`.',
     '',
@@ -165,7 +180,7 @@ export async function updatePlugin(name: string, d: UpdateDeps): Promise<'up_to_
     d.out(`  added:   ${list(diff.added)}`);
     d.out(`  removed: ${list(diff.removed)}`);
     d.out(`  changed: ${list(diff.changed)}`);
-    d.out(`  diff of hooks, scripts and MCP files: ${join(reviewDir, 'diff.patch')}`);
+    d.out(`  diff of code files (hooks, scripts, commands, agents, manifests): ${join(reviewDir, 'diff.patch')}`);
     d.out(`Security review: ${review.verdict}`);
     for (const f of review.findings) d.out(`  [${f.severity}] ${clean(f.file)}: ${clean(f.note)}`);
 

