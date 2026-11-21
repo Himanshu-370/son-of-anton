@@ -85,6 +85,9 @@ async function nextRequestFile(jobDir: string, stage: string): Promise<string> {
   return `${stage}-${n}.json`;
 }
 
+/** The API rejects a smaller `task_budget.total` (400); below it the dollar cap alone applies. */
+export const TASK_BUDGET_MIN = 20_000;
+
 /** Tokens the session may spend on input at its model's price for the dollar cap, capped at 5M. */
 export function taskBudgetTokens(model: string, capUsd: number): number {
   return Math.min(5_000_000, Math.floor((capUsd * 1e6) / priceFor(model).inPerM));
@@ -122,7 +125,7 @@ export async function runAgent(
   }
   req = { ...req, budgetUsd };
   const tokens = taskBudgetTokens(req.model, budgetUsd);
-  if (settings.taskBudgets && tokens >= 1) req = { ...req, taskBudgetTokens: tokens };
+  if (settings.taskBudgets && tokens >= TASK_BUDGET_MIN) req = { ...req, taskBudgetTokens: tokens };
   const spawn = deps.spawn ?? ((c, a) => execIn(c, a) as unknown as ChildLike);
   const notify = deps.notify ?? defaultNotify;
   if (req.tools) {

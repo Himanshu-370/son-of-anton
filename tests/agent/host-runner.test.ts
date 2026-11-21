@@ -364,6 +364,16 @@ describe('usage tracking', () => {
       expect(await sent()).toBe(5_000_000);
     });
 
+    it('a task budget under the API minimum (20,000 tokens) is not sent (I3)', async () => {
+      await go({ ...sonnet, budgetUsd: 0.03 }); // 15,000 tokens at sonnet's input price
+      expect(await sent()).toBeUndefined();
+    });
+
+    it('a task budget of exactly 20,000 tokens is sent (I3)', async () => {
+      await go({ ...sonnet, budgetUsd: 0.04 });
+      expect(await sent()).toBe(20_000);
+    });
+
     it('taskBudgets: false sends no task budget', async () => {
       await writeFile(join(process.env.ANTON_HOME!, 'config.yaml'), 'budget:\n  taskBudgets: false\n');
       await go({ ...sonnet, budgetUsd: 3 });
