@@ -19,6 +19,16 @@ describe('lessons store', () => {
     expect(await readLessons('web', home)).toEqual([l]);
   });
 
+  it('the first lesson commits a .gitignore that keeps proposals.jsonl untracked', async () => {
+    const l = await addLesson('web', 'Run the linter first', home);
+    await writeFile(join(home, 'lessons', 'proposals.jsonl'), '{}\n');
+    const git = (...a: string[]) => execa('git', a, { cwd: join(home, 'lessons') });
+    expect(await readFile(join(home, 'lessons', '.gitignore'), 'utf8')).toBe('proposals.jsonl\n');
+    expect((await git('show', '--name-only', '--format=', 'HEAD')).stdout.split('\n').sort()).toEqual(['.gitignore', 'web.md']);
+    expect((await git('status', '--porcelain')).stdout).toBe('');
+    expect(await log()).toEqual([`lessons: add ${l.id} to web`]);
+  });
+
   it('21st lesson is refused with the remove hint', async () => {
     for (let i = 0; i < 20; i++) await addLesson('web', `lesson ${i}`, home);
     await expect(addLesson('web', 'one too many', home)).rejects.toThrow('web.md has 20 lessons — remove one with anton lessons remove <id>');

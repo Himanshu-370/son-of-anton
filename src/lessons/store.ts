@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../core/atomic.js';
 import type { Role } from '../core/config.js';
@@ -70,8 +70,15 @@ export async function addLesson(file: string, text: string, home = antonHome()):
     throw new Error(`${file}.md has ${MAX_LESSONS_PER_FILE} lessons — remove one with anton lessons remove <id>`);
   }
   await initRepoIfMissing(dir(home));
+  const paths = [`${file}.md`];
+  // The review queue lives in the same folder; keep it out of the lessons history.
+  const ignore = join(dir(home), '.gitignore');
+  if (!(await lstat(ignore).then(() => true, () => false))) {
+    await writeFileAtomic(ignore, 'proposals.jsonl\n');
+    paths.push('.gitignore');
+  }
   await writeFileAtomic(path(file, home), render([...all, lesson]));
-  await commitPaths(dir(home), [`${file}.md`], `lessons: add ${lesson.id} to ${file}`);
+  await commitPaths(dir(home), paths, `lessons: add ${lesson.id} to ${file}`);
   return lesson;
 }
 
