@@ -101,6 +101,39 @@ describe('buildRunRecord', () => {
   });
 });
 
+describe('hostile job files', () => {
+  it('symlinked logs/ is refused', async () => {
+    const other = await mkdtemp(join(tmpdir(), 'anton-other-'));
+    await writeFile(join(other, 'build.log'), 'tool: Read\n'.repeat(30));
+    await symlink(other, join(jobDir, 'logs'));
+    const r = await build();
+    expect(r).not.toContain('Read');
+    expect(r).toMatch(/## Tool use by stage\n\n\(unreadable\)/);
+  });
+  it('symlinked evidence/ is refused', async () => {
+    const other = await mkdtemp(join(tmpdir(), 'anton-other-'));
+    await writeFile(join(other, 'results-verify-1.json'), JSON.stringify({ review: { findings: [{ severity: 'blocking', file: 'x', summary: 'LEAKED' }] } }));
+    await symlink(other, join(jobDir, 'evidence'));
+    const r = await build();
+    expect(r).not.toContain('LEAKED');
+    expect(r).toMatch(/## Reviewer findings\n\n\(unreadable\)/);
+    expect(r).toContain('## Tool use by stage');
+  });
+  it.each(['[1,2]', '{"build":"x"}', 'not json'])('bad cost.json %s does not throw', async (raw) => {
+    await w('cost.json', raw);
+    await w('state.json', JSON.stringify(state({ stageSpentUsd: undefined })));
+    const r = await build();
+    expect(r).toContain('## Cost and allowance by stage');
+  });
+  it('a 100k spec field keeps all 8 headings within the cap', async () => {
+    await w('spec.json', JSON.stringify(spec({ summary: 'x'.repeat(100_000) })));
+    await w('questions.md', 'q'.repeat(70_000));
+    const r = await build();
+    expect(r.length).toBeLessThanOrEqual(60_000);
+    expect([...r.matchAll(/^## .+$/gm)]).toHaveLength(8);
+  });
+});
+
 describe('retro prompt and schema', () => {
   it('lists every lesson target from code', async () => {
     const p = await retroPrompt();

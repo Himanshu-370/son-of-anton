@@ -1,11 +1,11 @@
-import { readdir } from 'node:fs/promises';
+import { lstat, readdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { ALLOWANCE_ORDER, DEFAULT_ALLOWANCES } from '../core/anton-config.js';
 import { readRegularFile } from '../core/atomic.js';
 import { allowanceUsage, parseCosts, seedStageSpend, usd, type Allowances } from '../core/budget.js';
 import { redact } from '../core/secrets.js';
 import { JobStateSchema, type JobState } from '../core/state.js';
-import { assertJobDir, listVerifyCopies } from '../stages/verify.js';
+import { assertEvidenceDir, assertJobDir, listVerifyCopies } from '../stages/verify.js';
 
 export const MAX_RECORD_CHARS = 60_000;
 const REPEATED_AT = 25;
@@ -33,6 +33,17 @@ async function readText(path: string): Promise<string | undefined | null> {
   }
 }
 const names = (dir: string) => readdir(dir).catch(() => [] as string[]);
+
+/** logs/ is container-writable too: every part of the path must be a real folder (missing is fine). */
+async function logsDirOk(jobDir: string): Promise<boolean> {
+  const st = await lstat(join(jobDir, 'logs')).catch(() => undefined);
+  if (!st) return true;
+  return st.isDirectory() && (await realpath(join(jobDir, 'logs'))) === join(await realpath(jobDir), 'logs');
+}
+const cap = (v: unknown, n = 500) => {
+  const t = JSON.stringify(v ?? null) ?? 'null';
+  return t.length > n ? `${t.slice(0, n)}…` : t;
+};
 
 type Section = { heading: string; body: string };
 
@@ -62,11 +73,12 @@ export async function buildRunRecord(ctx: { repo: string; jobDir: string; secret
     const keys = [...new Set([...Object.keys(spec), ...Object.keys(approved)])];
     const changed = keys.filter((k) => JSON.stringify(own(spec, k)) !== JSON.stringify(own(approved, k)));
     specEdits = changed.length
-      ? changed.map((k) => `- ${k}\n  - proposed: ${JSON.stringify(own(spec, k) ?? null)}\n  - approved: ${JSON.stringify(own(approved, k) ?? null)}`).join('\n')
+      ? changed.map((k) => `- ${k}\n  - proposed: ${cap(own(spec, k))}\n  - approved: ${cap(own(approved, k))}`).join('\n')
       : 'No edits: the approved spec matches the proposed spec.';
   }
 
-  const copies = await listVerifyCopies(ctx.jobDir);
+  const evidenceOk = await assertEvidenceDir(ctx.repo, ctx.jobDir).then(() => true, () => false);
+  const copies = evidenceOk ? await listVerifyCopies(ctx.jobDir).catch(() => []) : [];
   const rounds = await Promise.all(copies.map(async (c) => ({ n: c.n, rec: await readJson(f(`evidence/${c.name}`)) })));
 
   const failed: string[] = [];
@@ -92,8 +104,11 @@ export async function buildRunRecord(ctx: { repo: string; jobDir: string; secret
     findings.push(`### Verify ${n}\n${fl.length ? fl.join('\n') : 'No findings.'}`);
   }
   // Only the latest round's structured failures survive on disk (each fix round overwrites them).
-  const latest = await readJson(f('evidence/failures.json'));
-  if (latest === null) failed.push(`### Latest failure items\n${UNREADABLE}`);
+  const latest = evidenceOk ? await readJson(f('evidence/failures.json')) : null;
+  if (!evidenceOk) {
+    failed.push(UNREADABLE);
+    findings.push(UNREADABLE);
+  } else if (latest === null) failed.push(`### Latest failure items\n${UNREADABLE}`);
   else if (Array.isArray(latest) && latest.length)
     failed.push(`### Latest failure items\n${latest.filter(isObj).map((i) => `- ${oneLine(own(i, 'area'))} ${oneLine(own(i, 'kind'))} ${oneLine(own(i, 'id'))}: ${oneLine(own(i, 'text')).slice(0, 200)}`).join('\n')}`);
 
@@ -104,7 +119,8 @@ export async function buildRunRecord(ctx: { repo: string; jobDir: string; secret
 
   let cost: string;
   if (!state) cost = UNREADABLE;
-  else {
+  else
+    try {
     const rawCost = await readText(f('cost.json'));
     const seeded = seedStageSpend(state, rawCost ? parseCosts(rawCost).costs : {});
     const al = ctx.allowances ?? DEFAULT_ALLOWANCES;
@@ -115,10 +131,14 @@ export async function buildRunRecord(ctx: { repo: string; jobDir: string; secret
         return `- ${g}: ${usd(own$)} spent; cumulative ${usd(u.spentUsd)} of ${usd(u.limitUsd)} share${u.spentUsd > u.limitUsd ? ' (over)' : ''}`;
       })
       .join('\n');
-  }
+    } catch {
+      cost = UNREADABLE;
+    }
 
   const tools: string[] = [];
-  for (const n of (await names(f('logs'))).filter((x) => x.endsWith('.log')).sort()) {
+  const logsOk = await logsDirOk(ctx.jobDir).catch(() => false);
+  if (!logsOk) tools.push(UNREADABLE);
+  for (const n of (logsOk ? await names(f('logs')) : []).filter((x) => x.endsWith('.log')).sort()) {
     const text = await readText(f(`logs/${n}`));
     if (text === null) {
       tools.push(`### ${n.slice(0, -4)}\n${UNREADABLE}`);
@@ -145,10 +165,9 @@ export async function buildRunRecord(ctx: { repo: string; jobDir: string; secret
   const render = () => `# Run record\n\n${sections.map((s) => `${s.heading}\n\n${s.body}`).join('\n\n')}\n`;
   let text = redact(render(), ctx.secrets);
   // Cut from the end: a section loses its body but keeps its heading.
-  for (let i = sections.length - 1; i > 0 && text.length > MAX_RECORD_CHARS; i--) {
+  for (let i = sections.length - 1; i >= 0 && text.length > MAX_RECORD_CHARS; i--) {
     sections[i]!.body = '(truncated)';
     text = redact(render(), ctx.secrets);
   }
-  // shortcut: if the first sections alone exceed the cap, hard-cut; they are small by construction.
-  return text.length > MAX_RECORD_CHARS ? text.slice(0, MAX_RECORD_CHARS) : text;
+  return text;
 }
