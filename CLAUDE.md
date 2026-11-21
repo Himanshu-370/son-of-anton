@@ -17,6 +17,7 @@ Local software factory: `anton` CLI runs AI agents in Docker. Design: docs/specs
 - Reviewer sessions stay read-only: `tools` list plus MCP/settings isolation in src/agent/entry.ts. Don't loosen it.
 - Plugins load only through `pluginsForSession` (src/plugins/session.ts); read-only sessions never load them.
 - Secret values are redacted via `redact()` in src/core/secrets.ts; new save points must use it.
+- System prompts hold only stable text; changing values go in the user prompt (the prompt-stability test enforces this).
 - Prompts live in src/stages/prompts/ and load via package-root URLs so they work from src/ and dist/.
 
 ## Gotchas
