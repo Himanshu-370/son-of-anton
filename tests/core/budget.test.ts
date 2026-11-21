@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { allowanceLeftUsd, appendStageCost, recordCost, remainingUsd, seedStageSpend } from '../../src/core/budget.js';
 import { DEFAULT_ALLOWANCES } from '../../src/core/anton-config.js';
-import type { JobState } from '../../src/core/state.js';
+import { JobStateSchema, type JobState } from '../../src/core/state.js';
 
 const base = (over: Partial<JobState> = {}): JobState => ({
   jobId: 'j1',
@@ -102,8 +102,27 @@ describe('stage allowances', () => {
     expect(recordCost(base(), 'constructor', 1, A).state.stageSpentUsd).toEqual({ constructor: 1 });
   });
 
+  it('built-in key names in cost.json or stage names never read inherited values', () => {
+    const cost = JSON.parse('{"constructor":1,"__proto__":2,"toString":"x","build":1.5}');
+    const seeded = seedStageSpend(base(), cost);
+    expect(seeded.stageSpentUsd).toEqual({ build: 1.5 });
+    expect(Object.getPrototypeOf(seeded.stageSpentUsd)).toBe(Object.prototype);
+    // Recording on a state that already has stageSpentUsd, under a built-in stage name, stays valid JSON state.
+    const r = recordCost(recordCost(seeded, 'constructor', 1, A).state, 'build', 0.5, A);
+    expect(r.state.stageSpentUsd).toEqual({ build: 2, constructor: 1 });
+    expect(() => JobStateSchema.parse(r.state)).not.toThrow();
+    expect(seedStageSpend(r.state, cost)).toBe(r.state);
+  });
+
+  it('spec overspend counts only up to its share for later groups (P4b-R2)', () => {
+    const s = base({ spentUsd: 3, stageSpentUsd: { spec: 3 } });
+    expect(allowanceLeftUsd(s, 'plan', A)).toBeCloseTo(1);
+    expect(remainingUsd(s)).toBeCloseTo(7);
+    expect(allowanceLeftUsd(s, 'spec', A)).toBe(0);
+  });
+
   it('old state without stageSpentUsd is seeded from cost.json', () => {
-    const s = seedStageSpend(base({ spentUsd: 3 }), { spec: 0.5, plan: 0.25, baseline: 0.25, build: 1.5, deliver: 0.5, bogus: -1, x: 'y' });
+    const s = seedStageSpend(base({ spentUsd: 3 }), { spec: 0.5, plan: 0.25, baseline: 0.25, build: 1.5, deliver: 0.5, verify: -1, retro: 'y', 'plugin-review': 1 });
     expect(s.stageSpentUsd).toEqual({ spec: 0.5, plan: 0.5, build: 1.5, verify: 0.5 });
     // Already seeded or corrupt input: left alone / empty.
     expect(seedStageSpend(s, { build: 9 }).stageSpentUsd).toBe(s.stageSpentUsd);

@@ -13,14 +13,20 @@ export function stageGroup(stage: string): StageGroup | undefined {
   return Object.hasOwn(STAGE_GROUP, stage) ? STAGE_GROUP[stage] : undefined;
 }
 
+/** Own-key read: a key such as `constructor` must not resolve an inherited value. */
+const spentOf = (m: Record<string, number> | undefined, key: string): number => (m && Object.hasOwn(m, key) ? m[key]! : 0);
+
 /**
  * A group may borrow what earlier groups left: its limit is the cumulative share up to and including
- * it, and its spend is everything those groups spent.
+ * it, and its spend is everything those groups spent. P4b-R2: spec is warn-only, so for later groups
+ * its spend counts only up to its own share (the job cap still covers the real spend).
  */
 export function allowanceUsage(s: JobState, group: StageGroup, allowances: Allowances = DEFAULT_ALLOWANCES): { spentUsd: number; limitUsd: number } {
   const upTo = ALLOWANCE_ORDER.slice(0, ALLOWANCE_ORDER.indexOf(group) + 1);
   const pct = upTo.reduce((a, g) => a + allowances[g], 0);
-  const spentUsd = upTo.reduce((a, g) => a + (s.stageSpentUsd?.[g] ?? 0), 0);
+  const specShare = (s.budgetUsd * allowances.spec) / 100;
+  const counted = (g: string) => (g === 'spec' && group !== 'spec' ? Math.min(spentOf(s.stageSpentUsd, g), specShare) : spentOf(s.stageSpentUsd, g));
+  const spentUsd = upTo.reduce((a, g) => a + counted(g), 0);
   return { spentUsd, limitUsd: (s.budgetUsd * pct) / 100 };
 }
 
@@ -31,16 +37,17 @@ export function allowanceLeftUsd(s: JobState, group: StageGroup, allowances: All
 
 /**
  * Old jobs (before stage allowances) have no stageSpentUsd: rebuild it from cost.json, which is keyed
- * by runner stage. cost.json is container-writable, so anything but a finite, non-negative number is dropped.
+ * by runner stage. cost.json is container-writable, so only keys that map to a group and hold a finite,
+ * non-negative number are kept (other stages never count against an allowance; spentUsd still holds them).
  */
 export function seedStageSpend(s: JobState, costJson: unknown): JobState {
   if (s.stageSpentUsd) return s;
   const stageSpentUsd: Record<string, number> = {};
   if (typeof costJson === 'object' && costJson !== null && !Array.isArray(costJson)) {
     for (const [stage, v] of Object.entries(costJson)) {
-      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) continue;
-      const key = stageGroup(stage) ?? stage;
-      stageSpentUsd[key] = (stageSpentUsd[key] ?? 0) + v;
+      const group = stageGroup(stage);
+      if (!group || typeof v !== 'number' || !Number.isFinite(v) || v < 0) continue;
+      stageSpentUsd[group] = spentOf(stageSpentUsd, group) + v;
     }
   }
   return { ...s, stageSpentUsd };
@@ -61,7 +68,7 @@ export function recordCost(
   const crossedWarn = !s.warned80 && spentUsd >= DEFAULTS.warnAt * s.budgetUsd;
   const group = stageGroup(stage);
   const key = group ?? stage;
-  const stageSpentUsd = { ...s.stageSpentUsd, [key]: (s.stageSpentUsd?.[key] ?? 0) + usd };
+  const stageSpentUsd = { ...s.stageSpentUsd, [key]: spentOf(s.stageSpentUsd, key) + usd };
   const state: JobState = { ...s, spentUsd, warned80: s.warned80 || crossedWarn, stageSpentUsd };
   let overAllowance = false;
   if (group) {
