@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { runAgent, BudgetExceeded, AgentError, AllowanceExceeded, type StageCtx, type ChildLike } from '../../src/agent/host-runner.js';
@@ -216,6 +216,34 @@ describe('runAgent', () => {
     const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'error_max_budget_usd', code: 'budget', totalUsd: 0.6, protocolVersion: 4 })]);
     await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toBeInstanceOf(BudgetExceeded);
     expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(0.6);
+  });
+
+  it('a cost.json that cannot be written still updates state.spentUsd (I5)', async () => {
+    await mkdir(join(ctx.jobDir, 'cost.json', 'x'), { recursive: true }); // a folder: the write fails
+    const warn = vi.fn();
+    ctx.warn = warn;
+    const r = await runAgent(ctx, req, { spawn: () => fake([result(0.4, { ok: 2 })]).child, notify: vi.fn() });
+    expect(r.output).toEqual({ ok: 2 });
+    expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(0.4);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('cost.json'));
+  });
+
+  it('a usage.json that is a folder still returns the finished result (I5)', async () => {
+    await mkdir(join(ctx.jobDir, 'usage.json', 'x'), { recursive: true });
+    const usage = { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 };
+    const f = fake([L({ type: 'result', ok: true, output: { ok: 3 }, sessionId: 's', totalUsd: 0.1, usage, protocolVersion: 4 })]);
+    expect((await runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).output).toEqual({ ok: 3 });
+  });
+
+  it("a usage.json that is a folder does not mask a 'budget' error event (I5)", async () => {
+    await mkdir(join(ctx.jobDir, 'usage.json', 'x'), { recursive: true });
+    const usage = { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 };
+    const ev = L({ type: 'error', message: 'error_max_budget_usd', code: 'budget', totalUsd: 0.6, usage, protocolVersion: 4 });
+    const p = runAgent(ctx, req, { spawn: () => fake([ev]).child, notify: vi.fn() });
+    await expect(p).rejects.toBeInstanceOf(BudgetExceeded);
+    await setState({ budgetUsd: 10, spentUsd: 6, stageSpentUsd: { build: 6 } });
+    const q = runAgent(ctx, req, { spawn: () => fake([ev]).child, notify: vi.fn() });
+    await expect(q).rejects.toBeInstanceOf(AllowanceExceeded);
   });
 
   it('error event crossing cap throws AgentError', async () => {

@@ -157,6 +157,14 @@ export async function runAgent(
   /** Last seen cumulative total. A resumed session's SDK total starts from the transcript's (baseUsd). */
   let lastTotal = req.baseUsd ?? 0;
   let killed = false;
+  /** A failed report-only write (cost.json, usage.json) must not drop a paid-for result or mask a pause. */
+  const bestEffort = async (name: string, write: () => Promise<void>): Promise<void> => {
+    try {
+      await write();
+    } catch (e) {
+      ctx.warn?.(`Could not update ${name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  };
 
   /** Apply the increment since the last seen total; persist; notify/throw as needed. */
   const applyTotal = async (totalUsd: number, child: ChildLike, killOnCap: boolean): Promise<void> => {
@@ -165,8 +173,9 @@ export async function runAgent(
     lastTotal = totalUsd;
     const r = recordCost(state, ctx.stage, inc, allowances);
     state = r.state;
-    await appendStageCost(ctx.jobDir, ctx.stage, inc);
+    // state.json first: it is what the caps read. cost.json is the report's per-stage table only.
     await saveState(ctx.jobDir, state);
+    await bestEffort('cost.json', () => appendStageCost(ctx.jobDir, ctx.stage, inc));
     if (r.crossedWarn) await notify('Son of Anton', `${ctx.project}: 80% of budget used`);
     if (r.overCap && killOnCap) {
       killed = true;
@@ -204,12 +213,12 @@ export async function runAgent(
       case 'result':
         await applyTotal(ev.totalUsd, child, false);
         checkProtocol(ev.protocolVersion);
-        if (ev.usage) await appendStageUsage(ctx.jobDir, ctx.stage, ev.usage);
+        if (ev.usage) await bestEffort('usage.json', () => appendStageUsage(ctx.jobDir, ctx.stage, ev.usage!));
         return { output: ev.output, sessionId: ev.sessionId };
       case 'error':
         await applyTotal(ev.totalUsd, child, false);
         checkProtocol(ev.protocolVersion);
-        if (ev.usage) await appendStageUsage(ctx.jobDir, ctx.stage, ev.usage);
+        if (ev.usage) await bestEffort('usage.json', () => appendStageUsage(ctx.jobDir, ctx.stage, ev.usage!));
         // The SDK's own budget stop pauses the job like the host-side kill: allowance when the allowance set the session budget, else budget_cap.
         if (ev.code === 'budget') throw allowanceBound ? overAllowance(state) : new BudgetExceeded(ev.message);
         throw new AgentError(ev.message);
