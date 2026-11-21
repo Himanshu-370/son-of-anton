@@ -60,6 +60,38 @@ describe('runDeliver', () => {
     expect(lines[0]).not.toContain('sums two numbers');
   });
 
+  const deliverHist = async (state: Partial<JobState> = {}) => {
+    ctx.state = { ...ctx.state, kind: 'new', ...state };
+    const home = await mkdtemp(join(tmpdir(), 'anton-home-'));
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag: vi.fn(async () => {}), listTags: async () => [], home });
+    return JSON.parse((await readFile(join(home, 'history.jsonl'), 'utf8')).trim());
+  };
+  const round1 = (...status: string[]) =>
+    mkdir(join(ctx.jobDir, 'evidence'), { recursive: true }).then(() =>
+      writeFile(join(ctx.jobDir, 'evidence', 'results-verify-1.json'), JSON.stringify({ runOk: true, results: status.map((s, i) => ({ id: `AC-${i + 1}`, status: s, tests: [] })) })));
+
+  it('history line has firstTryPass, rounds, rejects and lessons', async () => {
+    await round1('pass', 'fail');
+    await writeFile(join(ctx.jobDir, 'run-record.json'), JSON.stringify({ lessons: ['L-1', 'L-2'] }));
+    const h = await deliverHist({ rejects: 1, bench: 'fake-bench' });
+    expect(h).toMatchObject({ firstTryPass: 0.5, rounds: 2, rejects: 1, lessons: ['L-1', 'L-2'], bench: 'fake-bench' });
+  });
+
+  it('firstTryPass reads round-1 results safely; missing file leaves it out', async () => {
+    let h = await deliverHist();
+    expect(h).not.toHaveProperty('firstTryPass');
+    expect(h).not.toHaveProperty('lessons');
+    expect(h).not.toHaveProperty('rejects');
+    expect(h).not.toHaveProperty('bench');
+    // a symlink in place of the file is refused, not followed
+    await mkdir(join(ctx.jobDir, 'evidence'), { recursive: true });
+    const outside = join(ctx.repo, 'outside.json');
+    await writeFile(outside, JSON.stringify({ results: [{ id: 'AC-1', status: 'pass', tests: [] }] }));
+    await symlink(outside, join(ctx.jobDir, 'evidence', 'results-verify-1.json'));
+    h = await deliverHist();
+    expect(h).not.toHaveProperty('firstTryPass');
+  });
+
   it('deliver: REPORT.md contains the acceptance table with every AC id and the How to run section', async () => {
     await writeFile(join(ctx.jobDir, 'cost.json'), JSON.stringify({ spec: 0.5, plan: 0.25, build: 0.75 }));
     await writeFile(join(ctx.jobDir, 'questions.md'), '- Assumed integers only.\n');

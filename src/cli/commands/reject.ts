@@ -56,7 +56,7 @@ export async function rejectCommand(project: string, opts: { notes: string }, de
       }));
       await writeFileAtomic(failuresPath(job.jobDir), JSON.stringify(items, null, 2) + '\n');
     }
-    const next = transition(job.state, 'build', { round: 1, completedFixAreas: [] });
+    const next = transition(job.state, 'build', { round: 1, completedFixAreas: [], rejects: (job.state.rejects ?? 0) + 1 });
     // A fresh review cycle: an old signature must not trigger a false no_progress.
     delete next.lastFailureSignature;
     await saveState(job.jobDir, next);

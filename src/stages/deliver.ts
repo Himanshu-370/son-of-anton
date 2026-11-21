@@ -224,6 +224,30 @@ function notDoneSection(spec: SpecDoc, results: CheckResult[], runOk: boolean): 
   return ['## Not done', '', ...(items.length ? items : ['Nothing: every acceptance check passed.'])];
 }
 
+/** Container-writable files: any problem (missing, symlink, bad JSON, wrong shape) means "unknown", never 0. */
+async function readJobJson(path: string): Promise<unknown> {
+  try {
+    const raw = await readRegularFile(path);
+    return raw === undefined ? undefined : JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+async function readFirstTryPass(jobDir: string): Promise<number | undefined> {
+  const rec = await readJobJson(join(jobDir, 'evidence', 'results-verify-1.json'));
+  const results = typeof rec === 'object' && rec !== null ? (rec as { results?: unknown }).results : undefined;
+  if (!Array.isArray(results) || results.length === 0) return undefined;
+  const passed = results.filter((r) => typeof r === 'object' && r !== null && (r as { status?: unknown }).status === 'pass').length;
+  return passed / results.length;
+}
+
+async function readLessonIds(jobDir: string): Promise<string[] | undefined> {
+  const rec = await readJobJson(join(jobDir, 'run-record.json'));
+  const l = typeof rec === 'object' && rec !== null ? (rec as { lessons?: unknown }).lessons : undefined;
+  return Array.isArray(l) && l.every((x) => typeof x === 'string') ? (l as string[]) : undefined;
+}
+
 /** Code-only stage: write REPORT.md, tag the delivery (`delivered-<n>`), and wait for final review. */
 export async function runDeliver(
   ctx: StageCtx,
@@ -300,6 +324,8 @@ export async function runDeliver(
   const existing = await (deps.listTags ?? defaultListTags)(ctx.repo, `${prefix}*`);
   await tagFn(ctx.repo, `${prefix}${existing.length + 1}`);
   const hit = cacheHitRate(totalUsage(usage));
+  const firstTryPass = await readFirstTryPass(ctx.jobDir);
+  const lessons = await readLessonIds(ctx.jobDir);
   try {
     await appendHistory(
     {
@@ -307,7 +333,13 @@ export async function runDeliver(
       checks: spec.acceptanceChecks.length, spentUsd: ctx.state.spentUsd,
       // Host-owned, zod-checked state (keyed by stage group), not container-writable cost.json.
       stageUsd: ctx.state.stageSpentUsd ?? {},
-      ...(hit === undefined ? {} : { cacheHitRate: hit }), at: new Date().toISOString(),
+      ...(hit === undefined ? {} : { cacheHitRate: hit }),
+      ...(firstTryPass === undefined ? {} : { firstTryPass }),
+      rounds: ctx.state.round,
+      ...(ctx.state.rejects === undefined ? {} : { rejects: ctx.state.rejects }),
+      ...(lessons === undefined ? {} : { lessons }),
+      ...(ctx.state.bench === undefined ? {} : { bench: ctx.state.bench }),
+      at: new Date().toISOString(),
     },
     deps.home,
     );

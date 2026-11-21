@@ -197,6 +197,15 @@ describe('anton reject', () => {
     expect(h.spawned).toEqual(['p']);
   });
 
+  it('reject increments rejects', async () => {
+    const { dir } = await project('p', { stage: 'awaiting_final_review', round: 2 });
+    expect(await rejectCommand('p', { notes: 'x' }, harness().deps)).toBe(0);
+    expect((await loadState(dir)).rejects).toBe(1);
+    await saveState(dir, { ...(await loadState(dir)), stage: 'awaiting_final_review' });
+    expect(await rejectCommand('p', { notes: 'y' }, harness().deps)).toBe(0);
+    expect((await loadState(dir)).rejects).toBe(2);
+  });
+
   it('reject notes fan out to every plan area', async () => {
     const { dir } = await project('p', { stage: 'awaiting_final_review', round: 2, completedFixAreas: ['backend'] });
     const t = (id: string, area: string) => ({ id, title: id, acceptanceChecks: [], instructions: 'x', area });
