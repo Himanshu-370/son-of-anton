@@ -53,6 +53,6 @@ export function runSummary(history: HistoryEntry[], n = 10): { rows: HistoryEntr
   const rates = sorted.map((h) => h.cacheHitRate).filter((x): x is number => typeof x === 'number');
   const recent = mean(rates.slice(-5));
   const previous = mean(rates.slice(-10, -5));
-  if (recent === undefined || previous === undefined) return { rows };
+  if (rates.length < 10 || recent === undefined || previous === undefined) return { rows }; // two full 5-run windows
   return { rows, cacheTrend: { recent, previous, dropped: (previous - recent) * 100 > DROP_POINTS } };
 }

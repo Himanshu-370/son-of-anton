@@ -74,3 +74,17 @@ describe('runSummary', () => {
     expect(runSummary([run(0, { cacheHitRate: 0.5 })]).cacheTrend).toBeUndefined();
   });
 });
+
+describe('fix round 1', () => {
+  it('no cache trend with 6-9 rated runs even with a big gap', () => {
+    for (let n = 6; n <= 9; n++) {
+      const h = Array.from({ length: n }, (_, i) => run(i, { cacheHitRate: i < n - 5 ? 0.95 : 0.2 }));
+      expect(runSummary(h).cacheTrend).toBeUndefined();
+    }
+  });
+
+  it('a metric present on one side only counts as no improvement', () => {
+    const s = lessonStats(mix(5, 3, { firstTryPass: 0.9, spentUsd: 2 }, { spentUsd: 2 }), files)[0];
+    expect(s.verdict).toBe('no_benefit');
+  });
+});

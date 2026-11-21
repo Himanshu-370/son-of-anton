@@ -116,7 +116,7 @@ function printStats(out: (s: string) => void, history: Awaited<ReturnType<typeof
       out(`    with (${s.withRuns} runs): ${nums(s.with)}`);
       out(`    without (${s.withoutRuns} runs): ${nums(s.without)}`);
       out(`    verdict: ${s.verdict}`);
-      if (s.verdict === 'no_benefit') out(`    → consider: anton lessons remove ${s.id}`);
+      if (s.verdict === 'no_benefit') out(safe(`    → consider: anton lessons remove ${s.id}`));
     }
   }
   out("\nThese numbers are noisy with few runs — they inform your review, they don't decide.");
