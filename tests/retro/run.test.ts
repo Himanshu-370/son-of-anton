@@ -174,6 +174,14 @@ describe('submitRetro', () => {
     expect(out[0]).toMatch(/^retro skipped: job budget/);
   });
 
+  it('the API key in a job file never reaches the request', async () => {
+    await writeFile(join(dir, 'questions.md'), `the key is ${KEY}\n`);
+    const f = fake();
+    await submitRetro(await job(), 'approved', deps(f.client));
+    expect(JSON.stringify(f.batches)).not.toContain(KEY);
+    expect(JSON.stringify(f.batches)).toContain('[REDACTED:ANTHROPIC_API_KEY]');
+  });
+
   it('batch:false calls the direct path', async () => {
     await writeFile(join(home, 'config.yaml'), 'retro:\n  batch: false\n');
     const f = fake();
@@ -216,6 +224,19 @@ describe('collectRetros', () => {
     // Collected once: a second pass finds nothing to do.
     expect((await collectRetros(deps(fake().client))).collected).toBe(0);
     expect(await readProposals(home)).toHaveLength(2);
+  });
+
+  it('the API key is redacted from every proposal field', async () => {
+    await submitted();
+    const leaky = {
+      lessons: [{ target: 'web', text: `Use ${KEY} for calls.`, why: `saw ${KEY}` }],
+      plugins: [{ plugin: `tdd@https://${KEY}@git.example.test/mkt.git`, stage: 'build', why: `key ${KEY}` }],
+    };
+    const r = await collectRetros(deps(fake({ result: { type: 'succeeded', message: msg(leaky) } }).client));
+    const q = await readProposals(home);
+    expect(q[0]).toMatchObject({ text: 'Use [REDACTED:ANTHROPIC_API_KEY] for calls.', why: 'saw [REDACTED:ANTHROPIC_API_KEY]' });
+    // The redacted plugin URL no longer parses, so it is dropped (with a redacted note) rather than queued.
+    expect(JSON.stringify([q, r])).not.toContain(KEY);
   });
 
   it('unknown target is dropped with a note', async () => {

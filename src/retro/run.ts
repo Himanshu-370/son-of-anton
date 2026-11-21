@@ -74,6 +74,9 @@ type RetroFile = z.infer<typeof RetroFileSchema>;
 const retroPath = (jobDir: string) => join(jobDir, 'retro.json');
 const writeRetro = (jobDir: string, r: RetroFile) => writeFileAtomic(retroPath(jobDir), JSON.stringify(r, null, 2) + '\n');
 
+/** Project secrets plus the API key: the container holds the key, so an agent can write it into job files. */
+const withKey = (secrets: Record<string, string>, key: string | undefined) => (key ? { ...secrets, ANTHROPIC_API_KEY: key } : secrets);
+
 /** The key must never reach a file, a log or an error text. */
 function reasonOf(e: unknown, key: string | undefined): string {
   const m = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, ' ').trim().slice(0, 300);
@@ -132,7 +135,7 @@ export async function submitRetro(job: Job, outcome: 'approved' | 'abandoned', d
     const cfg = await loadAntonConfig(home);
     const { allowances } = budgetSettings(cfg);
     const batch = retroBatch(cfg);
-    const secrets = await loadSecrets(job.name);
+    const secrets = withKey(await loadSecrets(job.name), key);
     const record = await buildRunRecord({ repo: job.repo, jobDir: job.jobDir, secrets, allowances });
     const system = await retroPrompt();
     const user = retroUserMessage(record, outcome);
@@ -189,7 +192,7 @@ async function finishRetro(
   let reason: string | undefined;
   let ps: Proposal[] = [];
   try {
-    ps = await proposalsFrom(job, msg, notes);
+    ps = await proposalsFrom(job, msg, notes, key);
   } catch (e) {
     reason = reasonOf(e, key);
   }
@@ -200,7 +203,7 @@ async function finishRetro(
 }
 
 /** Validates the output and returns what survives. Throws when the output is unusable. */
-async function proposalsFrom(job: Job, msg: Message, notes: string[]): Promise<Proposal[]> {
+async function proposalsFrom(job: Job, msg: Message, notes: string[], key: string | undefined): Promise<Proposal[]> {
   if (msg.stop_reason !== 'end_turn') throw new Error(`model stopped: ${msg.stop_reason ?? 'unknown'}`);
   const text = msg.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
   let json: unknown;
@@ -212,7 +215,7 @@ async function proposalsFrom(job: Job, msg: Message, notes: string[]): Promise<P
   const parsed = RetroOutputSchema.safeParse(json);
   if (!parsed.success) throw new Error('output failed the schema');
 
-  const secrets = await loadSecrets(job.name).catch(() => ({}));
+  const secrets = withKey(await loadSecrets(job.name).catch(() => ({})), key);
   const tag = `${job.name}/${job.jobId}`;
   const at = new Date().toISOString();
   const why = (s: string) => redact(s, secrets).replace(/\s+/g, ' ').trim().slice(0, 300);
@@ -235,13 +238,14 @@ async function proposalsFrom(job: Job, msg: Message, notes: string[]): Promise<P
   }
   const plugins: Proposal[] = [];
   for (const p of parsed.data.plugins) {
+    const plugin = redact(p.plugin, secrets);
     try {
-      parseSpecifier(p.plugin);
+      parseSpecifier(plugin);
     } catch {
-      notes.push(`${tag}: dropped plugin ${JSON.stringify(p.plugin.slice(0, 80))}: not <plugin>@<owner>/<repo> or <plugin>@<https git url>`);
+      notes.push(`${tag}: dropped plugin ${JSON.stringify(plugin.slice(0, 80))}: not <plugin>@<owner>/<repo> or <plugin>@<https git url>`);
       continue;
     }
-    plugins.push({ id: id('plugin', p.plugin, p.stage), project: job.name, jobId: job.jobId, kind: 'plugin', plugin: p.plugin, stage: p.stage, why: why(p.why), at });
+    plugins.push({ id: id('plugin', plugin, p.stage), project: job.name, jobId: job.jobId, kind: 'plugin', plugin, stage: p.stage, why: why(p.why), at });
   }
   if (lessons.length > MAX_LESSONS) notes.push(`${tag}: kept the first ${MAX_LESSONS} of ${lessons.length} lessons (cap)`);
   if (plugins.length > MAX_PLUGINS) notes.push(`${tag}: kept the first ${MAX_PLUGINS} of ${plugins.length} plugin suggestions (cap)`);
