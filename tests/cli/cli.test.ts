@@ -488,6 +488,39 @@ describe('change job branch guard', () => {
     expect(h.text()).toContain('git switch no-such-branch');
     expect(await cur()).toBe('anton/1-init');
   });
+  // Retro may wait on a slow API call; the repo must already be back on fromBranch by then.
+  const branchAtRetro = (cur: () => Promise<string>) => {
+    const seen: string[] = [];
+    const client: RetroClient = {
+      createBatch: async () => { seen.push(await cur()); return 'msgbatch_1'; },
+      getBatch: async () => ({ ended: false }),
+      send: async () => { throw new Error('unused'); },
+    };
+    return { seen, retro: { client: () => client, env: { ANTHROPIC_API_KEY: 'test-key-not-real' } } };
+  };
+  it.each(['approve', 'abandon'] as const)('%s switches back before Retro runs', async (cmd) => {
+    const stage = cmd === 'approve' ? 'awaiting_final_review' : 'paused';
+    const { g, cur } = await changeJob({ stage, round: 1, ...(cmd === 'abandon' ? { pausedFrom: 'build', pauseReason: 'error' } : {}) });
+    await g('switch', '-qc', 'anton/1-init');
+    const r = branchAtRetro(cur);
+    const h = harness({ retro: r.retro });
+    expect(await (cmd === 'approve' ? approveCommand : abandonCommand)('p', h.deps)).toBe(0);
+    expect(r.seen).toEqual(['main']);
+    const lines = h.out.join('\n');
+    expect(lines.indexOf('Switched back to main')).toBeLessThan(lines.indexOf('Retro submitted'));
+  });
+  it.each(['approve', 'abandon'] as const)('%s still submits Retro when switch-back throws', async (cmd) => {
+    const stage = cmd === 'approve' ? 'awaiting_final_review' : 'paused';
+    const { g, cur, dir } = await changeJob({ stage, round: 1, ...(cmd === 'abandon' ? { pausedFrom: 'build', pauseReason: 'error' } : {}) });
+    await g('switch', '-qc', 'anton/1-init');
+    const r = branchAtRetro(cur);
+    const h = harness({ retro: r.retro });
+    const out = h.deps.out!;
+    h.deps.out = (s) => { if (s.startsWith('Switched back')) throw new Error('boom'); out(s); };
+    await (cmd === 'approve' ? approveCommand : abandonCommand)('p', h.deps);
+    expect(r.seen).toHaveLength(1);
+    expect(JSON.parse(await readFile(join(dir, 'retro.json'), 'utf8'))).toMatchObject({ status: 'submitted' });
+  });
   it('new jobs are unaffected by the branch guard', async () => {
     await project('p', { stage: 'awaiting_final_review', round: 1 });
     expect(await approveCommand('p', harness().deps)).toBe(0);

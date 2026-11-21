@@ -30,8 +30,12 @@ export async function approveCommand(project: string, deps: CliDeps = {}): Promi
     if (state.stage === 'awaiting_final_review') {
       await saveState(job.jobDir, transition(state, 'done'));
       d.out(`${project}: delivery approved. Done.`);
-      await submitRetro(job, 'approved', { ...d.retro, out: d.out });
-      await switchBackFromJob(d, job.repo, state);
+      // Switch back first: Retro may wait on the API, and Ctrl-C then must not strand the repo on anton/<id>.
+      try {
+        await switchBackFromJob(d, job.repo, state);
+      } finally {
+        await submitRetro(job, 'approved', { ...d.retro, out: d.out });
+      }
       return 0;
     }
     d.err(`Nothing to approve (stage: ${state.stage})`);

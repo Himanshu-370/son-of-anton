@@ -13,9 +13,12 @@ export async function abandonCommand(project: string, deps: CliDeps = {}): Promi
     await saveState(job.jobDir, transition(job.state, 'abandoned'));
     await d.stopContainer(containerName(project));
     d.out(`${project}: abandoned.`);
-    await submitRetro(job, 'abandoned', { ...d.retro, out: d.out });
-    // Change jobs leave the repo on anton/<id>; go back to where the user was.
-    await switchBackFromJob(d, job.repo, job.state);
+    // Change jobs leave the repo on anton/<id>; go back to where the user was, before Retro waits on the API.
+    try {
+      await switchBackFromJob(d, job.repo, job.state);
+    } finally {
+      await submitRetro(job, 'abandoned', { ...d.retro, out: d.out });
+    }
     return 0;
   });
 }
