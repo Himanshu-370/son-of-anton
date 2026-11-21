@@ -7,12 +7,12 @@ import { z } from 'zod';
 import { estimateUsd } from '../agent/pricing.js';
 import { budgetSettings, loadAntonConfig, retroBatch } from '../core/anton-config.js';
 import { readRegularFile, writeFileAtomic } from '../core/atomic.js';
-import { appendStageCost, recordCost, remainingUsd, usd, type Allowances } from '../core/budget.js';
+import { allowanceLeftUsd, appendStageCost, recordCost, remainingUsd, usd } from '../core/budget.js';
 import { ROLE_MODELS } from '../core/config.js';
 import { antonHome, jobDir as jobDirOf } from '../core/paths.js';
 import { listProjects } from '../core/registry.js';
 import { loadSecrets, redact } from '../core/secrets.js';
-import { loadState, saveState, type JobState } from '../core/state.js';
+import { loadState, saveState } from '../core/state.js';
 import { cleanLessonText } from '../lessons/store.js';
 import { appendProposals, type Proposal } from '../lessons/proposals.js';
 import { parseSpecifier } from '../plugins/marketplace.js';
@@ -107,12 +107,6 @@ function retroParams(system: string, user: string): MessageCreateParamsNonStream
   };
 }
 
-/** Retro's own share of the job budget (not cumulative: earlier groups' leftovers stay with the job cap). */
-function retroShareLeft(s: JobState, allowances: Allowances): number {
-  const spent = s.stageSpentUsd && Object.hasOwn(s.stageSpentUsd, 'retro') ? s.stageSpentUsd.retro! : 0;
-  return Math.max(0, (s.budgetUsd * allowances.retro) / 100 - spent);
-}
-
 /**
  * Runs Retro once for a finished job. Never throws: it writes retro.json and prints one line
  * (submitted, skipped or failed). A retro.json that already exists, whatever it holds, means done.
@@ -123,6 +117,7 @@ export async function submitRetro(job: Job, outcome: 'approved' | 'abandoned', d
   const key = env.ANTHROPIC_API_KEY || undefined;
   const submittedAt = new Date().toISOString();
   let dirOk = false;
+  const notes: string[] = [];
   try {
     await assertJobDir(job.repo, job.jobDir);
     dirOk = true;
@@ -147,7 +142,8 @@ export async function submitRetro(job: Job, outcome: 'approved' | 'abandoned', d
     const tokens = Math.ceil((system.length + user.length) / 3);
     const estimate = estimateUsd(COACH.model, { input_tokens: tokens }) * (batch ? 0.5 : 1);
     const state = await loadState(job.jobDir);
-    const share = retroShareLeft(state, allowances);
+    // P5a-R2: the retro share borrows what earlier shares left (cumulative, like every allowance).
+    const share = allowanceLeftUsd(state, 'retro', allowances);
     if (estimate > share) return await skip(`retro share too small (estimate ${usd(estimate)}, ${usd(share)} left)`);
     if (estimate > remainingUsd(state)) return await skip(`job budget too small (estimate ${usd(estimate)}, ${usd(remainingUsd(state))} left)`);
 
@@ -155,12 +151,14 @@ export async function submitRetro(job: Job, outcome: 'approved' | 'abandoned', d
     if (batch) {
       const batchId = await client.createBatch(CUSTOM_ID, params);
       await writeRetro(job.jobDir, { status: 'submitted', batchId, submittedAt });
+      out(DONE_LINE);
     } else {
-      await applyMessage(job, await client.send(params), 1, home);
-      await writeRetro(job.jobDir, { status: 'done', submittedAt });
+      const reason = await finishRetro(job, await client.send(params), 1, home, notes, { submittedAt }, key);
+      for (const n of notes) out(n);
+      out(reason ? `retro failed: ${reason}` : DONE_LINE);
     }
-    out(DONE_LINE);
   } catch (e) {
+    for (const n of notes) out(n);
     const reason = reasonOf(e, key);
     // Never write into a job folder that failed the real-folder check (it could point elsewhere).
     if (dirOk) await writeRetro(job.jobDir, { status: 'failed', reason, submittedAt }).catch(() => undefined);
@@ -179,9 +177,30 @@ async function recordRetroCost(job: Job, cost: number, home: string, notes: stri
   }
 }
 
-/** Records the cost, validates the output and queues what survives. Throws when the output is unusable. */
-async function applyMessage(job: Job, msg: Message, priceMult: number, home: string, notes: string[] = []): Promise<void> {
+/**
+ * Ends one retro: queues the proposals (idempotent by id), writes the terminal status, and only then
+ * records the cost, so a failed status write (retried later) never records it twice (P5a-R3).
+ * Returns the failure reason when the output was unusable; throws when a write failed.
+ */
+async function finishRetro(
+  job: Job, msg: Message, priceMult: number, home: string, notes: string[],
+  r: { batchId?: string; submittedAt: string }, key: string | undefined,
+): Promise<string | undefined> {
+  let reason: string | undefined;
+  let ps: Proposal[] = [];
+  try {
+    ps = await proposalsFrom(job, msg, notes);
+  } catch (e) {
+    reason = reasonOf(e, key);
+  }
+  if (ps.length) await appendProposals(ps, home);
+  await writeRetro(job.jobDir, reason ? { status: 'failed', reason, ...r } : { status: 'done', ...r });
   await recordRetroCost(job, estimateUsd(msg.model || COACH.model, msg.usage) * priceMult, home, notes);
+  return reason;
+}
+
+/** Validates the output and returns what survives. Throws when the output is unusable. */
+async function proposalsFrom(job: Job, msg: Message, notes: string[]): Promise<Proposal[]> {
   if (msg.stop_reason !== 'end_turn') throw new Error(`model stopped: ${msg.stop_reason ?? 'unknown'}`);
   const text = msg.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
   let json: unknown;
@@ -226,7 +245,7 @@ async function applyMessage(job: Job, msg: Message, priceMult: number, home: str
   }
   if (lessons.length > MAX_LESSONS) notes.push(`${tag}: kept the first ${MAX_LESSONS} of ${lessons.length} lessons (cap)`);
   if (plugins.length > MAX_PLUGINS) notes.push(`${tag}: kept the first ${MAX_PLUGINS} of ${plugins.length} plugin suggestions (cap)`);
-  await appendProposals([...lessons.slice(0, MAX_LESSONS), ...plugins.slice(0, MAX_PLUGINS)], home);
+  return [...lessons.slice(0, MAX_LESSONS), ...plugins.slice(0, MAX_PLUGINS)];
 }
 
 /**
@@ -245,9 +264,14 @@ export async function collectRetros(deps: RetroDeps = {}): Promise<{ collected: 
     for (const jobId of ids) {
       const job: Job = { name: p.name, repo: p.repoPath, jobId, jobDir: jobDirOf(p.repoPath, jobId) };
       const tag = `${p.name}/${jobId}`;
+      const retry = (what: string, e: unknown) => res.notes.push(`${tag}: could not ${what} (${reasonOf(e, key)}); will retry`);
       const fail = async (reason: string, submittedAt: string) => {
-        await writeRetro(job.jobDir, { status: 'failed', reason, submittedAt }).catch(() => undefined);
-        res.failed.push(`${tag}: ${reason}`);
+        try {
+          await writeRetro(job.jobDir, { status: 'failed', reason, submittedAt });
+          res.failed.push(`${tag}: ${reason}`);
+        } catch (e) {
+          retry('save retro.json', e);
+        }
       };
       let raw: string | undefined;
       try {
@@ -281,14 +305,15 @@ export async function collectRetros(deps: RetroDeps = {}): Promise<{ collected: 
           await fail(`batch ${got.result.type}`, r.submittedAt);
           continue;
         }
+        let reason: string | undefined;
         try {
-          await applyMessage(job, got.result.message, 0.5, home, res.notes);
+          reason = await finishRetro(job, got.result.message, 0.5, home, res.notes, { batchId: r.batchId, submittedAt: r.submittedAt }, key);
         } catch (e) {
-          await fail(reasonOf(e, key), r.submittedAt);
+          retry('save retro results', e);
           continue;
         }
-        await writeRetro(job.jobDir, { status: 'done', batchId: r.batchId, submittedAt: r.submittedAt });
-        res.collected++;
+        if (reason) res.failed.push(`${tag}: ${reason}`);
+        else res.collected++;
       } catch (e) {
         // Network or API trouble: keep it submitted and try again next time.
         res.notes.push(`${tag}: could not fetch retro results: ${reasonOf(e, key)}`);

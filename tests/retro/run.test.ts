@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,6 +8,19 @@ import { registerProject } from '../../src/core/registry.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
 import { readProposals } from '../../src/lessons/proposals.js';
 import { collectRetros, retroUserMessage, submitRetro, type RetroClient } from '../../src/retro/run.js';
+
+// Lets a test make only the retro.json status write fail.
+const failWrites = vi.hoisted(() => ({ retroJson: false }));
+vi.mock('../../src/core/atomic.js', async (orig) => {
+  const real = await orig<typeof import('../../src/core/atomic.js')>();
+  return {
+    ...real,
+    writeFileAtomic: async (path: string, data: string) => {
+      if (failWrites.retroJson && path.endsWith('retro.json')) throw new Error('disk full');
+      return real.writeFileAtomic(path, data);
+    },
+  };
+});
 
 const KEY = 'test-key-not-real';
 let home: string;
@@ -22,6 +35,7 @@ beforeEach(async () => {
   await mkdir(dir, { recursive: true });
   await registerProject('p', repo);
   await setState({});
+  failWrites.retroJson = false;
 });
 
 async function setState(over: Partial<JobState>): Promise<JobState> {
@@ -126,12 +140,30 @@ describe('submitRetro', () => {
   });
 
   it('retro share too small: skipped', async () => {
-    await setState({ stageSpentUsd: { retro: 0.5 } }); // 5% of $10 is used up
+    // Earlier stages and retro together used the cumulative 100% share; the job cap alone still has room.
+    await setState({ spentUsd: 1, stageSpentUsd: { build: 9, verify: 0.5, retro: 0.5 } });
     const f = fake();
     await submitRetro(await job(), 'approved', deps(f.client));
     expect(f.batches).toHaveLength(0);
     expect(await retroJson()).toMatchObject({ status: 'skipped' });
     expect(out[0]).toMatch(/^retro skipped: retro share/);
+  });
+
+  it('retro borrows what earlier shares left: its own 5% spent still runs', async () => {
+    await setState({ spentUsd: 1, stageSpentUsd: { retro: 0.5 } });
+    const f = fake();
+    await submitRetro(await job(), 'approved', deps(f.client));
+    expect(f.batches).toHaveLength(1);
+    expect(await retroJson()).toMatchObject({ status: 'submitted' });
+  });
+
+  it('batch:false prints the notes about dropped proposals', async () => {
+    await writeFile(join(home, 'config.yaml'), 'retro:\n  batch: false\n');
+    const bad = { lessons: [{ target: 'nope', text: 'x', why: 'y' }], plugins: [{ plugin: 'bad', stage: 'build', why: 'w' }] };
+    const f = fake({ send: msg(bad) });
+    await submitRetro(await job(), 'approved', deps(f.client));
+    expect(out.filter((l) => l.includes('dropped'))).toHaveLength(2);
+    expect(out.at(-1)).toBe('Retro submitted; review lessons later with: anton lessons review');
   });
 
   it('job cap too small: skipped', async () => {
@@ -257,6 +289,31 @@ describe('collectRetros', () => {
     const s = await loadState(dir);
     expect(s.stageSpentUsd?.retro).toBeCloseTo(0.05);
     expect(s.spentUsd).toBeCloseTo(1.05);
+  });
+
+  it('status write fails: no cost recorded; a later collect records it once', async () => {
+    await submitted();
+    failWrites.retroJson = true;
+    const r1 = await collectRetros(deps(fake().client));
+    expect(r1.collected).toBe(0);
+    await expect(readFile(join(dir, 'cost.json'), 'utf8')).rejects.toThrow();
+    expect((await loadState(dir)).spentUsd).toBe(1);
+    expect(await retroJson()).toMatchObject({ status: 'submitted' });
+    failWrites.retroJson = false;
+    expect((await collectRetros(deps(fake().client))).collected).toBe(1);
+    expect(JSON.parse(await readFile(join(dir, 'cost.json'), 'utf8')).retro).toBeCloseTo(0.05);
+    expect((await loadState(dir)).spentUsd).toBeCloseTo(1.05);
+    expect(await readProposals(home)).toHaveLength(2);
+  });
+
+  it('failed-status write fails on bad output: no cost, stays submitted', async () => {
+    await submitted();
+    failWrites.retroJson = true;
+    const r = await collectRetros(deps(fake({ result: { type: 'succeeded', message: msg({ lessons: 'no' }) } }).client));
+    expect(r.failed).toEqual([]);
+    await expect(readFile(join(dir, 'cost.json'), 'utf8')).rejects.toThrow();
+    failWrites.retroJson = false;
+    expect(await retroJson()).toMatchObject({ status: 'submitted' });
   });
 
   it('no API key: nothing collected, a note says why', async () => {
