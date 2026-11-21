@@ -125,6 +125,24 @@ async function reviewBase(ctx: StageCtx, state: JobState, revParse: typeof defau
  * to a host dir; the host then rm/mkdir/writes there. Refuse unless every component from `.anton` to
  * `evidence` is a real folder and evidence resolves to `<repo>/.anton/jobs/<id>/evidence`.
  */
+/**
+ * Same boundary for the job folder itself (I1): every component from `.anton` to `<id>` must be a real
+ * folder, and the job folder must resolve to `<repo>/.anton/jobs/<id>`, before the host reads files in it.
+ */
+export async function assertJobDir(repo: string, jobDir: string): Promise<void> {
+  const root = await realpath(repo);
+  let p = root;
+  for (const part of ['.anton', 'jobs', basename(jobDir)]) {
+    p = join(p, part);
+    const st = await lstat(p).catch(() => undefined);
+    if (st && !st.isDirectory()) {
+      throw new Error(`Refusing to use ${p}: not a real folder (job folders must be real folders inside the project)`);
+    }
+  }
+  const got = await realpath(jobDir);
+  if (got !== p) throw new Error(`Refusing to use job folder ${got}: it is not ${p}`);
+}
+
 export async function assertEvidenceDir(repo: string, jobDir: string): Promise<void> {
   const root = await realpath(repo);
   const want = join(root, '.anton', 'jobs', basename(jobDir), 'evidence');

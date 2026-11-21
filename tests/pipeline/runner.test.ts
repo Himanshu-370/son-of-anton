@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { BudgetExceeded, type StageCtx } from '../../src/agent/host-runner.js';
@@ -413,6 +413,18 @@ describe('run record', () => {
       other: 1,
       plugins: [{ name: 'cave', version: '1.0.0', commit: 'a'.repeat(40), sha256: 'a'.repeat(64) }],
     });
+  });
+
+  it('a symlinked run-record.json is refused: the job pauses and the target is untouched', async () => {
+    const host = join(await mkdtemp(join(tmpdir(), 'anton-host-')), 'host.json');
+    await writeFile(host, '{"hostKey":"host-only"}');
+    await symlink(host, join(dir, 'run-record.json'));
+    const started = vi.fn(async (s: string) => `anton-${s}`);
+    await runUnattended('p', fakes({ startContainer: started }).deps);
+    expect(started).not.toHaveBeenCalled();
+    expect((await loadState(dir)).stage).toBe('paused');
+    expect(await readFile(join(dir, 'logs', 'error.log'), 'utf8')).toContain('run-record.json');
+    expect(await readFile(host, 'utf8')).toBe('{"hostKey":"host-only"}');
   });
 
   it('a listed plugin that is not installed pauses the job before any container starts', async () => {

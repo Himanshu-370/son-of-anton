@@ -1,7 +1,7 @@
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import { BudgetExceeded, type StageCtx } from '../agent/host-runner.js';
-import { writeFileAtomic } from '../core/atomic.js';
+import { readRegularFile, writeFileAtomic } from '../core/atomic.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
 import { assertOnJobBranch, currentJobId } from '../core/job.js';
 import { acquireLock as defaultAcquireLock } from '../core/lock.js';
@@ -26,7 +26,7 @@ import { runDeliver as defaultRunDeliver, type DeliverInput } from '../stages/de
 import { failuresPath } from '../stages/qa.js';
 import { PlanSchema, runPlan as defaultRunPlan, type Plan } from '../stages/plan.js';
 import { SpecDocBaseSchema, type SpecDoc } from '../stages/spec.js';
-import { runVerify as defaultRunVerify, type VerifyDeps, type VerifyResult } from '../stages/verify.js';
+import { assertJobDir, runVerify as defaultRunVerify, type VerifyDeps, type VerifyResult } from '../stages/verify.js';
 
 export const containerName = (slug: string) => `anton-${slug}`;
 
@@ -81,14 +81,12 @@ export async function startOrReuseContainer(
 }
 
 /** Merge the plugin pins this job can load into `<jobDir>/run-record.json`, keeping other keys. */
-async function writeRunRecord(jobDir: string, used: LockEntry[]): Promise<void> {
+async function writeRunRecord(repo: string, jobDir: string, used: LockEntry[]): Promise<void> {
+  // The container can write the job folder: never follow a planted symlink to a host file.
+  await assertJobDir(repo, jobDir);
   const path = join(jobDir, 'run-record.json');
-  let record: Record<string, unknown> = {};
-  try {
-    record = JSON.parse(await fsp.readFile(path, 'utf8')) as Record<string, unknown>;
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-  }
+  const raw = await readRegularFile(path);
+  const record = (raw === undefined ? {} : JSON.parse(raw)) as Record<string, unknown>;
   record.plugins = used.map(({ name, version, commit, sha256 }) => ({ name, version, commit, sha256 }));
   await writeFileAtomic(path, `${JSON.stringify(record, null, 2)}\n`);
 }
@@ -184,7 +182,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       const kitName = (await getSpec()).kit;
       const kit = deps.kit ?? kitByName(kitName);
       // Before any container or spend: a listed plugin that is not installed fails here, not mid-stage.
-      await writeRunRecord(jobDir, await pluginsForJob(kitName));
+      await writeRunRecord(repo, jobDir, await pluginsForJob(kitName));
       startedContainer = true;
       const container = await startContainer(project, repo, kit);
       secrets = await loadSecrets(project);
