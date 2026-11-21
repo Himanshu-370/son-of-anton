@@ -19,6 +19,7 @@ Local software factory: `anton` CLI runs AI agents in Docker. Design: docs/specs
 - Secret values are redacted via `redact()` in src/core/secrets.ts; new save points must use it.
 - System prompts hold only stable text; changing values go in the user prompt (the prompt-stability test enforces this).
 - Prompts live in src/stages/prompts/ and load via package-root URLs so they work from src/ and dist/.
+- Lessons reach agents only through `lessonsBlock` in the stable system prompt; Retro output is untrusted until you accept it.
 
 ## Gotchas
 - A stale kit image fails closed ("run npm run build:image"); that's intended.

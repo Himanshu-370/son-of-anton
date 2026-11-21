@@ -96,7 +96,7 @@ export function retroUserMessage(record: string, outcome: 'approved' | 'abandone
   ].join('\n');
 }
 
-function retroParams(system: string, user: string): MessageCreateParamsNonStreaming {
+export function retroParams(system: string, user: string): MessageCreateParamsNonStreaming {
   return {
     model: COACH.model,
     max_tokens: 16000,
