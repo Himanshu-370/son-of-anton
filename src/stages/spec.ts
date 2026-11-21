@@ -114,12 +114,17 @@ export async function runSpec(
   throw new SpecNotProduced();
 }
 
-function renderSpec(s: SpecDoc): string {
+export type CostEstimate = { lowUsd: number; highUsd: number; n: number };
+
+function renderSpec(s: SpecDoc, estimate?: CostEstimate): string {
   const list = (xs: string[]) => (xs.length ? xs.map((x) => `- ${x}`).join('\n') : '- (none)');
   return [
     `# ${s.title}`,
     '',
     `Kit: ${s.kit}`,
+    estimate
+      ? `Expected cost: $${estimate.lowUsd.toFixed(2)}–$${estimate.highUsd.toFixed(2)} (from ${estimate.n} similar past jobs)`
+      : 'Expected cost: no history yet',
     '',
     '## Summary',
     '',
@@ -144,8 +149,8 @@ function renderSpec(s: SpecDoc): string {
   ].join('\n');
 }
 
-export async function writeSpec(jobDir: string, spec: SpecDoc, secrets?: Record<string, string>): Promise<void> {
-  const md = redact(renderSpec(spec), secrets);
+export async function writeSpec(jobDir: string, spec: SpecDoc, secrets?: Record<string, string>, estimate?: CostEstimate): Promise<void> {
+  const md = redact(renderSpec(spec, estimate), secrets);
   await writeFileAtomic(join(jobDir, 'spec.json'), redact(JSON.stringify(spec, null, 2) + '\n', secrets));
   await writeFileAtomic(join(jobDir, 'spec.generated.md'), md);
   await writeFileAtomic(join(jobDir, 'spec.md'), md);

@@ -135,6 +135,24 @@ describe('services', () => {
 });
 
 describe('writeSpec / readApprovedSpec', () => {
+  it('spec.md shows the estimate line', async () => {
+    await writeSpec(ctx.jobDir, spec, undefined, { lowUsd: 1.2, highUsd: 3.4, n: 5 });
+    const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');
+    expect(md).toContain('Kit: fallback\nExpected cost: $1.20–$3.40 (from 5 similar past jobs)\n');
+  });
+
+  it('spec.md shows no history yet', async () => {
+    await writeSpec(ctx.jobDir, spec);
+    expect(await readFile(join(ctx.jobDir, 'spec.md'), 'utf8')).toContain('Expected cost: no history yet');
+  });
+
+  it('readApprovedSpec ignores the estimate line', async () => {
+    await writeSpec(ctx.jobDir, { ...spec, kit: 'web' }, undefined, { lowUsd: 1, highUsd: 2, n: 3 });
+    const out = await readApprovedSpec(ctx.jobDir);
+    expect(out.kit).toBe('web');
+    expect(out.title).toBe(spec.title);
+  });
+
   it('picks up edited and added acceptance checks', async () => {
     await writeSpec(ctx.jobDir, spec);
     const md = await readFile(join(ctx.jobDir, 'spec.md'), 'utf8');

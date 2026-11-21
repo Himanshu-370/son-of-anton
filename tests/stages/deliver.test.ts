@@ -34,6 +34,20 @@ const results: CheckResult[] = [
 ];
 
 describe('runDeliver', () => {
+  it('deliver appends one history line without the description', async () => {
+    await writeFile(join(ctx.jobDir, 'cost.json'), JSON.stringify({ spec: 0.5, build: 1 }));
+    ctx.state = { ...ctx.state, kind: 'new' }; // fixture lacks the schema default
+    const home = await mkdtemp(join(tmpdir(), 'anton-home-'));
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag: vi.fn(async () => {}), listTags: async () => [], home });
+    const lines = (await readFile(join(home, 'history.jsonl'), 'utf8')).trim().split('\n');
+    expect(lines).toHaveLength(1);
+    const h = JSON.parse(lines[0]!);
+    expect(h).toMatchObject({ jobId: 'j1', project: 'p', kind: 'new', kit: 'fallback', checks: 2, spentUsd: 1.5, stageUsd: { spec: 0.5, build: 1 } });
+    expect(typeof h.at).toBe('string');
+    expect(lines[0]).not.toContain('Prints the sum');
+    expect(lines[0]).not.toContain('sums two numbers');
+  });
+
   it('deliver: REPORT.md contains the acceptance table with every AC id and the How to run section', async () => {
     await writeFile(join(ctx.jobDir, 'cost.json'), JSON.stringify({ spec: 0.5, plan: 0.25, build: 0.75 }));
     await writeFile(join(ctx.jobDir, 'questions.md'), '- Assumed integers only.\n');

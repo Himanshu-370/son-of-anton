@@ -4,6 +4,7 @@ import type { StageCtx } from '../agent/host-runner.js';
 import type { TokenTotals } from '../agent/protocol.js';
 import { NotRegularFileError, readRegularFile, writeFileAtomic } from '../core/atomic.js';
 import { cacheHitRate, parseUsage, totalUsage } from '../core/budget.js';
+import { appendHistory } from '../core/history.js';
 import { redact } from '../core/secrets.js';
 import { listTags as defaultListTags, tag as defaultTag } from '../core/git.js';
 import type { ReviewFinding } from '../review/code-review.js';
@@ -19,6 +20,8 @@ import type { SpecDoc } from './spec.js';
 export type DeliverDeps = {
   tag?: (repo: string, name: string) => Promise<void>;
   listTags?: (repo: string, pattern: string) => Promise<string[]>;
+  /** Where history.jsonl lives (default: the anton home). */
+  home?: string;
 };
 
 /** The outcome to report. When absent (e.g. after accept-as-is), the latest evidence/results.json is used. */
@@ -289,6 +292,15 @@ export async function runDeliver(
   const prefix = `anton/${ctx.state.jobId}/delivered-`;
   const existing = await (deps.listTags ?? defaultListTags)(ctx.repo, `${prefix}*`);
   await tagFn(ctx.repo, `${prefix}${existing.length + 1}`);
+  const hit = cacheHitRate(totalUsage(usage));
+  await appendHistory(
+    {
+      jobId: ctx.state.jobId, project: ctx.state.project, kind: ctx.state.kind, kit: spec.kit,
+      checks: spec.acceptanceChecks.length, spentUsd: ctx.state.spentUsd, stageUsd: costs ?? {},
+      ...(hit === undefined ? {} : { cacheHitRate: hit }), at: new Date().toISOString(),
+    },
+    deps.home,
+  );
   const state = transition(ctx.state, 'awaiting_final_review');
   await saveState(ctx.jobDir, state);
   return state;
