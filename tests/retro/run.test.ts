@@ -287,6 +287,14 @@ describe('collectRetros', () => {
     expect(await retroJson()).toMatchObject({ status: 'failed', reason: 'batch expired' });
   });
 
+  it('an errored batch keeps the API error text, key masked', async () => {
+    await submitted();
+    const errored = { type: 'errored', error: { type: 'error', request_id: null, error: { type: 'invalid_request_error', message: `bad request for ${KEY}` } } } as unknown as MessageBatchResult;
+    const r = await collectRetros(deps(fake({ result: errored }).client));
+    expect(r.failed).toEqual(['p/1-init: batch errored: bad request for [REDACTED]']);
+    expect(await retroJson()).toMatchObject({ status: 'failed', reason: 'batch errored: bad request for [REDACTED]' });
+  });
+
   it('a batch still running stays submitted', async () => {
     await submitted();
     const r = await collectRetros(deps(fake({ result: 'pending' }).client));

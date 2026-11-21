@@ -310,7 +310,8 @@ export async function collectRetros(deps: RetroDeps = {}): Promise<{ collected: 
           continue;
         }
         if (got.result.type !== 'succeeded') {
-          settled = await fail(`batch ${got.result.type}`, r.submittedAt);
+          const api = got.result.type === 'errored' ? String(got.result.error?.error?.message ?? '') : '';
+          settled = await fail(`batch ${got.result.type}${api ? `: ${reasonOf(api, key)}` : ''}`, r.submittedAt);
           continue;
         }
         let reason: string | undefined;
