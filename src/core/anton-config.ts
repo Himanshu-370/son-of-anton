@@ -31,7 +31,7 @@ export const AntonConfigSchema = z
     kits: z.object({ fallback: entries.optional(), web: entries.optional() }).strict().optional(),
     roles: z.object(Object.fromEntries(ROLES.map((r) => [r, entries.optional()]))).strict().optional(),
     budget: z
-      .object({ defaultUsd: z.number().min(0).optional(), allowances: allowances.optional(), taskBudgets: z.boolean().optional() })
+      .object({ defaultUsd: z.number().positive().optional(), allowances: allowances.optional(), taskBudgets: z.boolean().optional() })
       .strict()
       .optional(),
   })

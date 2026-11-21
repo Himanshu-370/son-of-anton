@@ -71,6 +71,9 @@ describe('budget config', () => {
     const y = 'budget:\n  allowances: { spec: 50, plan: 50 }\n';
     await expect(loadAntonConfig(await homeWith(y))).rejects.toThrow(/Invalid ~\/anton\/config\.yaml/);
   });
+  it('defaultUsd must be above 0 (F1)', async () => {
+    await expect(loadAntonConfig(await homeWith('budget:\n  defaultUsd: 0\n'))).rejects.toThrow(/Invalid ~\/anton\/config\.yaml/);
+  });
   it('budgetSettings fills defaults', async () => {
     expect(budgetSettings({})).toEqual({ defaultUsd: 10, allowances: DEFAULT_ALLOWANCES, taskBudgets: true });
     const cfg = await loadAntonConfig(await homeWith('budget:\n  defaultUsd: 3\n  taskBudgets: false\n'));
