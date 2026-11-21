@@ -86,7 +86,11 @@ async function writeRunRecord(repo: string, jobDir: string, used: LockEntry[]): 
   await assertJobDir(repo, jobDir);
   const path = join(jobDir, 'run-record.json');
   const raw = await readRegularFile(path);
-  const record = (raw === undefined ? {} : JSON.parse(raw)) as Record<string, unknown>;
+  const parsed: unknown = raw === undefined ? {} : JSON.parse(raw);
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('run-record.json is not a JSON object — fix or delete it');
+  }
+  const record = parsed as Record<string, unknown>;
   record.plugins = used.map(({ name, version, commit, sha256 }) => ({ name, version, commit, sha256 }));
   await writeFileAtomic(path, `${JSON.stringify(record, null, 2)}\n`);
 }

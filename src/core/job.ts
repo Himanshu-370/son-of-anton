@@ -1,6 +1,7 @@
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import { execa } from 'execa';
+import { budgetSettings, loadAntonConfig } from './anton-config.js';
 import { DEFAULTS } from './config.js';
 import { jobDir, projectDir } from './paths.js';
 import { createBranch, currentBranch, dropBranch, hasCommits, isClean } from './git.js';
@@ -32,7 +33,7 @@ export async function createNewProject(
     stage: 'spec',
     round: 0,
     maxRounds: DEFAULTS.maxRounds,
-    budgetUsd: opts.budgetUsd ?? DEFAULTS.budgetUsd,
+    budgetUsd: opts.budgetUsd ?? budgetSettings(await loadAntonConfig()).defaultUsd,
     spentUsd: 0,
     warned80: false,
     completedTasks: [],
@@ -140,7 +141,7 @@ export async function createChangeJob(
       stage: 'spec',
       round: 0,
       maxRounds: DEFAULTS.maxRounds,
-      budgetUsd: opts.budgetUsd ?? DEFAULTS.budgetUsd,
+      budgetUsd: opts.budgetUsd ?? budgetSettings(await loadAntonConfig()).defaultUsd,
       spentUsd: 0,
       warned80: false,
       completedTasks: [],

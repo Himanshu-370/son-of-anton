@@ -276,6 +276,18 @@ describe('runDeliver change jobs', () => {
   });
 });
 
+describe('runDeliver cost.json', () => {
+  it('symlinked cost.json is refused in the report', async () => {
+    const host = join(await mkdtemp(join(tmpdir(), 'anton-host-')), 'cost.json');
+    await writeFile(host, '{"hostStage": 99}');
+    await symlink(host, join(ctx.jobDir, 'cost.json'));
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, { tag: vi.fn(async () => {}), listTags: async () => [] });
+    const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    expect(md).not.toContain('hostStage');
+    expect(md).toContain('cost.json was refused (not a regular file).');
+  });
+});
+
 describe('runDeliver questions section', () => {
   const deps = { tag: vi.fn(async () => {}), listTags: async () => [] };
   it('report includes questions and assumptions', async () => {

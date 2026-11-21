@@ -415,6 +415,13 @@ describe('run record', () => {
     });
   });
 
+  it('non-object run-record.json gives a clear error', async () => {
+    await writeFile(join(dir, 'run-record.json'), '[1]');
+    const started = vi.fn(async (s: string) => `anton-${s}`);
+    await runUnattended('p', fakes({ startContainer: started }).deps);
+    expect(await readFile(join(dir, 'logs', 'error.log'), 'utf8')).toContain('run-record.json is not a JSON object — fix or delete it');
+  });
+
   it('a symlinked run-record.json is refused: the job pauses and the target is untouched', async () => {
     const host = join(await mkdtemp(join(tmpdir(), 'anton-host-')), 'host.json');
     await writeFile(host, '{"hostKey":"host-only"}');

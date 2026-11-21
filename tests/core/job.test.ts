@@ -32,6 +32,16 @@ beforeEach(async () => {
   process.env.ANTON_HOME = await mkdtemp(join(tmpdir(), 'anton-job-'));
 });
 
+describe('config budget', () => {
+  it('config defaultUsd sets a new job budget', async () => {
+    await writeFile(join(process.env.ANTON_HOME!, 'config.yaml'), 'budget:\n  defaultUsd: 3\n');
+    const p = await createNewProject('A CLI that cleans Downloads');
+    expect((await loadState(p.jobDir)).budgetUsd).toBe(3);
+    const q = await createNewProject('Another tool', { budgetUsd: 7 });
+    expect((await loadState(q.jobDir)).budgetUsd).toBe(7);
+  });
+});
+
 describe('createNewProject', () => {
   it('creates repo, job folder and initial state', async () => {
     const p = await createNewProject('A CLI that cleans Downloads');

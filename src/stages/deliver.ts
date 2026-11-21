@@ -170,8 +170,9 @@ function runSection(plan: Plan): string[] {
   return lines;
 }
 
-function costSection(costs: Record<string, number> | undefined): string[] {
+function costSection(costs: Record<string, number> | undefined, refused = false): string[] {
   const lines = ['## Cost and time by stage', ''];
+  if (refused) return [...lines, 'cost.json was refused (not a regular file).', '', 'Time by stage: not recorded.'];
   const entries = Object.entries(costs ?? {});
   if (entries.length === 0) {
     lines.push('No cost recorded.');
@@ -215,8 +216,15 @@ export async function runDeliver(
     const raw = await readOptional(join(ctx.jobDir, 'evidence', 'results.json'));
     outcome = raw ? (JSON.parse(raw) as { results: CheckResult[]; runOk: boolean }) : { results: [], runOk: false };
   }
-  const costRaw = await readOptional(join(ctx.jobDir, 'cost.json'));
-  const costs = costRaw ? (JSON.parse(costRaw) as Record<string, number>) : undefined;
+  let costs: Record<string, number> | undefined;
+  let costRefused = false;
+  try {
+    const costRaw = await readRegularFile(join(ctx.jobDir, 'cost.json'));
+    costs = costRaw ? (JSON.parse(costRaw) as Record<string, number>) : undefined;
+  } catch (e) {
+    if (!(e instanceof NotRegularFileError)) throw e;
+    costRefused = true;
+  }
   const sections = await readSections(join(ctx.jobDir, 'evidence', 'results.json'));
   let questions: string | undefined;
   let questionsRefused = false;
@@ -249,7 +257,7 @@ export async function runDeliver(
     ...(change ? [...(await regressionsSection(ctx.jobDir)), ''] : []),
     ...runSection(plan),
     '',
-    ...costSection(costs),
+    ...costSection(costs, costRefused),
     '',
     ...notDoneSection(spec, outcome.results, outcome.runOk),
     '',
