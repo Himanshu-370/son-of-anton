@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { runAgent, BudgetExceeded, AgentError, AllowanceExceeded, type StageCtx, type ChildLike } from '../../src/agent/host-runner.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
+import { appendStageUsage, cacheHitRate } from '../../src/core/budget.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
 
 const req: AgentRequest = {
@@ -40,7 +41,7 @@ beforeEach(async () => {
 });
 
 const result = (total: number, output: unknown = { ok: 1 }) =>
-  L({ type: 'result', ok: true, output, sessionId: 'sess', totalUsd: total, protocolVersion: 3 });
+  L({ type: 'result', ok: true, output, sessionId: 'sess', totalUsd: total, protocolVersion: 4 });
 
 describe('runAgent', () => {
   it('returns output and sessionId from result event', async () => {
@@ -58,12 +59,12 @@ describe('runAgent', () => {
     expect(JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8')).role).toBe('builder');
   });
 
-  it('stamps protocolVersion 3 on the request file', async () => {
+  it('stamps protocolVersion 4 on the request file', async () => {
     await runAgent(ctx, req, { spawn: () => fake([result(0)]).child, notify: vi.fn() });
-    expect(JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8')).protocolVersion).toBe(3);
+    expect(JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8')).protocolVersion).toBe(4);
   });
 
-  it('a result without protocolVersion 3 (stale image) throws AgentError and still records its cost', async () => {
+  it('a result without protocolVersion 4 (stale image) throws AgentError and still records its cost', async () => {
     const f = fake([L({ type: 'result', ok: true, output: {}, sessionId: 's', totalUsd: 0.4 })]);
     const p = runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() });
     await expect(p).rejects.toBeInstanceOf(AgentError);
@@ -131,7 +132,7 @@ describe('runAgent', () => {
   });
 
   it('on error event, cost is still recorded and AgentError thrown', async () => {
-    const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'boom', totalUsd: 0.7, protocolVersion: 3 })]);
+    const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'boom', totalUsd: 0.7, protocolVersion: 4 })]);
     await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toThrow(AgentError);
     expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(0.7);
   });
@@ -212,14 +213,14 @@ describe('runAgent', () => {
   });
 
   it("an error event with code 'budget' (SDK maxBudgetUsd stop) throws BudgetExceeded, cost recorded", async () => {
-    const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'error_max_budget_usd', code: 'budget', totalUsd: 0.6, protocolVersion: 3 })]);
+    const f = fake([L({ type: 'cost', totalUsd: 0.2 }), L({ type: 'error', message: 'error_max_budget_usd', code: 'budget', totalUsd: 0.6, protocolVersion: 4 })]);
     await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toBeInstanceOf(BudgetExceeded);
     expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(0.6);
   });
 
   it('error event crossing cap throws AgentError', async () => {
     await setState({ budgetUsd: 1 });
-    const f = fake([L({ type: 'error', message: 'boom', totalUsd: 1.5, protocolVersion: 3 })]);
+    const f = fake([L({ type: 'error', message: 'boom', totalUsd: 1.5, protocolVersion: 4 })]);
     await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toThrow(AgentError);
     expect((await loadState(ctx.jobDir)).spentUsd).toBeCloseTo(1.5);
   });
@@ -296,7 +297,7 @@ describe('runAgent redaction', () => {
 
     it("the SDK's budget stop on an allowance-bound session is AllowanceExceeded", async () => {
       await setState({ budgetUsd: 10, spentUsd: 6, stageSpentUsd: { build: 6 } });
-      const f = fake([L({ type: 'error', message: 'error_max_budget_usd', code: 'budget', totalUsd: 0.9, protocolVersion: 3 })]);
+      const f = fake([L({ type: 'error', message: 'error_max_budget_usd', code: 'budget', totalUsd: 0.9, protocolVersion: 4 })]);
       await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toBeInstanceOf(AllowanceExceeded);
     });
 
@@ -318,5 +319,33 @@ describe('runAgent redaction', () => {
       expect(warn).toHaveBeenCalledWith('Spec has used its 10% share ($1.00); continuing up to the job cap.');
       expect((await reqFile('spec-1.json')).budgetUsd).toBeCloseTo(5);
     });
+  });
+});
+
+describe('usage tracking', () => {
+  const usageJson = async () => JSON.parse(await readFile(join(ctx.jobDir, 'usage.json'), 'utf8'));
+  const u = (input: number, output: number, cacheRead: number, cacheWrite: number) => ({ input, output, cacheRead, cacheWrite });
+
+  it('usage.json accumulates per stage', async () => {
+    await appendStageUsage(ctx.jobDir, 'build', u(1, 2, 3, 4));
+    await appendStageUsage(ctx.jobDir, 'build', u(10, 20, 30, 40));
+    await appendStageUsage(ctx.jobDir, 'plan', u(5, 0, 0, 0));
+    expect(await usageJson()).toEqual({ build: u(11, 22, 33, 44), plan: u(5, 0, 0, 0) });
+    // runAgent records the terminal event's usage, on result and on error.
+    const f = fake([L({ type: 'result', ok: true, output: {}, sessionId: 's', totalUsd: 0.1, usage: u(1, 1, 1, 1), protocolVersion: 4 })]);
+    await runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() });
+    const e = fake([L({ type: 'error', message: 'x', totalUsd: 0.2, usage: u(2, 0, 2, 0), protocolVersion: 4 })]);
+    await expect(runAgent(ctx, req, { spawn: () => e.child, notify: vi.fn() })).rejects.toBeInstanceOf(AgentError);
+    expect((await usageJson()).build).toEqual(u(14, 23, 36, 45));
+    // A garbage usage.json (container-writable) is replaced, not fatal.
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile(join(ctx.jobDir, 'usage.json'), '{"build": "x", "constructor": 1');
+    await appendStageUsage(ctx.jobDir, 'build', u(1, 0, 0, 0));
+    expect(await usageJson()).toEqual({ build: u(1, 0, 0, 0) });
+  });
+
+  it('cache hit rate formula and empty case', () => {
+    expect(cacheHitRate(u(100, 999, 620, 280))).toBeCloseTo(0.62);
+    expect(cacheHitRate(u(0, 50, 0, 0))).toBeUndefined();
   });
 });

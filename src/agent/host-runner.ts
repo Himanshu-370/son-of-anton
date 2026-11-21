@@ -1,7 +1,7 @@
 import * as fsp from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { budgetSettings, loadAntonConfig } from '../core/anton-config.js';
-import { allowanceUsage, appendStageCost, recordCost, remainingUsd, stageGroup, usd } from '../core/budget.js';
+import { allowanceUsage, appendStageCost, appendStageUsage, recordCost, remainingUsd, stageGroup, usd } from '../core/budget.js';
 import { execIn } from '../docker/container.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { redact } from '../core/secrets.js';
@@ -192,10 +192,12 @@ export async function runAgent(
       case 'result':
         await applyTotal(ev.totalUsd, child, false);
         checkProtocol(ev.protocolVersion);
+        if (ev.usage) await appendStageUsage(ctx.jobDir, ctx.stage, ev.usage);
         return { output: ev.output, sessionId: ev.sessionId };
       case 'error':
         await applyTotal(ev.totalUsd, child, false);
         checkProtocol(ev.protocolVersion);
+        if (ev.usage) await appendStageUsage(ctx.jobDir, ctx.stage, ev.usage);
         // The SDK's own budget stop pauses the job like the host-side kill: allowance when the allowance set the session budget, else budget_cap.
         if (ev.code === 'budget') throw allowanceBound ? overAllowance(state) : new BudgetExceeded(ev.message);
         throw new AgentError(ev.message);

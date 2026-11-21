@@ -1,7 +1,9 @@
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
+import type { TokenTotals } from '../agent/protocol.js';
 import { NotRegularFileError, readRegularFile, writeFileAtomic } from '../core/atomic.js';
+import { cacheHitRate, parseUsage, totalUsage } from '../core/budget.js';
 import { redact } from '../core/secrets.js';
 import { listTags as defaultListTags, tag as defaultTag } from '../core/git.js';
 import type { ReviewFinding } from '../review/code-review.js';
@@ -170,16 +172,27 @@ function runSection(plan: Plan): string[] {
   return lines;
 }
 
-function costSection(costs: Record<string, number> | undefined, refused = false): string[] {
+function costSection(costs: Record<string, number> | undefined, refused: boolean, usage: Record<string, TokenTotals>, usageRefused: boolean): string[] {
   const lines = ['## Cost and time by stage', ''];
   if (refused) return [...lines, 'cost.json was refused (not a regular file).', '', 'Time by stage: not recorded.'];
   const entries = Object.entries(costs ?? {});
+  const hit = (t: TokenTotals | undefined) => {
+    const r = t && cacheHitRate(t);
+    return r === undefined ? '-' : `${Math.round(r * 100)}%`;
+  };
   if (entries.length === 0) {
     lines.push('No cost recorded.');
   } else {
     const total = entries.reduce((a, [, v]) => a + v, 0);
-    lines.push('| Stage | Cost |', '|---|---|', ...entries.map(([k, v]) => `| ${k} | ${usd(v)} |`), `| **Total** | **${usd(total)}** |`);
+    const totalHit = hit(totalUsage(usage));
+    lines.push(
+      '| Stage | Cost | Cache hit |',
+      '|---|---|---|',
+      ...entries.map(([k, v]) => `| ${k} | ${usd(v)} | ${hit(Object.hasOwn(usage, k) ? usage[k] : undefined)} |`),
+      `| **Total** | **${usd(total)}** | ${totalHit === '-' ? '-' : `**${totalHit}**`} |`,
+    );
   }
+  if (usageRefused) lines.push('', 'usage.json was refused (not a regular file).');
   lines.push('', 'Time by stage: not recorded.');
   return lines;
 }
@@ -225,6 +238,14 @@ export async function runDeliver(
     if (!(e instanceof NotRegularFileError)) throw e;
     costRefused = true;
   }
+  let usage: Record<string, TokenTotals> = {};
+  let usageRefused = false;
+  try {
+    usage = parseUsage(await readRegularFile(join(ctx.jobDir, 'usage.json')));
+  } catch (e) {
+    if (!(e instanceof NotRegularFileError)) throw e;
+    usageRefused = true;
+  }
   const sections = await readSections(join(ctx.jobDir, 'evidence', 'results.json'));
   let questions: string | undefined;
   let questionsRefused = false;
@@ -257,7 +278,7 @@ export async function runDeliver(
     ...(change ? [...(await regressionsSection(ctx.jobDir)), ''] : []),
     ...runSection(plan),
     '',
-    ...costSection(costs, costRefused),
+    ...costSection(costs, costRefused, usage, usageRefused),
     '',
     ...notDoneSection(spec, outcome.results, outcome.runOk),
     '',

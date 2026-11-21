@@ -252,6 +252,21 @@ describe('anton status', () => {
   });
 });
 
+describe('anton status: cache', () => {
+  it('status shows cache rate', async () => {
+    const { dir } = await project('q', { stage: 'build', round: 1 });
+    const h0 = harness();
+    await statusCommand('q', h0.deps);
+    expect(h0.out.find((l) => l.startsWith('q '))).toMatch(/\s-$/);
+    const u = (input: number, cacheRead: number, cacheWrite: number) => ({ input, output: 9, cacheRead, cacheWrite });
+    await writeFile(join(dir, 'usage.json'), JSON.stringify({ plan: u(50, 0, 50), build: u(50, 620, 230) }));
+    const h = harness();
+    await statusCommand('q', h.deps);
+    expect(h.out[0]).toMatch(/CACHE$/);
+    expect(h.out.find((l) => l.startsWith('q '))).toMatch(/\scache 62%$/);
+  });
+});
+
 describe('anton status: allowance', () => {
   it('shows spend over cap and the allowance pause reason', async () => {
     await project('q', { stage: 'paused', pausedFrom: 'build', pauseReason: 'allowance', round: 1, spentUsd: 7.02 });

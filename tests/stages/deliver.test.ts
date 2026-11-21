@@ -288,6 +288,33 @@ describe('runDeliver cost.json', () => {
   });
 });
 
+describe('runDeliver usage.json', () => {
+  const deps = { tag: vi.fn(async () => {}), listTags: async () => [] };
+  const u = (input: number, cacheRead: number, cacheWrite: number) => ({ input, output: 7, cacheRead, cacheWrite });
+  it('report has a Cache hit column', async () => {
+    await writeFile(join(ctx.jobDir, 'cost.json'), JSON.stringify({ plan: 0.25, build: 0.75 }));
+    await writeFile(join(ctx.jobDir, 'usage.json'), JSON.stringify({ build: u(100, 620, 280), plan: u(0, 0, 0), constructor: 'x' }));
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, deps);
+    const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    expect(md).toContain('| Stage | Cost | Cache hit |');
+    expect(md).toContain('| build | $0.75 | 62% |');
+    expect(md).toContain('| plan | $0.25 | - |');
+    expect(md).toContain('| **Total** | **$1.00** | **62%** |');
+    expect(md).not.toContain('constructor');
+  });
+
+  it('a symlinked usage.json is refused: cache cells show -', async () => {
+    const host = join(await mkdtemp(join(tmpdir(), 'anton-host-')), 'usage.json');
+    await writeFile(host, JSON.stringify({ build: u(0, 900, 100) }));
+    await writeFile(join(ctx.jobDir, 'cost.json'), JSON.stringify({ build: 0.75 }));
+    await symlink(host, join(ctx.jobDir, 'usage.json'));
+    await runDeliver(ctx, spec, plan, { results, runOk: true }, deps);
+    const md = await readFile(join(ctx.jobDir, 'REPORT.md'), 'utf8');
+    expect(md).toContain('| build | $0.75 | - |');
+    expect(md).toContain('usage.json was refused (not a regular file).');
+  });
+});
+
 describe('runDeliver questions section', () => {
   const deps = { tag: vi.fn(async () => {}), listTags: async () => [] };
   it('report includes questions and assumptions', async () => {

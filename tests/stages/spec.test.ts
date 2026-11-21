@@ -76,7 +76,7 @@ describe('runSpec cost accounting across resumed turns', () => {
     let call = 0;
     const spawn = (): ChildLike => {
       const t = turns[call++]!;
-      const line = JSON.stringify({ type: 'result', ok: true, output: t.output, sessionId: 'sess', totalUsd: t.totalUsd, protocolVersion: 3 }) + '\n';
+      const line = JSON.stringify({ type: 'result', ok: true, output: t.output, sessionId: 'sess', totalUsd: t.totalUsd, protocolVersion: 4 }) + '\n';
       return {
         stdout: (async function* () { yield line; })(),
         kill: () => undefined,
