@@ -1,0 +1,8 @@
+{
+  "samples": [
+    { "name": "cli-wordcount", "kind": "new", "kit": "fallback", "budgetUsd": 3, "description": "Tiny CLI that counts lines, words and characters in a text file." },
+    { "name": "web-counter", "kind": "new", "kit": "web", "budgetUsd": 3, "description": "One-page counter app with plus, minus and reset buttons." },
+    { "name": "api-todo", "kind": "new", "kit": "fallback", "budgetUsd": 3, "description": "Small HTTP JSON API for an in-memory to-do list." },
+    { "name": "change-greeting", "kind": "change", "kit": "fallback", "budgetUsd": 3, "description": "Change job: add an optional name argument to a one-function greeting package." }
+  ]
+}

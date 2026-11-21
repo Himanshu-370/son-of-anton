@@ -1,0 +1,10 @@
+{
+  "name": "sample-greeting",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "greet.js",
+  "scripts": {
+    "test": "node --test"
+  }
+}

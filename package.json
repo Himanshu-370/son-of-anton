@@ -26,6 +26,7 @@
     "yaml": "^2.9.1",
     "zod": "^4.6.7"
   },
+  "files": ["dist", "src", "bench"],
   "devDependencies": {
     "@types/node": "^26.6.6",
     "tsx": "^4.23.15",

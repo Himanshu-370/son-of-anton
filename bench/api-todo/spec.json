@@ -1,0 +1,14 @@
+{
+  "title": "Sample to-do JSON API",
+  "summary": "Synthetic practice project: a small HTTP server keeping an in-memory to-do list, with JSON responses. It listens on the port in the PORT environment variable.",
+  "outOfScope": ["A database", "Authentication"],
+  "tech": ["Node.js", "TypeScript"],
+  "acceptanceChecks": [
+    { "id": "AC-1", "text": "`GET /todos` on a fresh server returns status 200 and the JSON body `[]`." },
+    { "id": "AC-2", "text": "`POST /todos` with the JSON body `{\"title\":\"buy milk\"}` returns status 201 and a JSON object with `id`, `title` equal to `buy milk` and `done` equal to false." },
+    { "id": "AC-3", "text": "After that POST, `GET /todos` returns a list containing the new item." },
+    { "id": "AC-4", "text": "`POST /todos` with a body that has no `title` returns status 400." }
+  ],
+  "services": [],
+  "kit": "fallback"
+}
