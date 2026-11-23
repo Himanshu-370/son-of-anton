@@ -190,6 +190,26 @@ To measure Caveman or Ponytail, initialize the bench and install the plugin. Tes
 4. Read the comparison for changes in delivery, checks passing, first-try pass rate, rounds, cost and cache hit rate.
 5. Keep the plugin or remove it from those roles based on the comparison.
 
+## Slack milestone updates
+
+Phase 6a gives the nine Anton roles their own Slack bots. Jobs you run from the CLI can post progress to one thread per job in a private project channel. Workspace updates go to private `#anton`. The two job checkpoints still use the CLI in this phase.
+
+1. Use a dedicated Slack test workspace for the first setup. Copy its workspace ID and your member ID. In [Slack app settings](https://api.slack.com/apps), generate a configuration access token for that workspace.
+2. Run `anton slack setup` in a terminal. It creates the nine apps and guides you through installing each app and creating an app-level token with the `connections:write` scope. Enter tokens at the hidden prompts. You can rerun setup to resume an interrupted installation. Setup shows any app or channel ID it needs you to confirm. Rerun setup to renew a role’s credentials or rebind the workspace channel, then restart the service.
+3. Start `anton serve` in the foreground and run a small CLI job. Check that the PM and other roles post under their own names in the project thread. The service connects outward, and your job can keep running while the service is stopped.
+4. On macOS, run `anton slack service install` to start the service at login. Run `anton slack service status` to check it, or `anton slack service uninstall` to remove it. Service logs live under `~/anton/slack/logs/`.
+
+Credentials live in owner-only files under `~/anton/slack/`. Pending updates stay on disk through a restart. Use `anton slack outbox` to see delivery counts and updates that need attention. If Slack restricts a channel invitation, add the owner and role apps to the private channel in Slack. When Slack cannot confirm an operation, Anton records it for review and holds later updates to that channel. Use `anton slack resolve recheck <id>` to look for the existing post again, or `anton slack resolve retry <id>` for a confirmed delivery failure. A private project channel can be verified by explicit ID with `bind-channel`. For an uncertain parent post, `confirm-thread` takes the Slack message timestamp and verifies the sender and delivery marker.
+
+Slack receives milestone summaries and a sanitized copy of the generated spec. Review the current spec and make approval decisions in the CLI. To share a QA screenshot, open it locally first, then run `anton slack share-screenshot <project> <check-id>`. Anton queues only the validated image you select. The repo and raw logs stay on your Mac.
+
+Use `ANTON_HOME` with a separate local data directory when testing a different workspace. After setup, you can verify all nine identities with the opt-in Slack smoke test below. It creates one private channel and posts synthetic messages. You can archive the channel after checking the thread.
+
+```sh
+ANTON_SLACK_E2E=1 ANTON_SLACK_TEST_HOME=/path/to/test-home ANTON_SLACK_TEST_TEAM_ID=your-test-workspace-id \
+  npx vitest run tests/e2e/slack-service.e2e.test.ts
+```
+
 ## Where things live
 
 - Projects: `~/anton/projects/<name>/` (override the root with `ANTON_HOME`), each a git repo with one commit per plan task.
@@ -249,7 +269,7 @@ The last one builds a real project end to end with the API and costs up to about
 
 ## Limits
 
-Two kits (fallback and web), CLI only, no Slack yet. See the [roadmap](docs/superpowers/plans/2026-11-19-son-of-anton-roadmap.md).
+Two kits (fallback and web), CLI job controls, and optional Slack milestone updates. See the [roadmap](docs/superpowers/plans/2026-11-19-son-of-anton-roadmap.md).
 
 ## License
 
