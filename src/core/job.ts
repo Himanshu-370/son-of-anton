@@ -167,7 +167,7 @@ export async function approvePresetSpec(job: NewProject, spec: SpecDoc, extra: P
   const secrets = await loadSecrets(job.name);
   await writeSpec(job.jobDir, spec, secrets);
   await readApprovedSpec(job.jobDir);
-  await commitAll(job.repoPath, 'chore: spec approved', secrets);
+  await commitAll(job.repoPath, 'chore: spec approved', secrets, { emptyIfNoHead: true });
   await tag(job.repoPath, `anton/${job.jobId}/spec-approved`);
   const state = transition(transition(await loadState(job.jobDir), 'awaiting_spec_approval'), 'plan', extra);
   await saveState(job.jobDir, state);

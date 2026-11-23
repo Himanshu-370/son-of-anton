@@ -69,11 +69,21 @@ export async function stagedDiff(repo: string): Promise<string> {
  * With `secrets`, a staged diff that contains a secret value is unstaged (work tree kept) and rejected
  * with SecretInDiff instead of committed.
  */
-export async function commitAll(repo: string, message: string, secrets?: Record<string, string>): Promise<string | null> {
+export async function commitAll(
+  repo: string,
+  message: string,
+  secrets?: Record<string, string>,
+  opts: { emptyIfNoHead?: boolean } = {},
+): Promise<string | null> {
   await ensureAntonIgnored(repo);
   await git(repo, ['add', '-A']);
   const status = await git(repo, ['status', '--porcelain']);
-  if (status.trim() === '') return null;
+  if (status.trim() === '') {
+    // A brand-new project tracks nothing (.anton/ is ignored), so there is no HEAD to tag yet: make the first commit empty.
+    if (!opts.emptyIfNoHead || await hasCommits(repo)) return null;
+    await git(repo, ['commit', '-q', '--no-verify', '--allow-empty', '-m', message]);
+    return headSha(repo);
+  }
   if (Object.keys(secrets ?? {}).length) {
     // shortcut: binary files are not inspected (git diff shows no text for them); upgrade if agents may write binaries.
     const diff = (await stagedDiff(repo)).split('\n').filter((l) => l.startsWith('+') && !/^\+\+\+ ("?b\/|\/dev\/null)/.test(l)).join('\n');

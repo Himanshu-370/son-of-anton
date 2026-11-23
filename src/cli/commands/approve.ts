@@ -19,7 +19,7 @@ export async function approveCommand(project: string, deps: CliDeps = {}): Promi
       const code = await preflightOr2(d);
       if (code !== 0) return code;
       await readApprovedSpec(job.jobDir);
-      await commitAll(job.repo, 'chore: spec approved', await loadSecrets(project));
+      await commitAll(job.repo, 'chore: spec approved', await loadSecrets(project), { emptyIfNoHead: true });
       await tag(job.repo, `anton/${job.jobId}/spec-approved`);
       await saveState(job.jobDir, transition(state, 'plan'));
       d.spawnRun(project, job.jobDir);
