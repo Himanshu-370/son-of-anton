@@ -32,8 +32,8 @@ const socketHello = z.object({
 
 async function readSocketAppId(rawUrl: string): Promise<string | undefined> {
   const url = new URL(rawUrl);
-  if (url.protocol !== 'wss:' || !url.hostname.endsWith('.slack.com')
-    || url.username || url.password || url.port) return undefined;
+  if (url.protocol !== 'wss:' || !url.hostname.endsWith('.slack.com') || url.port) return undefined;
+  if (url.username || url.password) return undefined;
 
   // Slack supplies the app ID in the Socket Mode hello, not in apps.connections.open.
   const socket = new WebSocket(url);
