@@ -220,6 +220,17 @@ export async function inspectOutbox(queue: QueueLocation): Promise<Store> {
   return readStore(loc.path);
 }
 
+/**
+ * The project whose channel Anton created (or the owner bound by ID) as `channelId`. Names are never used:
+ * a channel Anton did not record maps to no project.
+ */
+export async function projectForChannel(queue: QueueLocation, channel: string): Promise<string | undefined> {
+  if (!channelId.safeParse(channel).success || channel === queue.config.channelId) return undefined;
+  const { channels } = await inspectOutbox(queue);
+  const lanes = Object.entries(channels).filter(([lane, id]) => id === channel && lane.startsWith('proj:'));
+  return lanes.length === 1 ? lanes[0]![0].slice('proj:'.length) : undefined;
+}
+
 const laneKey = (event: Milestone) => event.scope === 'workspace' ? '#anton' : `proj:${event.project}`;
 const threadKey = (event: Extract<Milestone, { scope: 'job' }>) => `${laneKey(event)}:${event.jobId}`;
 const markerFor = (...key: string[]) => `anton-${hash(JSON.stringify(key))}`;

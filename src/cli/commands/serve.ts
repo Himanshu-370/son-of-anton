@@ -2,6 +2,8 @@ import { antonHome } from '../../core/paths.js';
 import { SLACK_ROLES, loadSlackConfig, loadSlackCredentials } from '../../slack/config.js';
 import { drainOutbox, inspectOutbox, resolveOutboxEntry, type OutboxResolution } from '../../slack/outbox.js';
 import { reconcileCheckpoints } from '../../slack/reconcile.js';
+import { dispatchSlackAction } from '../../slack/actions.js';
+import { createInboundHandler } from '../../slack/inbound.js';
 import { startSlackService } from '../../slack/service.js';
 import { createSlackRuntime } from '../../slack/transport.js';
 import { guard, resolveDeps, type CliDeps } from '../deps.js';
@@ -16,7 +18,15 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
       d.err('Run anton slack setup before starting the Slack service.');
       return 1;
     }
-    const runtime = createSlackRuntime(config, credentials);
+    // Slack orders run the same job actions as the CLI, in this process, with its effects.
+    const inbound = createInboundHandler({
+      log: d.out,
+      dispatch: (action) => dispatchSlackAction(action, {
+        config, home,
+        jobs: { preflight: d.preflight, spawnRun: d.spawnRun, stopContainer: d.stopContainer, retro: d.retro },
+      }),
+    });
+    const runtime = createSlackRuntime(config, credentials, inbound);
     let reconcileAt = 0;
     const service = await startSlackService({
       home, roles: SLACK_ROLES, open: runtime.open, log: d.out,
@@ -42,7 +52,11 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
       };
       const removeSigint = d.onSigint(clean);
       process.once('SIGTERM', clean);
-    }).finally(() => service.stop());
+    }).finally(async () => {
+      await service.stop();
+      // Let accepted actions finish their local work; their records make a redelivery safe either way.
+      await inbound.idle();
+    });
     return 0;
   });
 }

@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { SLACK_ROLES, type SlackConfig, type SlackCredentials, type SlackRole } from './config.js';
 import { OutboxDeliveryError, type OutboxMessageRequest, type OutboxTransport } from './outbox.js';
 import type { RoleConnection } from './service.js';
+import type { InboundHandler } from './inbound.js';
 import { slackSetupApi } from './setup-api.js';
 
 const quiet: Logger = {
@@ -153,7 +154,14 @@ export function createSlackTransport(config: SlackConfig, deps: TransportDeps): 
   };
 }
 
-export function createSlackRuntime(config: SlackConfig, credentials: SlackCredentials) {
+/** Roles whose manifests enable interactivity (see manifests.ts). */
+const INTERACTIVE: readonly SlackRole[] = ['pm', 'qa', 'coach'];
+
+/**
+ * `inbound` receives owner commands, card clicks and messages. Without it, the PM only points to the CLI.
+ * Handlers acknowledge at once; the action runs in the background.
+ */
+export function createSlackRuntime(config: SlackConfig, credentials: SlackCredentials, inbound?: InboundHandler) {
   const clients = new Map(SLACK_ROLES.map((role) => [
     role, new webApi.WebClient(credentials[role].botToken, webOptions),
   ]));
@@ -177,9 +185,20 @@ export function createSlackRuntime(config: SlackConfig, credentials: SlackCreden
       receiver, token: botToken, botId: auth.bot_id, botUserId: expected.botUserId,
       tokenVerificationEnabled: false, logger: quiet, clientOptions: webOptions,
     });
-    if (role === 'pm') app.command('/anton', async ({ ack }) => {
-      await ack({ response_type: 'ephemeral', text: 'Use the Anton CLI to manage jobs.' });
-    });
+    if (!inbound) {
+      if (role === 'pm') app.command('/anton', async ({ ack }) => {
+        await ack({ response_type: 'ephemeral', text: 'Use the Anton CLI to manage jobs.' });
+      });
+    } else {
+      if (role === 'pm') app.command('/anton', async ({ ack, body, respond }) => {
+        await inbound.command(body, role, (reply) => ack(reply), (reply) => respond(reply));
+      });
+      if (INTERACTIVE.includes(role)) app.action(/.*/, async ({ ack, body, respond }) => {
+        await inbound.action(body, role, () => ack(), (reply) => respond(reply));
+      });
+      app.event('message', async ({ body }) => { await inbound.event(body, role); });
+      app.event('app_mention', async ({ body }) => { await inbound.event(body, role); });
+    }
 
     let connected = false;
     let closed = false;
