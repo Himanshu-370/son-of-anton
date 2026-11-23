@@ -34,7 +34,7 @@ function parseCases(xml: string): Case[] | null {
   const roots: Record<string, unknown>[] = [];
   const top = (doc.testsuites ?? doc.testsuite) as unknown;
   if (!top || typeof top !== 'object') return null;
-  if (doc.testsuites) collectSuites({ testsuite: (top as Record<string, unknown>).testsuite }, roots);
+  if (doc.testsuites) collectSuites(top as Record<string, unknown>, roots);
   else for (const s of arr<Record<string, unknown>>(top as Record<string, unknown> | Record<string, unknown>[])) collectSuites(s, roots);
 
   const cases: Case[] = [];
