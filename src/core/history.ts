@@ -72,7 +72,7 @@ export async function readHistory(home = antonHome()): Promise<HistoryEntry[]> {
   return [...out.values()];
 }
 
-const quantile = (sorted: number[], p: number): number => {
+export const quantile = (sorted: number[], p: number): number => {
   const i = p * (sorted.length - 1);
   const lo = Math.floor(i);
   return sorted[lo]! + (sorted[Math.min(lo + 1, sorted.length - 1)]! - sorted[lo]!) * (i - lo);

@@ -319,10 +319,10 @@ export async function ensureAntonIgnored(repo: string): Promise<void> {
 }
 
 /** `git init` in `dir` (created if missing) unless it already holds a repo. Same hook/config blocking as every call. */
-export async function initRepoIfMissing(dir: string): Promise<void> {
+export async function initRepoIfMissing(dir: string, initialBranch?: string): Promise<void> {
   await mkdir(dir, { recursive: true });
   if (await lstat(resolve(dir, '.git')).then(() => true, () => false)) return;
-  await git(dir, ['init', '-q']);
+  await git(dir, ['init', '-q', ...(initialBranch === undefined ? [] : ['-b', initialBranch])]);
 }
 
 /** Stage only `paths` (repo-relative; deletions included) and commit them. Identity comes from SAFE, so no user git config is needed. */

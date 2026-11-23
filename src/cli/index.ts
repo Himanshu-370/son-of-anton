@@ -7,6 +7,7 @@ import { abandonCommand } from './commands/abandon.js';
 import { acceptRiskCommand } from './commands/accept-risk.js';
 import { adoptCommand } from './commands/adopt.js';
 import { approveCommand } from './commands/approve.js';
+import { benchCommand, type BenchOpts } from './commands/bench.js';
 import { changeCommand } from './commands/change.js';
 import { lessonsListCommand, lessonsRemoveCommand, lessonsReviewCommand } from './commands/lessons.js';
 import { logsCommand } from './commands/logs.js';
@@ -127,6 +128,15 @@ export function buildProgram(deps: CliDeps = {}): Command {
     .description('Remove a lesson by id')
     .argument('<id>')
     .action(async (id: string) => exit(await lessonsRemoveCommand(id, deps)));
+  program
+    .command('bench')
+    .description('Run practice projects and measure cost and quality')
+    .option('--init', 'install the bundled practice samples')
+    .option('--only <samples>', 'run these comma-separated sample names')
+    .option('--label <text>', 'label the run')
+    .option('--compare <runId>', 'compare against this earlier run')
+    .option('--yes', 'run without asking for confirmation')
+    .action(async (opts: BenchOpts) => exit(await benchCommand(opts, deps)));
   program
     .command('_run', { hidden: true })
     .argument('<project>')

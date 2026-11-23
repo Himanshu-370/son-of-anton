@@ -160,9 +160,17 @@ export function runIn(name: string, shellCmd: string, exec: ExecFn = defaultExec
   return exec('docker', ['exec', name, 'sh', '-lc', shellCmd]);
 }
 
+/** Removing an already absent container succeeds. Other Docker failures are reported. */
+export async function removeContainer(name: string, exec: ExecFn = defaultExec): Promise<void> {
+  const result = await exec('docker', ['rm', '-f', name]);
+  if (result.exitCode !== 0 && !/No such container:/i.test(result.stderr)) {
+    throw new Error(`Docker could not remove ${name}: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
+  }
+}
+
 export async function stopContainer(name: string, exec: ExecFn = defaultExec): Promise<void> {
   try {
-    await exec('docker', ['rm', '-f', name]);
+    await removeContainer(name, exec);
   } catch {
     /* ignore */
   }

@@ -68,8 +68,8 @@ async function takeMutex(mutex: string, src: string): Promise<boolean> {
   return false;
 }
 
-export async function acquireLock(repo: string): Promise<() => Promise<void>> {
-  const path = lockPath(repo);
+export async function acquireLock(repo: string, filename = 'run.lock'): Promise<() => Promise<void>> {
+  const path = join(repo, '.anton', filename);
   const mutex = `${path}.takeover`;
   await mkdir(join(repo, '.anton'), { recursive: true });
   const uniq = `${process.pid}.${Math.random().toString(36).slice(2)}`;

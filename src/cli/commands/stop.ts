@@ -1,7 +1,7 @@
 import { lockHolder, removeLockIfHeldBy } from '../../core/lock.js';
 import { loadState, pause, saveState } from '../../core/state.js';
 import { ACTIVE_STAGES, containerName } from '../../pipeline/runner.js';
-import { guard, resolveDeps, resolveJob, type CliDeps, type Resolved } from '../deps.js';
+import { guard, resolveDeps, resolveManualJob, type CliDeps, type Resolved } from '../deps.js';
 
 const GRACE_MS = 10_000;
 const POLL_MS = 250;
@@ -21,7 +21,7 @@ function alive(d: Resolved, pid: number): boolean {
 export async function stopCommand(project: string, deps: CliDeps = {}): Promise<number> {
   const d = resolveDeps(deps);
   return guard(d, async () => {
-    const job = await resolveJob(project);
+    const job = await resolveManualJob(project);
     const pid = await lockHolder(job.repo);
     if (pid !== undefined && alive(d, pid)) {
       d.out(`Stopping ${project} (pid ${pid})…`);

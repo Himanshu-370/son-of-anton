@@ -65,6 +65,7 @@ export async function loadSamples(home: string = antonHome(), only?: string[]): 
     try {
       spec = SpecDocBaseSchema.parse(JSON.parse(await fsp.readFile(join(dir, 'spec.json'), 'utf8')));
     } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') throw e;
       throw new Error(`Bench sample "${s.name}" has an invalid spec.json: ${(e as Error).message}`);
     }
     return { ...s, spec, dir, ...(s.kind === 'change' ? { repoDir: join(dir, 'repo') } : {}) };

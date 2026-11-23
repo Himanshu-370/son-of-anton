@@ -152,6 +152,13 @@ export async function resolveJob(name: string): Promise<ResolvedJob> {
   return { name, repo, jobId, jobDir, state: await loadState(jobDir) };
 }
 
+/** Bench owns the lifecycle of its temporary jobs. */
+export async function resolveManualJob(name: string): Promise<ResolvedJob> {
+  const job = await resolveJob(name);
+  if (job.state.bench !== undefined) throw new UsageError('Bench jobs are managed by anton bench.');
+  return job;
+}
+
 /** Parses a `--budget` value; returns undefined when absent, throws UsageError when invalid. */
 export function parseBudget(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
