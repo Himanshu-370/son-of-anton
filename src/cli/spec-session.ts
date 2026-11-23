@@ -1,9 +1,11 @@
+import { publishJobMilestone } from '../slack/job-milestones.js';
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
 import { estimateCost } from '../core/history.js';
 import { loadSecrets, secretsEnvFile } from '../core/secrets.js';
 import { loadState, saveState, transition } from '../core/state.js';
 import { selectKit, type KitName } from '../kits/index.js';
+import { specRevision } from '../slack/events.js';
 import { writeSpec } from '../stages/spec.js';
 import type { Resolved } from './deps.js';
 
@@ -52,7 +54,10 @@ export async function runSpecSession(
     const history = await d.readHistory().catch(() => []);
     const estimate = estimateCost(history, { kind: mode, kit, checks: r.spec.acceptanceChecks.length });
     await writeSpec(p.jobDir, { ...r.spec, kit }, secrets, estimate);
-    await saveState(p.jobDir, transition(r.state, 'awaiting_spec_approval'));
+    const next = transition(r.state, 'awaiting_spec_approval');
+    await saveState(p.jobDir, next);
+    const occurrence = await specRevision(p.jobDir);
+    if (occurrence) await publishJobMilestone(next, { kind: 'spec-ready', occurrence });
   } catch (e) {
     // `spec` has no paused edge, so the job can't be resumed: point at abandon + a fresh run.
     const msg = e instanceof Error ? e.message : String(e);

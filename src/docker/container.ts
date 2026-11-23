@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { mkdir, readdir, readFile, stat } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { mkdir, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { basename, dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
 import { defaultExec, type ExecFn } from '../core/exec.js';
@@ -119,6 +119,30 @@ export async function ensureImage(
   return tag;
 }
 
+async function resolvedHostPath(path: string): Promise<string> {
+  const absolute = resolve(path);
+  try {
+    return await realpath(absolute);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    const parent = dirname(absolute);
+    return parent === absolute ? absolute : join(await resolvedHostPath(parent), basename(absolute));
+  }
+}
+
+function containsPath(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel !== '..' && !rel.startsWith(`..${sep}`);
+}
+
+/** Keep local Slack configuration and credentials outside container bind mounts. */
+export async function assertSlackDataOutsideMount(path: string, home = antonHome()): Promise<void> {
+  const [mount, slack] = await Promise.all([resolvedHostPath(path), resolvedHostPath(join(home, 'slack'))]);
+  if (containsPath(mount, slack) || containsPath(slack, mount)) {
+    throw new Error('A container mount overlaps local Slack data. Put ANTON_HOME outside the project and plugin mounts.');
+  }
+}
+
 /** Run a kit container: the repo at /workspace and `<home>/plugins` read-only at /opt/anton/plugins. */
 export async function startContainer(
   slug: string,
@@ -129,7 +153,9 @@ export async function startContainer(
 ): Promise<string> {
   const name = `anton-${slug}`;
   // Created first so Docker does not create it (root-owned) for the bind mount.
-  const plugins = join(opts.home ?? antonHome(), 'plugins');
+  const home = opts.home ?? antonHome();
+  const plugins = join(home, 'plugins');
+  await Promise.all([assertSlackDataOutsideMount(repoPath, home), assertSlackDataOutsideMount(plugins, home)]);
   await mkdir(plugins, { recursive: true });
   await exec('docker', ['rm', '-f', name]).catch(() => undefined);
   const r = await exec('docker', [

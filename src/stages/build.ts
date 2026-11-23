@@ -1,3 +1,4 @@
+import { publishJobMilestone } from '../slack/job-milestones.js';
 import * as fsp from 'node:fs/promises';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
@@ -200,6 +201,9 @@ export async function runBuild(
       await commit(ctx.repo, `fix: round ${state.round} (${area})`, ctx.secrets);
       state = { ...state, completedFixAreas: [...(state.completedFixAreas ?? []), area] };
       await saveState(ctx.jobDir, state);
+      await publishJobMilestone(state, {
+        kind: 'build-handoff', occurrence: `reject-${state.rejects ?? 0}:round-${state.round}`, role: area,
+      });
     }
   } else {
     const ordered = orderTasks(plan);
@@ -211,6 +215,7 @@ export async function runBuild(
       await commit(ctx.repo, `${task.id}: ${task.title}`, ctx.secrets);
       state = { ...state, completedTasks: [...state.completedTasks, task.id] };
       await saveState(ctx.jobDir, state);
+      if (isLastOfArea) await publishJobMilestone(state, { kind: 'build-handoff', occurrence: 'initial', role: task.area });
     }
   }
 

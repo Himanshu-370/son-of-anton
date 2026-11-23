@@ -1,3 +1,4 @@
+import { publishJobMilestone } from '../slack/job-milestones.js';
 import { lstat, mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
@@ -182,7 +183,11 @@ export async function runVerify(
   const s = ctx.state;
   // A kit agent (web browser tester) records its cost in the state it returns; keep it.
   let state = kitState ?? s;
-  const record: Record<string, unknown> = { round: s.round, results, runOk };
+  const record: {
+    round: number; results: CheckResult[]; runOk: boolean; reviewedFiles?: string[];
+    review?: { findings: ReviewFinding[] };
+    security?: Pick<Awaited<ReturnType<typeof defaultRunSecurityReview>>, 'findings' | 'unavailable'>;
+  } = { round: s.round, results, runOk };
 
   // No baseline (new job) or an invalid one: no regression logic and nothing is pre-existing.
   const baseline = await loadBaseline(ctx.jobDir);
@@ -242,5 +247,16 @@ export async function runVerify(
     else state = transition(state, 'build', { round: s.round + 1, lastFailureSignature: signature, completedFixAreas: [] });
   }
   await saveState(ctx.jobDir, state);
+  const occurrence = `verify-${n}`;
+  const checkPasses = results.filter((result) => result.status === 'pass').length;
+  await publishJobMilestone(state, {
+    kind: 'checks-complete', occurrence, passed: checkPasses, failed: results.length - checkPasses,
+  });
+  if (record.review) await publishJobMilestone(state, {
+    kind: 'code-review-complete', occurrence, count: record.review.findings.length,
+  });
+  if (record.security) await publishJobMilestone(state, {
+    kind: 'security-review-complete', occurrence, count: record.security.findings.length,
+  });
   return { state, passed, results, runOk, failureReport: report, failures };
 }

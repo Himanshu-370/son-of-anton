@@ -1,3 +1,4 @@
+import { publishJobMilestone } from '../slack/job-milestones.js';
 import * as fsp from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { budgetSettings, loadAntonConfig } from '../core/anton-config.js';
@@ -205,7 +206,10 @@ export async function runAgent(
     // state.json first: it is what the caps read. cost.json is the report's per-stage table only.
     await saveState(ctx.jobDir, state);
     await bestEffort('cost.json', () => appendStageCost(ctx.jobDir, ctx.stage, inc));
-    if (r.crossedWarn) await notify('Son of Anton', `${ctx.project}: 80% of budget used`);
+    if (r.crossedWarn) {
+      await notify('Son of Anton', `${ctx.project}: 80% of budget used`);
+      await publishJobMilestone(state, { kind: 'budget-warning', occurrence: `cap-${state.budgetUsd}` });
+    }
     if (r.overCap && killOnCap) {
       killed = true;
       child.kill('SIGTERM');

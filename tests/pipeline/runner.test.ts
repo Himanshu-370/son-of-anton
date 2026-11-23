@@ -96,6 +96,16 @@ describe('runUnattended', () => {
     expect(await isRunning(repo)).toEqual({ running: false });
   });
 
+  it('queues the plan milestone without waiting for Slack', async () => {
+    const publishMilestone = vi.fn(async () => {});
+    const f = fakes({ publishMilestone });
+    await runUnattended('p', f.deps);
+    expect(publishMilestone).toHaveBeenCalledWith({
+      scope: 'job', source: 'factory', project: 'p', jobId: '1-init',
+      kind: 'plan-ready', occurrence: 'plan', count: 1,
+    });
+  });
+
   it('does not send an approval prompt for a finished bench job', async () => {
     await setup({ bench: 'r1' });
     const f = fakes();

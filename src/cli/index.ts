@@ -26,6 +26,31 @@ export function buildProgram(deps: CliDeps = {}): Command {
     process.exitCode = code;
   };
 
+  const slack = program.command('slack').description('Set up and manage the Slack dev team');
+  slack.command('setup').description('Set up the workspace and nine role bots')
+    .action(async () => exit(await (await import('./commands/slack.js')).slackSetupCommand({ out: deps.out, err: deps.err })));
+  slack.command('outbox').description('Show pending and blocked Slack updates')
+    .action(async () => exit(await (await import('./commands/serve.js')).slackOutboxStatusCommand(deps)));
+  slack.command('resolve').description('Resolve an update flagged by the Slack outbox')
+    .argument('<action>', 'retry, recheck, discard, bind-channel or confirm-thread').argument('<id>')
+    .option('--channel-id <id>', 'existing private project channel for bind-channel')
+    .option('--timestamp <ts>', 'existing parent message timestamp for confirm-thread')
+    .action(async (action: string, id: string, options: { channelId?: string; timestamp?: string }) => {
+      exit(await (await import('./commands/serve.js')).slackOutboxResolveCommand(action, id, options, deps));
+    });
+  slack.command('share-screenshot').description('Share a reviewed QA screenshot in its Slack job thread')
+    .argument('<project>').argument('<check-id>')
+    .action(async (project: string, checkId: string) => {
+      exit(await (await import('./commands/slack-screenshot.js')).shareScreenshotCommand(project, checkId, deps));
+    });
+  const service = slack.command('service').description('Manage Slack launch at login on macOS');
+  for (const action of ['install', 'status', 'uninstall'] as const) {
+    service.command(action).description(`${action} the Slack LaunchAgent`)
+      .action(async () => exit(await (await import('../slack/launch-agent.js')).slackServiceCommand(action, { out: deps.out, err: deps.err, exec: deps.exec })));
+  }
+  program.command('serve').description('Run the Slack dev team in the foreground')
+    .action(async () => exit(await (await import('./commands/serve.js')).serveCommand(deps)));
+
   program
     .command('new')
     .description('Create a new project and write its spec interactively')
