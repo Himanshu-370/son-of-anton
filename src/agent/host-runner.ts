@@ -157,6 +157,12 @@ export async function runAgent(
     req = { ...req, systemPrompt: `${req.systemPrompt}\n\n${rule}` };
   }
 
+  if (req.outputSchema && '$schema' in req.outputSchema) {
+    // zod stamps draft 2020-12; the Claude Code CLI's --json-schema validator rejects that dialect line.
+    const { $schema: _dialect, ...schema } = req.outputSchema;
+    req = { ...req, outputSchema: schema };
+  }
+
   const file = await nextRequestFile(ctx.jobDir, ctx.stage);
   await fsp.writeFile(
     join(ctx.jobDir, 'requests', file),

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
+import { z } from 'zod';
 import { runAgent, BudgetExceeded, AgentError, AllowanceExceeded, type StageCtx, type ChildLike } from '../../src/agent/host-runner.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
 import { appendStageUsage, cacheHitRate } from '../../src/core/budget.js';
@@ -74,6 +75,16 @@ describe('runAgent', () => {
   it('stamps protocolVersion 4 on the request file', async () => {
     await runAgent(ctx, req, { spawn: () => fake([result(0)]).child, notify: vi.fn() });
     expect(JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8')).protocolVersion).toBe(4);
+  });
+
+  it('drops the $schema dialect line from outputSchema (the Claude Code CLI rejects draft 2020-12)', async () => {
+    const outputSchema = z.toJSONSchema(z.object({ ok: z.boolean() })) as Record<string, unknown>;
+    expect(outputSchema.$schema).toBeDefined();
+    await runAgent(ctx, { ...req, outputSchema }, { spawn: () => fake([result(0, { ok: true })]).child, notify: vi.fn() });
+    const sent = JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8')).outputSchema;
+    expect(sent.$schema).toBeUndefined();
+    expect(sent.type).toBe('object');
+    expect(sent.properties.ok).toEqual({ type: 'boolean' });
   });
 
   it('a result without protocolVersion 4 (stale image) throws AgentError and still records its cost', async () => {
