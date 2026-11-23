@@ -1,6 +1,6 @@
 import { collectRetros } from '../../retro/run.js';
-import { readProposals, removeProposal, type Proposal } from '../../lessons/proposals.js';
-import { addLesson, cleanLessonText, DuplicateLessonError, KIT_LESSON_FILES, LESSON_FILES, MAX_LESSONS_PER_FILE, readLessons, removeLesson } from '../../lessons/store.js';
+import { decideProposal, proposalRevision, readProposals, type Proposal } from '../../lessons/proposals.js';
+import { cleanLessonText, KIT_LESSON_FILES, LESSON_FILES, MAX_LESSONS_PER_FILE, readLessons, removeLesson } from '../../lessons/store.js';
 import { readHistory } from '../../core/history.js';
 import { lessonStats, runSummary } from '../../lessons/stats.js';
 import { guard, resolveDeps, type CliDeps } from '../deps.js';
@@ -42,12 +42,20 @@ export async function lessonsReviewCommand(deps: CliDeps = {}): Promise<number> 
         const a = ((await d.ask([menu]))[0] ?? '').trim().toLowerCase();
         if ('aers'.includes(a) && a.length === 1 && !(a === 'e' && p.kind === 'plugin')) ans = a;
       }
-      if (ans === 'r') { await removeProposal(p.id, home); rejected++; continue; }
+      // Decisions bind to the proposal as shown: one already decided in Slack is left alone.
+      const revision = proposalRevision(p);
+      const gone = () => d.out('  Already decided elsewhere.');
+      if (ans === 'r') {
+        if ((await decideProposal({ proposalId: p.id, decision: 'reject', revision }, home)).status === 'stale') gone();
+        else rejected++;
+        continue;
+      }
       if (ans === 'a' || ans === 'e') {
         if (p.kind === 'plugin') {
+          if ((await decideProposal({ proposalId: p.id, decision: 'accept', revision }, home)).status === 'stale') { gone(); continue; }
           d.out(`To add it: anton plugins add ${safe(p.plugin)}`);
           d.out(`and list it under stages.${safe(p.stage)} in ~/anton/config.yaml`);
-          await removeProposal(p.id, home); accepted++; continue;
+          accepted++; continue;
         }
         try {
           // The queue file is on disk and editable: only known lesson files are valid targets.
@@ -56,15 +64,13 @@ export async function lessonsReviewCommand(deps: CliDeps = {}): Promise<number> 
           if (ans === 'e') text = (await d.ask(['New text:']))[0] ?? '';
           text = cleanLessonText(text);
           d.out(`  Saving: ${safe(text)}`);
-          const l = await addLesson(p.target, text, home);
-          d.out(`  Added ${l.id} to ${p.target}.md`);
-          await removeProposal(p.id, home); accepted++; continue;
+          const r = await decideProposal({ proposalId: p.id, decision: 'accept', text, revision }, home);
+          if (r.status === 'accepted') { d.out(`  Added ${r.id} to ${r.file}.md`); accepted++; continue; }
+          // Already in the file: the proposal is dropped so it is not asked again forever.
+          if (r.status === 'duplicate') { d.out(`  Already saved: ${r.id}`); accepted++; continue; }
+          if (r.status === 'stale') { gone(); continue; }
+          if (r.status === 'failed') throw new Error(r.message);
         } catch (e) {
-          if (e instanceof DuplicateLessonError) {
-            // Already in the file: keeping the proposal would ask again forever.
-            d.out(`  Already saved: ${e.id}`);
-            await removeProposal(p.id, home); accepted++; continue;
-          }
           d.out(`  Not added: ${safe(e instanceof Error ? e.message : String(e))}`);
         }
       }

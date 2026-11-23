@@ -69,9 +69,13 @@ async function takeMutex(mutex: string, src: string): Promise<boolean> {
 }
 
 export async function acquireLock(repo: string, filename = 'run.lock'): Promise<() => Promise<void>> {
-  const path = join(repo, '.anton', filename);
-  const mutex = `${path}.takeover`;
   await mkdir(join(repo, '.anton'), { recursive: true });
+  return acquireLockFile(join(repo, '.anton', filename));
+}
+
+/** The same pid lock at an explicit path; its folder must exist. A live holder (this process included) throws AlreadyRunning. */
+export async function acquireLockFile(path: string): Promise<() => Promise<void>> {
+  const mutex = `${path}.takeover`;
   const uniq = `${process.pid}.${Math.random().toString(36).slice(2)}`;
   const tmp = `${path}.${uniq}`;
   const mtmp = `${path}.mtx.${uniq}`;
@@ -110,4 +114,20 @@ export async function acquireLock(repo: string, filename = 'run.lock'): Promise<
   return async () => {
     if ((await readHolder(path)) === process.pid) await rm(path, { force: true });
   };
+}
+
+/**
+ * Wait up to `waitMs` for a pid lock. Locks are not re-entrant: a second caller in the same process waits too,
+ * so concurrent decisions inside `anton serve` serialize like decisions from separate processes.
+ */
+export async function waitForLockFile(path: string, waitMs = 10_000): Promise<() => Promise<void>> {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    try {
+      return await acquireLockFile(path);
+    } catch (e) {
+      if (!(e instanceof AlreadyRunning) || Date.now() >= deadline) throw e;
+      await new Promise((r) => setTimeout(r, 15 + Math.random() * 25));
+    }
+  }
 }

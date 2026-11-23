@@ -6,10 +6,8 @@ import { fileURLToPath } from 'node:url';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
 import { cloneShallow as gitCloneShallow, listFiles as gitListFiles } from '../core/git.js';
-import { currentJobId } from '../core/job.js';
-import { jobDir as jobDirOf } from '../core/paths.js';
-import { getProject } from '../core/registry.js';
-import { loadState, type JobState } from '../core/state.js';
+import { loadJob } from '../core/job-actions.js';
+import type { JobState } from '../core/state.js';
 import {
   ensureImage as dockerEnsureImage,
   preflight as dockerPreflight,
@@ -146,10 +144,7 @@ export type ResolvedJob = { name: string; repo: string; jobId: string; jobDir: s
 
 /** A project's current job and its state. */
 export async function resolveJob(name: string): Promise<ResolvedJob> {
-  const { repoPath: repo } = await getProject(name);
-  const jobId = await currentJobId(repo);
-  const jobDir = jobDirOf(repo, jobId);
-  return { name, repo, jobId, jobDir, state: await loadState(jobDir) };
+  return loadJob(name, { allowBench: true });
 }
 
 /** Bench owns the lifecycle of its temporary jobs. */
