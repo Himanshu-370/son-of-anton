@@ -118,6 +118,23 @@ describe('anton approve', () => {
     expect(h.spawned).toEqual(['p']);
   });
 
+  it('a brand-new project with no tracked files still gets the spec-approved commit and tag', async () => {
+    const { repo, dir } = await project('p', { stage: 'awaiting_spec_approval' });
+    await execa('git', ['init', '-q', '-b', 'main'], { cwd: repo }); // no commits, nothing tracked: only .anton/ exists
+    const spec: SpecDoc = {
+      title: 'Sum', summary: 's', outOfScope: [], kit: 'fallback', tech: [],
+      acceptanceChecks: [{ id: 'AC-1', text: 'sums' }],
+    };
+    await writeFile(join(dir, 'spec.json'), JSON.stringify(spec));
+    await writeFile(join(dir, 'spec.md'), '# Sum\n\n## Acceptance checks\n\n- **AC-1**: sums\n');
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(0);
+    expect((await loadState(dir)).stage).toBe('plan');
+    expect((await execa('git', ['tag', '-l'], { cwd: repo })).stdout).toContain('anton/1-init/spec-approved');
+    expect((await execa('git', ['log', '--format=%s'], { cwd: repo })).stdout).toBe('chore: spec approved');
+    expect((await execa('git', ['ls-files'], { cwd: repo })).stdout).toBe('');
+  });
+
   it('at awaiting_final_review → done', async () => {
     const { dir } = await project('p', { stage: 'awaiting_final_review', round: 1 });
     const h = harness();
