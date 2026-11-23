@@ -150,7 +150,7 @@ roles:
   infra:    [caveman, ponytail]
 ```
 
-Their effect on quality and cost has not been measured yet; that comes with the Phase 5 bench.
+Use the bench below to measure each plugin's effect on quality and cost.
 
 ## Lessons
 
@@ -166,6 +166,29 @@ After a job ends, anton looks back at it and suggests small lessons for future j
 - **Where lessons live:** `~/anton/lessons/<file>.md`, for example `build-frontend.md` or `security-reviewer.md`. The folder is a git repo: each accept or remove is a commit. Each file holds at most 20 lessons, one line each, up to 300 characters.
 - **Who sees what:** each agent gets only the file for its own role and the file for its kit, in the stable part of its system prompt. A job's `run-record.json` lists the lesson ids that were active.
 - **Trust:** the job record is treated as data, and Retro's output is untrusted until you accept it.
+
+## Scoreboard and bench
+
+`anton lessons list --stats` shows the last 10 runs and compares averages with and without each lesson. It tracks the share of acceptance checks that passed on the first try, build and verify rounds, cost, and rejects at final review. The recent runs also show cache hit rates and identify bench jobs.
+
+A lesson is flagged for possible removal after at least five runs with it and three without it if it shows no improvement in average first-try pass rate, rounds, or cost. Kit lessons are compared only within their kit. Results are noisy with few runs, so use the flag to decide whether to run `anton lessons remove <id>`.
+
+The cache trend compares the average of the five latest recorded cache hit rates with the five before them. A drop of more than 15 percentage points triggers a warning.
+
+- `anton bench --init` copies the bundled practice samples to `~/anton/bench/` and preserves local edits.
+- `anton bench` runs all four samples one at a time with pre-approved specs. `--only cli-wordcount,change-greeting` runs just those samples.
+- `--label <text>` names the run in the comparison. The comparison uses the most recent earlier run by default. Use `--compare <runId>` to choose one.
+- Each run previews the estimated cost for each sample and the total before asking for confirmation. Enter `y` or `yes` to start. `--yes` skips the prompt and is required to start a run without a terminal.
+
+The comparison prints in the terminal and is saved to `~/anton/bench/results/<runId>.md`. The raw results are in `<runId>.json` in the same directory. Bench jobs use disposable workspaces under `~/anton/bench/runs/<runId>/`, separate from your projects. Project cost estimates use regular job history only.
+
+To measure Caveman or Ponytail, initialize the bench and install the plugin. Test one plugin at a time.
+
+1. Run `anton bench --label baseline` with the plugin disabled.
+2. Add the plugin under `roles:` for the `infra`, `backend` and `frontend` builders in `~/anton/config.yaml`.
+3. Run `anton bench --label caveman-on` (or `anton bench --label ponytail-on`).
+4. Read the comparison for changes in delivery, checks passing, first-try pass rate, rounds, cost and cache hit rate.
+5. Keep the plugin or remove it from those roles based on the comparison.
 
 ## Where things live
 
