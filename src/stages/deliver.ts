@@ -1,3 +1,4 @@
+import { publishJobMilestone } from '../slack/job-milestones.js';
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
@@ -326,7 +327,8 @@ export async function runDeliver(
   // R10: one numbered tag per delivery, so re-delivery after a reject never collides.
   const prefix = `anton/${ctx.state.jobId}/delivered-`;
   const existing = await (deps.listTags ?? defaultListTags)(ctx.repo, `${prefix}*`);
-  await tagFn(ctx.repo, `${prefix}${existing.length + 1}`);
+  const deliveryNumber = existing.length + 1;
+  await tagFn(ctx.repo, `${prefix}${deliveryNumber}`);
   const hit = cacheHitRate(totalUsage(usage));
   const firstTryPass = evidenceOk ? await readFirstTryPass(ctx.jobDir) : undefined;
   const lessons = await readLessonIds(ctx.jobDir);
@@ -353,5 +355,6 @@ export async function runDeliver(
   }
   const state = transition(ctx.state, 'awaiting_final_review');
   await saveState(ctx.jobDir, state);
+  await publishJobMilestone(state, { kind: 'delivery-ready', occurrence: `delivered-${deliveryNumber}` });
   return state;
 }

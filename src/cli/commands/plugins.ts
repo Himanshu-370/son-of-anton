@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+import { publishMilestone } from '../../slack/events.js';
 import { join } from 'node:path';
 import { loadAntonConfig, READ_ONLY_ROLES } from '../../core/anton-config.js';
 import type { Role } from '../../core/config.js';
@@ -62,6 +64,10 @@ export async function pluginsUpdateCommand(name: string | undefined, deps: CliDe
     if (!names.length) d.out('No plugins installed.');
     for (const n of names) {
       const r = await updatePlugin(n, d);
+      if (r === 'updated') {
+        const entry = (await readLock().catch(() => [])).find((plugin) => plugin.name === n);
+        if (entry) await publishMilestone({ scope: 'workspace', kind: 'plugin-updated', occurrence: createHash('sha256').update(JSON.stringify([entry.name, entry.commit])).digest('hex') });
+      }
       d.out(r === 'up_to_date' ? `${n} is up to date` : r === 'updated' ? `Updated ${n}` : `Kept ${n} at its pinned version`);
     }
     return 0;

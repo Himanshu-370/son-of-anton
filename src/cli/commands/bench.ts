@@ -1,3 +1,4 @@
+import { publishMilestone } from '../../slack/events.js';
 import { join } from 'node:path';
 import { compareBench, previousBench } from '../../bench/compare.js';
 import { estimateBench, newRunId, readBenchRuns, runBench } from '../../bench/run.js';
@@ -86,6 +87,10 @@ export async function benchCommand(opts: BenchOpts, deps: CliDeps = {}): Promise
     const comparison = compareBench(run, previousBench(run, earlier, opts.compare));
     await writeFileAtomic(join(home, 'bench', 'results', `${run.runId}.md`), `${comparison}\n`);
     d.out(comparison);
+    await publishMilestone({
+      scope: 'workspace', kind: 'bench-summary', occurrence: run.runId,
+      count: run.results.length, passed: run.results.filter((result) => result.outcome === 'delivered').length,
+    }, { home });
     return 0;
   });
 }

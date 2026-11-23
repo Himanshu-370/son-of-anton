@@ -1,3 +1,4 @@
+import { publishMilestone } from '../slack/events.js';
 import { lstat, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
@@ -196,7 +197,10 @@ async function finishRetro(
   } catch (e) {
     reason = reasonOf(e, key);
   }
-  if (ps.length) await appendProposals(ps, home);
+  if (ps.length) {
+    await appendProposals(ps, home);
+    await publishMilestone({ scope: 'workspace', kind: 'lesson-proposed', occurrence: `${job.name}:${job.jobId}`, count: ps.length }, { home });
+  }
   await writeRetro(job.jobDir, reason ? { status: 'failed', reason, ...r } : { status: 'done', ...r });
   await recordRetroCost(job, estimateUsd(msg.model || COACH.model, msg.usage) * priceMult, home, notes);
   return reason;

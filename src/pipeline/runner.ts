@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+import { publishJobMilestone } from '../slack/job-milestones.js';
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import { AllowanceExceeded, BudgetExceeded, type StageCtx } from '../agent/host-runner.js';
@@ -7,11 +9,12 @@ import { defaultExec, type ExecFn } from '../core/exec.js';
 import { assertOnJobBranch, currentJobId } from '../core/job.js';
 import { acquireLock as defaultAcquireLock } from '../core/lock.js';
 import { notify as defaultNotify } from '../core/notify.js';
-import { jobDir as jobDirOf } from '../core/paths.js';
+import { antonHome, jobDir as jobDirOf } from '../core/paths.js';
 import { getProject } from '../core/registry.js';
 import { loadSecrets, redact, secretsEnvFile } from '../core/secrets.js';
 import { loadState, pause, saveState, transition, type JobState, type PauseReason } from '../core/state.js';
 import {
+  assertSlackDataOutsideMount,
   ensureImage,
   MOUNTS_VERSION,
   startContainer as dockerStartContainer,
@@ -36,6 +39,7 @@ export const containerName = (slug: string) => `anton-${slug}`;
 export const ACTIVE_STAGES: readonly JobState['stage'][] = ['plan', 'baseline', 'build', 'verify', 'deliver'];
 
 export type RunnerDeps = {
+  publishMilestone?: Parameters<typeof publishJobMilestone>[2];
   acquireLock?: (repo: string) => Promise<() => Promise<void>>;
   /** Start (or reuse) the job's container on the kit's image; returns its name. */
   startContainer?: (slug: string, repo: string, kit: Kit) => Promise<string>;
@@ -68,6 +72,7 @@ export async function startOrReuseContainer(
 ): Promise<string> {
   // Validate secrets before any docker call or API spend.
   const envFile = await secretsEnvFile(slug);
+  await Promise.all([assertSlackDataOutsideMount(repo), assertSlackDataOutsideMount(join(antonHome(), 'plugins'))]);
   const name = containerName(slug);
   const image = await ensure(kit, exec);
   const r = await exec('docker', ['inspect', '-f', '{{.State.Running}}', name]);
@@ -232,6 +237,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
             // Change jobs record a baseline first; it moves the job to build (round 1).
             state = r.state.kind === 'change' ? transition(r.state, 'baseline') : transition(r.state, 'build', { round: 1 });
             await saveState(jobDir, state);
+            await publishJobMilestone(state, { kind: 'plan-ready', occurrence: 'plan', count: plan.tasks.length }, deps.publishMilestone);
             break;
           }
           case 'baseline':
@@ -270,7 +276,13 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       // Stages persist cost as they go; pause from the latest saved state.
       const latest = await loadState(jobDir);
       if (ACTIVE_STAGES.includes(latest.stage)) {
-        await saveState(jobDir, pause(latest, reason));
+        const paused = pause(latest, reason);
+        await saveState(jobDir, paused);
+        if (reason === 'budget_cap' || reason === 'allowance') {
+          await publishJobMilestone(paused, {
+            kind: 'budget-paused', occurrence: randomUUID(),
+          }, deps.publishMilestone);
+        }
         if (!bench) final = e instanceof AllowanceExceeded ? allowanceHint(project, e.group, e.spentUsd, e.limitUsd) : pauseMessage(project, reason);
       }
     }

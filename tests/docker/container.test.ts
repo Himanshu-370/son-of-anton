@@ -167,6 +167,14 @@ describe('ensureImage with a base kit', () => {
 });
 
 describe('startContainer', () => {
+  it('refuses to mount a workspace that contains the local Slack data directory', async () => {
+    const repo = await mkdtemp(join(tmpdir(), 'anton-repo-with-data-'));
+    const { exec, calls } = fake();
+    await expect(startContainer('s1', repo, 'img', exec, { home: join(repo, 'anton-data') }))
+      .rejects.toThrow('Slack data');
+    expect(calls).toHaveLength(0);
+  });
+
   let home: string;
   beforeEach(async () => {
     home = await mkdtemp(join(tmpdir(), 'anton-home-'));
