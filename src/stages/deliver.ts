@@ -13,7 +13,7 @@ import type { SecurityFinding } from '../security/review.js';
 import { saveState, transition, type JobState } from '../core/state.js';
 import type { CheckResult } from '../kits/types.js';
 import { failuresPath, FailureItemSchema } from './qa.js';
-import { assertJobDir, listVerifyCopies } from './verify.js';
+import { assertEvidenceDir, assertJobDir, listVerifyCopies } from './verify.js';
 import type { Plan } from './plan.js';
 import type { SpecDoc } from './spec.js';
 
@@ -108,7 +108,7 @@ function codeReviewSection(sections: ReviewSections): string[] {
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low'] as const;
 
-async function securitySection(jobDir: string, sections: ReviewSections): Promise<string[]> {
+async function securitySection(jobDir: string, sections: ReviewSections, evidenceOk: boolean): Promise<string[]> {
   const lines = ['## Security', ''];
   const sec = sections.security;
   if (!sec) return [...lines, 'Security review did not run for this delivery.'];
@@ -137,7 +137,7 @@ async function securitySection(jobDir: string, sections: ReviewSections): Promis
   const current = new Set(findings.map((f) => f.id));
   const gone = new Map<string, SecurityFinding>();
   const copies = await Promise.all(
-    (await listVerifyCopies(jobDir)).map(async ({ name }) => readSections(join(jobDir, 'evidence', name))),
+    (evidenceOk ? await listVerifyCopies(jobDir) : []).map(async ({ name }) => readSections(join(jobDir, 'evidence', name))),
   );
   copies.forEach((rec, i) => {
     const laterFiles = new Set(copies.slice(i + 1).flatMap((c) => c.reviewedFiles ?? []));
@@ -161,9 +161,9 @@ async function securitySection(jobDir: string, sections: ReviewSections): Promis
 }
 
 /** Regressions still open at delivery (only an accept-as-is delivery can have any). */
-async function regressionsSection(jobDir: string): Promise<string[]> {
+async function regressionsSection(jobDir: string, evidenceOk: boolean): Promise<string[]> {
   // As of the last verify: failures.json is removed when a verify passes.
-  const raw = await readOptional(failuresPath(jobDir));
+  const raw = evidenceOk ? await readOptional(failuresPath(jobDir)) : undefined;
   const items = raw ? FailureItemSchema.array().parse(JSON.parse(raw)).filter((i) => i.kind === 'regression') : [];
   return ['## Regressions', '', ...(items.length ? items.map((i) => `- ${i.id}: ${cell(i.text)}`) : ['None.'])];
 }
@@ -234,11 +234,14 @@ async function readJobJson(path: string): Promise<unknown> {
   }
 }
 
-async function readFirstTryPass(jobDir: string): Promise<number | undefined> {
+/** Share of checks passing in verify round 1, from the container-writable evidence; undefined when unknown. */
+export async function readFirstTryPass(jobDir: string): Promise<number | undefined> {
   const rec = await readJobJson(join(jobDir, 'evidence', 'results-verify-1.json'));
   const results = typeof rec === 'object' && rec !== null ? (rec as { results?: unknown }).results : undefined;
   if (!Array.isArray(results) || results.length === 0) return undefined;
-  const passed = results.filter((r) => typeof r === 'object' && r !== null && (r as { status?: unknown }).status === 'pass').length;
+  const statuses = results.map((r: { status?: unknown } | null) => r?.status);
+  if (statuses.some((status) => status !== 'pass' && status !== 'fail')) return undefined;
+  const passed = statuses.filter((status) => status === 'pass').length;
   return passed / results.length;
 }
 
@@ -258,9 +261,10 @@ export async function runDeliver(
 ): Promise<JobState> {
   const tagFn = deps.tag ?? defaultTag;
   await assertJobDir(ctx.repo, ctx.jobDir);
+  const evidenceOk = await assertEvidenceDir(ctx.repo, ctx.jobDir, { create: false }).then(() => true, () => false);
   let outcome = verifyResult;
   if (!outcome) {
-    const raw = await readOptional(join(ctx.jobDir, 'evidence', 'results.json'));
+    const raw = evidenceOk ? await readOptional(join(ctx.jobDir, 'evidence', 'results.json')) : undefined;
     outcome = raw ? (JSON.parse(raw) as { results: CheckResult[]; runOk: boolean }) : { results: [], runOk: false };
   }
   // cost.json is container-writable: report-only, cleaned like usage.json, never fatal once verify passed.
@@ -280,7 +284,7 @@ export async function runDeliver(
     if (!(e instanceof NotRegularFileError)) throw e;
     usageRefused = true;
   }
-  const sections = await readSections(join(ctx.jobDir, 'evidence', 'results.json'));
+  const sections = evidenceOk ? await readSections(join(ctx.jobDir, 'evidence', 'results.json')) : {};
   let questions: string | undefined;
   let questionsRefused = false;
   try {
@@ -307,9 +311,9 @@ export async function runDeliver(
     ...codeReviewSection(sections),
     '',
     ...questionsSection(questions, questionsRefused),
-    ...(await securitySection(ctx.jobDir, sections)),
+    ...(await securitySection(ctx.jobDir, sections, evidenceOk)),
     '',
-    ...(change ? [...(await regressionsSection(ctx.jobDir)), ''] : []),
+    ...(change ? [...(await regressionsSection(ctx.jobDir, evidenceOk)), ''] : []),
     ...runSection(plan),
     '',
     ...costSection(costs.costs, costRefused, costs.clean, usage, usageRefused),
@@ -324,7 +328,7 @@ export async function runDeliver(
   const existing = await (deps.listTags ?? defaultListTags)(ctx.repo, `${prefix}*`);
   await tagFn(ctx.repo, `${prefix}${existing.length + 1}`);
   const hit = cacheHitRate(totalUsage(usage));
-  const firstTryPass = await readFirstTryPass(ctx.jobDir);
+  const firstTryPass = evidenceOk ? await readFirstTryPass(ctx.jobDir) : undefined;
   const lessons = await readLessonIds(ctx.jobDir);
   try {
     await appendHistory(
@@ -335,8 +339,8 @@ export async function runDeliver(
       stageUsd: ctx.state.stageSpentUsd ?? {},
       ...(hit === undefined ? {} : { cacheHitRate: hit }),
       ...(firstTryPass === undefined ? {} : { firstTryPass }),
-      rounds: ctx.state.round,
-      ...(ctx.state.rejects === undefined ? {} : { rejects: ctx.state.rejects }),
+      rounds: (evidenceOk ? (await listVerifyCopies(ctx.jobDir)).at(-1)?.n : undefined) ?? ctx.state.round,
+      rejects: ctx.state.rejects ?? 0,
       ...(lessons === undefined ? {} : { lessons }),
       ...(ctx.state.bench === undefined ? {} : { bench: ctx.state.bench }),
       at: new Date().toISOString(),

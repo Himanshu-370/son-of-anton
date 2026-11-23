@@ -60,6 +60,11 @@ describe('lessonStats', () => {
 });
 
 describe('runSummary', () => {
+  it('does not warn on a drop of exactly 15 percentage points', () => {
+    const history = Array.from({ length: 10 }, (_, i) => run(i, { cacheHitRate: i < 5 ? 0.9 : 0.75 }));
+    expect(runSummary(history).cacheTrend?.dropped).toBe(false);
+  });
+
   it('cache trend warns on a drop over 15 points', () => {
     const rates = [0.9, 0.9, 0.9, 0.9, 0.9, 0.5, 0.5, 0.5, 0.5, 0.5];
     const t = runSummary(rates.map((r, i) => run(i, { cacheHitRate: r }))).cacheTrend!;

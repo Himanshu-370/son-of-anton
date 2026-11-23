@@ -143,17 +143,22 @@ export async function assertJobDir(repo: string, jobDir: string): Promise<void> 
   if (got !== p) throw new Error(`Refusing to use job folder ${got}: it is not ${p}`);
 }
 
-export async function assertEvidenceDir(repo: string, jobDir: string): Promise<void> {
+export async function assertEvidenceDir(repo: string, jobDir: string, opts: { create?: boolean } = {}): Promise<void> {
   const root = await realpath(repo);
   const want = join(root, '.anton', 'jobs', basename(jobDir), 'evidence');
   let p = root;
   for (const part of ['.anton', 'jobs', basename(jobDir), 'evidence']) {
     p = join(p, part);
-    if ((await lstat(p).catch(() => undefined))?.isSymbolicLink()) {
+    const st = await lstat(p).catch((e: NodeJS.ErrnoException) => {
+      if (e.code !== 'ENOENT') throw e;
+      return undefined;
+    });
+    if (st?.isSymbolicLink()) {
       throw new Error(`Refusing to verify: ${p} is a symlink (job folders must be real folders inside the project)`);
     }
+    if (st && !st.isDirectory()) throw new Error(`Refusing to verify: ${p} is not a directory`);
   }
-  await mkdir(want, { recursive: true });
+  if (opts.create !== false) await mkdir(want, { recursive: true });
   const got = await realpath(join(jobDir, 'evidence'));
   if (got !== want) throw new Error(`Refusing to verify: evidence folder ${got} is not inside ${want}`);
 }

@@ -54,5 +54,5 @@ export function runSummary(history: HistoryEntry[], n = 10): { rows: HistoryEntr
   const recent = mean(rates.slice(-5));
   const previous = mean(rates.slice(-10, -5));
   if (rates.length < 10 || recent === undefined || previous === undefined) return { rows }; // two full 5-run windows
-  return { rows, cacheTrend: { recent, previous, dropped: (previous - recent) * 100 > DROP_POINTS } };
+  return { rows, cacheTrend: { recent, previous, dropped: previous - recent > DROP_POINTS / 100 + Number.EPSILON } };
 }

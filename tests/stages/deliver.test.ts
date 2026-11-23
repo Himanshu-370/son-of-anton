@@ -72,16 +72,17 @@ describe('runDeliver', () => {
 
   it('history line has firstTryPass, rounds, rejects and lessons', async () => {
     await round1('pass', 'fail');
+    await writeFile(join(ctx.jobDir, 'evidence', 'results-verify-5.json'), '{}');
     await writeFile(join(ctx.jobDir, 'run-record.json'), JSON.stringify({ lessons: ['L-1', 'L-2'] }));
     const h = await deliverHist({ rejects: 1, bench: 'fake-bench' });
-    expect(h).toMatchObject({ firstTryPass: 0.5, rounds: 2, rejects: 1, lessons: ['L-1', 'L-2'], bench: 'fake-bench' });
+    expect(h).toMatchObject({ firstTryPass: 0.5, rounds: 5, rejects: 1, lessons: ['L-1', 'L-2'], bench: 'fake-bench' });
   });
 
   it('firstTryPass reads round-1 results safely; missing file leaves it out', async () => {
     let h = await deliverHist();
     expect(h).not.toHaveProperty('firstTryPass');
     expect(h).not.toHaveProperty('lessons');
-    expect(h).not.toHaveProperty('rejects');
+    expect(h.rejects).toBe(0);
     expect(h).not.toHaveProperty('bench');
     // a symlink in place of the file is refused, not followed
     await mkdir(join(ctx.jobDir, 'evidence'), { recursive: true });
