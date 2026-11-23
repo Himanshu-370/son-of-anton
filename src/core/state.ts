@@ -43,6 +43,10 @@ export const JobStateSchema = z.object({
   completedFixAreas: z.array(z.enum(['frontend', 'backend', 'infra'])).optional(),
   /** HEAD at the last verify pass; the next review round diffs from here. */
   reviewedSha: z.string().optional(),
+  /** How many times the final review rejected this job. */
+  rejects: z.number().int().min(0).optional(),
+  /** Set by the bench runner; copied into the history line. */
+  bench: z.string().optional(),
   updatedAt: z.string(),
 });
 export type JobState = z.infer<typeof JobStateSchema>;

@@ -13,6 +13,14 @@ const HistoryEntrySchema = z.object({
   spentUsd: z.number(),
   stageUsd: z.record(z.string(), z.number()),
   cacheHitRate: z.number().optional(),
+  /** Share of acceptance checks that passed in verify round 1 (0-1); absent when unknown. */
+  firstTryPass: z.number().min(0).max(1).optional(),
+  rounds: z.number().optional(),
+  rejects: z.number().optional(),
+  /** Lesson ids active for the job. */
+  lessons: z.array(z.string()).optional(),
+  /** Set on bench runs, which the cost estimate ignores. */
+  bench: z.string().optional(),
   at: z.string(),
 });
 export type HistoryEntry = z.infer<typeof HistoryEntrySchema>;
@@ -64,7 +72,7 @@ export async function readHistory(home = antonHome()): Promise<HistoryEntry[]> {
   return [...out.values()];
 }
 
-const quantile = (sorted: number[], p: number): number => {
+export const quantile = (sorted: number[], p: number): number => {
   const i = p * (sorted.length - 1);
   const lo = Math.floor(i);
   return sorted[lo]! + (sorted[Math.min(lo + 1, sorted.length - 1)]! - sorted[lo]!) * (i - lo);
@@ -75,7 +83,7 @@ export function estimateCost(
   want: { kind: 'new' | 'change'; kit: 'fallback' | 'web'; checks: number },
 ): { lowUsd: number; highUsd: number; n: number } | undefined {
   const costs = history
-    .filter((h) => h.kind === want.kind && h.kit === want.kit && h.checks >= want.checks * 0.5 && h.checks <= want.checks * 1.5)
+    .filter((h) => !h.bench && h.kind === want.kind && h.kit === want.kit && h.checks >= want.checks * 0.5 && h.checks <= want.checks * 1.5)
     .map((h) => h.spentUsd)
     .sort((a, b) => a - b);
   if (costs.length < 3) return undefined;

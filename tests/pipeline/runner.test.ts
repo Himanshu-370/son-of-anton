@@ -96,6 +96,22 @@ describe('runUnattended', () => {
     expect(await isRunning(repo)).toEqual({ running: false });
   });
 
+  it('does not send an approval prompt for a finished bench job', async () => {
+    await setup({ bench: 'r1' });
+    const f = fakes();
+    await runUnattended('p', f.deps);
+    expect((await loadState(dir)).stage).toBe('awaiting_final_review');
+    expect(f.notify).not.toHaveBeenCalled();
+  });
+
+  it('does not send a recovery prompt for a paused bench job', async () => {
+    await setup({ bench: 'r1' });
+    const f = fakes({ runBuild: async () => { throw new BudgetExceeded(1, 1); } });
+    await runUnattended('p', f.deps);
+    expect(await loadState(dir)).toMatchObject({ stage: 'paused', pauseReason: 'budget_cap' });
+    expect(f.notify).not.toHaveBeenCalled();
+  });
+
   it('runner routes change jobs plan→baseline→build; new jobs plan→build', async () => {
     const withBaseline = (calls: string[]) => ({
       runBaseline: async (ctx: StageCtx) => {

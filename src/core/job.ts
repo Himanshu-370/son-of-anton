@@ -1,12 +1,13 @@
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
-import { execa } from 'execa';
 import { budgetSettings, loadAntonConfig } from './anton-config.js';
 import { DEFAULTS } from './config.js';
 import { jobDir, projectDir } from './paths.js';
-import { createBranch, currentBranch, dropBranch, hasCommits, isClean } from './git.js';
-import { getProject, registerProject, slugify, uniqueName } from './registry.js';
-import { loadState, saveState, type JobState } from './state.js';
+import { commitAll, createBranch, currentBranch, dropBranch, hasCommits, initRepoIfMissing, isClean, tag } from './git.js';
+import { getProject, registerProject, slugify, uniqueName, type ProjectEntry } from './registry.js';
+import { loadSecrets } from './secrets.js';
+import { loadState, saveState, transition, type JobState } from './state.js';
+import { readApprovedSpec, writeSpec, type SpecDoc } from '../stages/spec.js';
 
 export interface NewProject {
   name: string;
@@ -17,16 +18,16 @@ export interface NewProject {
 
 export async function createNewProject(
   description: string,
-  opts: { budgetUsd?: number } = {},
+  opts: { budgetUsd?: number; registeredProject?: ProjectEntry } = {},
 ): Promise<NewProject> {
   // Read config before any filesystem work: an invalid config.yaml must leave nothing behind.
   const budgetUsd = opts.budgetUsd ?? budgetSettings(await loadAntonConfig()).defaultUsd;
-  const name = await uniqueName(slugify(description));
-  const repoPath = projectDir(name);
+  const name = opts.registeredProject?.name ?? await uniqueName(slugify(description));
+  const repoPath = opts.registeredProject?.repoPath ?? projectDir(name);
   const jobId = '1-init';
   const dir = jobDir(repoPath, jobId);
   await fsp.mkdir(dir, { recursive: true });
-  await execa('git', ['init', '-q', '-b', 'main'], { cwd: repoPath });
+  await initRepoIfMissing(repoPath, 'main');
   await fsp.writeFile(join(dir, 'description.txt'), description.endsWith('\n') ? description : description + '\n');
   const state: JobState = {
     jobId,
@@ -42,7 +43,7 @@ export async function createNewProject(
     updatedAt: '',
   };
   await saveState(dir, state);
-  await registerProject(name, repoPath);
+  if (!opts.registeredProject) await registerProject(name, repoPath);
   return { name, repoPath, jobId, jobDir: dir };
 }
 
@@ -156,4 +157,19 @@ export async function createChangeJob(
     throw e;
   }
   return { name: project, repoPath, jobId: id, jobDir: dir, branch };
+}
+
+/**
+ * Bench: give a fresh job (stage `spec`) an already approved spec and move it to `plan`, skipping
+ * checkpoint 1. Same files, commit and tag as `anton approve`, so the job looks exactly like an approved one.
+ */
+export async function approvePresetSpec(job: NewProject, spec: SpecDoc, extra: Partial<JobState> = {}): Promise<JobState> {
+  const secrets = await loadSecrets(job.name);
+  await writeSpec(job.jobDir, spec, secrets);
+  await readApprovedSpec(job.jobDir);
+  await commitAll(job.repoPath, 'chore: spec approved', secrets);
+  await tag(job.repoPath, `anton/${job.jobId}/spec-approved`);
+  const state = transition(transition(await loadState(job.jobDir), 'awaiting_spec_approval'), 'plan', extra);
+  await saveState(job.jobDir, state);
+  return state;
 }

@@ -1,0 +1,13 @@
+{
+  "title": "Sample greeting change",
+  "summary": "Synthetic practice change: the existing `greet()` function in this tiny package always returns `Hello, world!`. Let it take an optional name and return `Hello, <name>!` when one is given.",
+  "outOfScope": ["Translations", "Any new dependency"],
+  "tech": ["Node.js"],
+  "acceptanceChecks": [
+    { "id": "AC-1", "text": "`greet('Ada')` returns `Hello, Ada!`." },
+    { "id": "AC-2", "text": "`greet()` with no argument still returns `Hello, world!` (existing behaviour must keep working)." },
+    { "id": "AC-3", "text": "`greet('')` (an empty name) returns `Hello, world!`." }
+  ],
+  "services": [],
+  "kit": "fallback"
+}

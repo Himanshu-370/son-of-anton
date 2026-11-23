@@ -201,6 +201,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
   let final: string | undefined;
   try {
     let state = await loadState(jobDir);
+    const bench = state.bench !== undefined;
     if (!ACTIVE_STAGES.includes(state.stage)) {
       log(`nothing to run (stage: ${state.stage})`);
       return;
@@ -251,9 +252,11 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
         }
       }
       log(`stopped at stage: ${state.stage}`);
-      if (state.stage === 'paused') final = pauseMessage(project, state.pauseReason, await failureKinds(jobDir));
-      else if (state.stage === 'awaiting_final_review') {
-        final = `${project}: ready for review. See REPORT.md, then: anton approve ${project}`;
+      if (!bench) {
+        if (state.stage === 'paused') final = pauseMessage(project, state.pauseReason, await failureKinds(jobDir));
+        else if (state.stage === 'awaiting_final_review') {
+          final = `${project}: ready for review. See REPORT.md, then: anton approve ${project}`;
+        }
       }
     } catch (e) {
       // AllowanceExceeded subclasses BudgetExceeded, so it is tested first.
@@ -268,7 +271,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       const latest = await loadState(jobDir);
       if (ACTIVE_STAGES.includes(latest.stage)) {
         await saveState(jobDir, pause(latest, reason));
-        final = e instanceof AllowanceExceeded ? allowanceHint(project, e.group, e.spentUsd, e.limitUsd) : pauseMessage(project, reason);
+        if (!bench) final = e instanceof AllowanceExceeded ? allowanceHint(project, e.group, e.spentUsd, e.limitUsd) : pauseMessage(project, reason);
       }
     }
   } finally {

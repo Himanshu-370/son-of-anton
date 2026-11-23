@@ -4,14 +4,14 @@ import { loadSecrets } from '../../core/secrets.js';
 import { saveState, transition } from '../../core/state.js';
 import { submitRetro } from '../../retro/run.js';
 import { readApprovedSpec } from '../../stages/spec.js';
-import { guard, resolveDeps, resolveJob, type CliDeps } from '../deps.js';
+import { guard, resolveDeps, resolveManualJob, type CliDeps } from '../deps.js';
 import { preflightOr2, switchBackFromJob } from './shared.js';
 
 /** `anton approve <project>`: approve the spec (start the background run) or the final delivery. */
 export async function approveCommand(project: string, deps: CliDeps = {}): Promise<number> {
   const d = resolveDeps(deps);
   return guard(d, async () => {
-    const job = await resolveJob(project);
+    const job = await resolveManualJob(project);
     const { state } = job;
     // The final accept makes no commit, so only spec approval needs the branch.
     if (state.stage === 'awaiting_spec_approval') await assertOnJobBranch(job.repo, state);

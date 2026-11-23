@@ -3,7 +3,7 @@ import { allowanceUsage, stageGroup } from '../../core/budget.js';
 import { assertOnJobBranch } from '../../core/job.js';
 import { saveState, transition, unpause } from '../../core/state.js';
 import { ACTIVE_STAGES, allowanceHint, seededState } from '../../pipeline/runner.js';
-import { guard, parseBudget, resolveDeps, resolveJob, usd, type CliDeps } from '../deps.js';
+import { guard, parseBudget, resolveDeps, resolveManualJob, usd, type CliDeps } from '../deps.js';
 import { preflightOr2, refuseIfRunning } from './shared.js';
 
 /**
@@ -18,7 +18,7 @@ export async function resumeCommand(
   const d = resolveDeps(deps);
   return guard(d, async () => {
     const budget = parseBudget(opts.budget);
-    const job = await resolveJob(project);
+    const job = await resolveManualJob(project);
     if ((await refuseIfRunning(d, job.repo, project)) !== 0) return 1;
     let state = job.state;
     const paused = state.stage === 'paused';

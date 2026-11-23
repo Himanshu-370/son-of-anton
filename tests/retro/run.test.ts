@@ -239,6 +239,15 @@ describe('collectRetros', () => {
     expect(JSON.stringify([q, r])).not.toContain(KEY);
   });
 
+  it('unknown-target note is redacted', async () => {
+    await submitted();
+    const bad = { lessons: [{ target: `x-${KEY}`, text: 'x', why: 'y' }], plugins: [] };
+    const r = await collectRetros(deps(fake({ result: { type: 'succeeded', message: msg(bad) } }).client));
+    expect(r.notes.filter((n) => n.includes('unknown target'))).toHaveLength(1);
+    expect(JSON.stringify(r)).not.toContain(KEY);
+    expect(JSON.stringify(r)).toContain('[REDACTED:ANTHROPIC_API_KEY]');
+  });
+
   it('unknown target is dropped with a note', async () => {
     await submitted();
     const bad = {

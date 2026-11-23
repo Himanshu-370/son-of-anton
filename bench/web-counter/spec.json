@@ -1,0 +1,14 @@
+{
+  "title": "Sample counter web page",
+  "summary": "Synthetic practice project: a single web page showing a number that starts at 0, with Plus, Minus and Reset buttons.",
+  "outOfScope": ["Saving the number between page loads", "User accounts"],
+  "tech": ["HTML", "JavaScript"],
+  "acceptanceChecks": [
+    { "id": "AC-1", "text": "On first load the page shows the heading `Counter` and the value `0`." },
+    { "id": "AC-2", "text": "Clicking the button labelled `Plus` three times makes the visible value `3`." },
+    { "id": "AC-3", "text": "Clicking the button labelled `Minus` once after that makes the visible value `2`." },
+    { "id": "AC-4", "text": "Clicking the button labelled `Reset` makes the visible value `0` again." }
+  ],
+  "services": [],
+  "kit": "web"
+}

@@ -6,7 +6,7 @@ import { AREA_ORDER } from '../../core/config.js';
 import { PlanSchema, type Plan } from '../../stages/plan.js';
 import { failuresPath, type FailureItem } from '../../stages/qa.js';
 import { failureReportPath } from '../../stages/verify.js';
-import { guard, resolveDeps, resolveJob, UsageError, type CliDeps } from '../deps.js';
+import { guard, resolveDeps, resolveManualJob, UsageError, type CliDeps } from '../deps.js';
 import { preflightOr2, refuseIfRunning } from './shared.js';
 
 /**
@@ -18,7 +18,7 @@ export async function rejectCommand(project: string, opts: { notes: string }, de
   return guard(d, async () => {
     const notes = opts.notes?.trim();
     if (!notes) throw new UsageError('--notes "<text>" is required');
-    const job = await resolveJob(project);
+    const job = await resolveManualJob(project);
     if (job.state.stage !== 'awaiting_final_review') {
       d.err(`Nothing to reject (stage: ${job.state.stage})`);
       return 1;
@@ -56,7 +56,7 @@ export async function rejectCommand(project: string, opts: { notes: string }, de
       }));
       await writeFileAtomic(failuresPath(job.jobDir), JSON.stringify(items, null, 2) + '\n');
     }
-    const next = transition(job.state, 'build', { round: 1, completedFixAreas: [] });
+    const next = transition(job.state, 'build', { round: 1, completedFixAreas: [], rejects: (job.state.rejects ?? 0) + 1 });
     // A fresh review cycle: an old signature must not trigger a false no_progress.
     delete next.lastFailureSignature;
     await saveState(job.jobDir, next);

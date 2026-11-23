@@ -60,4 +60,17 @@ describe('history', () => {
     await appendHistory(e(3, { jobId: 'c' }), home);
     expect((await readHistory(home)).map((x) => x.jobId)).toEqual(['c']);
   });
+
+  it('old history lines without new fields still parse', async () => {
+    const home = await mkdtemp(join(tmpdir(), 'anton-hist-'));
+    await writeFile(join(home, 'history.jsonl'), JSON.stringify({ jobId: 'o', project: 'p', kind: 'new', kit: 'fallback', checks: 2, spentUsd: 1, stageUsd: {}, at: 'x' }) + '\n');
+    expect((await readHistory(home)).map((x) => x.jobId)).toEqual(['o']);
+    await appendHistory(e(2, { jobId: 'n', firstTryPass: 0.5, rounds: 2, rejects: 1, lessons: ['L1'], bench: 'b1' }), home);
+    expect((await readHistory(home))[1]).toMatchObject({ firstTryPass: 0.5, rounds: 2, rejects: 1, lessons: ['L1'], bench: 'b1' });
+  });
+
+  it('bench lines are ignored by the estimate', () => {
+    expect(estimateCost([e(1), e(2), e(3, { bench: 'b' }), e(4, { bench: 'b' })], want)).toBeUndefined();
+    expect(estimateCost([e(1), e(2), e(3), e(100, { bench: 'b' })], want)?.n).toBe(3);
+  });
 });

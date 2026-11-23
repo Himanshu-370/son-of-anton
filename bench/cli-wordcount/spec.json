@@ -1,0 +1,13 @@
+{
+  "title": "Sample word counter CLI",
+  "summary": "Synthetic practice project: a command line tool `wc-lite <file>` that prints the number of lines, words and characters in a text file.",
+  "outOfScope": ["Reading from standard input", "Multiple files at once"],
+  "tech": ["Node.js", "TypeScript"],
+  "acceptanceChecks": [
+    { "id": "AC-1", "text": "Running `wc-lite sample.txt` on a file containing the two lines `hello world` and `foo` prints `lines: 2`, `words: 3` and `chars: 15`." },
+    { "id": "AC-2", "text": "Running `wc-lite` on an empty file prints `lines: 0`, `words: 0` and `chars: 0`." },
+    { "id": "AC-3", "text": "Running `wc-lite missing.txt` for a file that does not exist prints an error message and exits with a non-zero status." }
+  ],
+  "services": [],
+  "kit": "fallback"
+}

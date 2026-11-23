@@ -119,6 +119,14 @@ describe('anton lessons', () => {
     expect((await readLessons('web', home)).map((l) => l.text)).toEqual(['Run lint first']);
   });
 
+  it('Saving line is sanitized', async () => {
+    await appendProposals([prop({ text: 'Run\u009b[31m lint first' })], home);
+    const h = harness(['a']);
+    await lessonsReviewCommand(h.deps);
+    expect(h.text()).not.toMatch(/[\u0080-\u009f]/);
+    expect(h.text()).toContain('Saving: Run[31m lint first');
+  });
+
   it('collect notes and failures (job folder names) print without control characters', async () => {
     const repo = join(home, 'projects', 'p');
     const dir = join(repo, '.anton', 'jobs', '1-\u001b[31mred');
@@ -184,5 +192,29 @@ describe('anton lessons', () => {
     expect(await lessonsRemoveCommand(l.id, h.deps)).toBe(0);
     expect(await readLessons('web', home)).toEqual([]);
     expect(await lessonsRemoveCommand('L-00000000', harness().deps)).toBe(1);
+  });
+});
+
+describe('anton lessons list --stats', () => {
+  it('--stats prints summary, trend, lessons and the noise note', async () => {
+    const l = await addLesson('web', 'Run the linter first', home);
+    const { appendHistory } = await import('../../src/core/history.js');
+    for (let i = 0; i < 10; i++) {
+      await appendHistory({
+        jobId: `j${i}`, project: 'proj', kind: 'new', kit: 'web', checks: 1, spentUsd: 1, stageUsd: {},
+        cacheHitRate: i < 5 ? 0.9 : 0.5, firstTryPass: 0.5, rounds: 2, rejects: 0, lessons: i < 6 ? [l.id] : [], bench: i === 9 ? 'b1' : undefined,
+        at: `2026-01-${String(i + 1).padStart(2, '0')}T00:00:00Z`,
+      }, home);
+    }
+    const h = harness();
+    expect(await lessonsListCommand(h.deps, { stats: true })).toBe(0);
+    const t = h.text();
+    expect(t).toContain('proj');
+    expect(t).toContain('bench b1');
+    expect(t).toMatch(/Cache hit rate[\s\S]*warning/i);
+    expect(t).toContain(l.id);
+    expect(t).toContain('no_benefit');
+    expect(t).toContain(`anton lessons remove ${l.id}`);
+    expect(t.trim().endsWith("These numbers are noisy with few runs — they inform your review, they don't decide.")).toBe(true);
   });
 });

@@ -33,6 +33,13 @@ describe('mapJUnit', () => {
     expect(r2).toMatchObject({ reason: 'failing', error: 'boom text' });
   });
 
+  it('reads direct testcases under testsuites alongside nested suites', async () => {
+    const { passingTests } = await import('../../src/verify/junit.js');
+    const xml = '<testsuites><testcase name="AC-1 direct"/><testsuite><testcase name="AC-2 nested"/></testsuite></testsuites>';
+    expect(passingTests(xml)).toEqual(['AC-1 direct', 'AC-2 nested']);
+    expect(mapJUnit(xml, checks).map((result) => result.status)).toEqual(['pass', 'pass', 'fail']);
+  });
+
   it('treats skipped as not passing', () => {
     const xml = `<testsuite><testcase name="AC-1 s"><skipped/></testcase></testsuite>`;
     expect(mapJUnit(xml, checks)[0]).toMatchObject({ status: 'fail', reason: 'failing' });

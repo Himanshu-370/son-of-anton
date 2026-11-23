@@ -19,6 +19,22 @@ describe('lessons store', () => {
     expect(await readLessons('web', home)).toEqual([l]);
   });
 
+  it('C1 controls are stripped from lessons', () => {
+    expect(cleanLessonText('Run\u0085 the\u009b lint\u009f first')).toBe('Run the lint first');
+  });
+
+  it('an untracked .gitignore is committed with the next lesson', async () => {
+    const dir = join(home, 'lessons');
+    const git = (...a: string[]) => execa('git', a, { cwd: dir });
+    await addLesson('web', 'First lesson', home);
+    // Simulate a Phase 5a leftover: the file exists on disk but git never tracked it.
+    await git('rm', '-q', '--cached', '.gitignore');
+    await git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'untrack');
+    await addLesson('web', 'Second lesson', home);
+    expect((await git('ls-files', '.gitignore')).stdout).toBe('.gitignore');
+    expect((await git('status', '--porcelain')).stdout).toBe('');
+  });
+
   it('the first lesson commits a .gitignore that keeps proposals.jsonl untracked', async () => {
     const l = await addLesson('web', 'Run the linter first', home);
     await writeFile(join(home, 'lessons', 'proposals.jsonl'), '{}\n');

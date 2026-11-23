@@ -2,7 +2,7 @@ import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { writeFileAtomic } from '../core/atomic.js';
 import type { Role } from '../core/config.js';
-import { commitPaths, initRepoIfMissing } from '../core/git.js';
+import { commitPaths, initRepoIfMissing, isTracked } from '../core/git.js';
 import { antonHome } from '../core/paths.js';
 import { sha8 } from '../review/shared.js';
 
@@ -39,7 +39,7 @@ const idOf = (file: string, text: string) => `L-${sha8(`${file}\n${text}`)}`;
 
 export function cleanLessonText(s: string): string {
   // \p{Cf} (zero-width, bidi overrides, BOM) could make the shown text differ from what reaches prompts.
-  const t = s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]|\p{Cf}/gu, '').replace(/\s+/g, ' ').trim();
+  const t = s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]|\p{Cf}/gu, '').replace(/\s+/g, ' ').trim();
   if (!t) throw new Error('Lesson is empty');
   if (t.length > MAX_LEN) throw new Error(`Lesson is longer than ${MAX_LEN} characters`);
   return t;
@@ -73,10 +73,9 @@ export async function addLesson(file: string, text: string, home = antonHome()):
   const paths = [`${file}.md`];
   // The review queue lives in the same folder; keep it out of the lessons history.
   const ignore = join(dir(home), '.gitignore');
-  if (!(await lstat(ignore).then(() => true, () => false))) {
-    await writeFileAtomic(ignore, 'proposals.jsonl\n');
-    paths.push('.gitignore');
-  }
+  if (!(await lstat(ignore).then(() => true, () => false))) await writeFileAtomic(ignore, 'proposals.jsonl\n');
+  // Also covers a .gitignore left on disk but never committed (Phase 5a).
+  if (!(await isTracked(dir(home), '.gitignore'))) paths.push('.gitignore');
   await writeFileAtomic(path(file, home), render([...all, lesson]));
   await commitPaths(dir(home), paths, `lessons: add ${lesson.id} to ${file}`);
   return lesson;

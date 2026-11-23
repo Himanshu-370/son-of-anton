@@ -8,6 +8,7 @@ Local software factory: `anton` CLI runs AI agents in Docker. Design: docs/specs
 - Kit images: `npm run build:image` builds both the fallback and web images (required after changing src/agent/* or either kit's Dockerfile)
 - Docker e2e: `ANTON_E2E=1 npx vitest run tests/e2e/docker.e2e.test.ts`
 - Paid API e2e (~$3): same with ANTHROPIC_API_KEY set, `npm run test:e2e`
+- Cheapest real end-to-end check is `anton bench --only cli-wordcount`.
 
 ## Rules
 - Every external effect (agent calls, docker, git, notify, spawn) is injectable via a `deps` param; unit tests never touch real Docker or the API.

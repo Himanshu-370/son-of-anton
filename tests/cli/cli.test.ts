@@ -69,6 +69,26 @@ function harness(extra: Partial<CliDeps> = {}) {
   return { deps, out, err, spawned, text: () => out.join('\n'), errText: () => err.join('\n') };
 }
 
+describe('bench job decisions', () => {
+  it.each([
+    ['approve', 'awaiting_final_review', approveCommand],
+    ['abandon', 'awaiting_final_review', abandonCommand],
+    ['reject', 'awaiting_final_review', (name, deps) => rejectCommand(name, { notes: 'Needs fixes' }, deps)],
+    ['resume', 'paused', (name, deps) => resumeCommand(name, {}, deps)],
+    ['stop', 'build', stopCommand],
+  ] as const)('refuses %s for a benchmark job', async (_name, stage, command) => {
+    const paused = stage === 'paused' ? { pausedFrom: 'build', pauseReason: 'error' } as const : {};
+    const { dir } = await project('p', { stage, bench: 'r1', ...paused });
+    const stopContainer = vi.fn(async () => undefined);
+    const h = harness({ stopContainer });
+    expect(await command('p', h.deps)).toBe(1);
+    expect(h.errText()).toContain('Bench jobs');
+    expect((await loadState(dir)).stage).toBe(stage);
+    expect(h.spawned).toEqual([]);
+    expect(stopContainer).not.toHaveBeenCalled();
+  });
+});
+
 describe('anton approve', () => {
   it('at stage plan → exit 1, Nothing to approve (stage: plan)', async () => {
     await project('p', { stage: 'plan' });
@@ -195,6 +215,15 @@ describe('anton reject', () => {
     expect(await readFile(join(dir, 'notes-round-1.md'), 'utf8')).toContain('make it blue');
     expect(await readFile(failureReportPath(dir), 'utf8')).toContain('make it blue');
     expect(h.spawned).toEqual(['p']);
+  });
+
+  it('reject increments rejects', async () => {
+    const { dir } = await project('p', { stage: 'awaiting_final_review', round: 2 });
+    expect(await rejectCommand('p', { notes: 'x' }, harness().deps)).toBe(0);
+    expect((await loadState(dir)).rejects).toBe(1);
+    await saveState(dir, { ...(await loadState(dir)), stage: 'awaiting_final_review' });
+    expect(await rejectCommand('p', { notes: 'y' }, harness().deps)).toBe(0);
+    expect((await loadState(dir)).rejects).toBe(2);
   });
 
   it('reject notes fan out to every plan area', async () => {
