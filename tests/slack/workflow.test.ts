@@ -408,6 +408,31 @@ describe('review cards', () => {
     expect(spawned).toEqual(['p']);
   });
 
+  it('approves a spec from the posted card: plan stage, spec-approved tag, one spawn; a second click changes nothing', async () => {
+    const job = await project();
+    outputs.push({ kind: 'spec', spec: spec('Card Approve') });
+    await openSlackSpec(job, specDeps());
+    const event = published.find((m) => m.kind === 'spec-ready')!;
+    expect(JSON.parse(await readFile(join(job.jobDir, 'spec.json'), 'utf8')).title).toBe('Card Approve');
+    const m = await composeSlackMessage(event, { config, home, channelId: PROJECT_CHANNEL });
+    expect(m?.text).toContain('Card Approve');
+    const ts = '1700000300.000001';
+    for (const t of m?.cards ?? []) expect(await attachCardMessage(t, PROJECT_CHANNEL, ts, { home })).toBe(true);
+    const buttons = (m!.blocks as { elements?: { value: string; text: { text: string } }[] }[]).flatMap((b) => b.elements ?? []);
+    const approve = { token: buttons.find((b) => b.text.text === 'Approve spec')!.value, channelId: PROJECT_CHANNEL, ts };
+    expect((await dispatchSlackAction(press(approve, 'pm', 'card:T0FAKE:sa1'), deps())).status).toBe('done');
+    expect((await loadState(job.jobDir)).stage).toBe('plan');
+    const { listTags } = await import('../../src/core/git.js');
+    expect(await listTags(job.repoPath, 'anton/1-init/*')).toEqual(['anton/1-init/spec-approved']);
+    expect(spawned).toEqual(['p']);
+    // A second click on the same card, and a redelivery of the first, start nothing.
+    const again = await dispatchSlackAction(press(approve, 'pm', 'card:T0FAKE:sa2'), deps());
+    expect(['stale', 'duplicate', 'refused']).toContain(again.status);
+    expect((await dispatchSlackAction(press(approve, 'pm', 'card:T0FAKE:sa1'), deps())).status).toBe('duplicate');
+    expect(spawned).toEqual(['p']);
+    expect((await loadState(job.jobDir)).stage).toBe('plan');
+  });
+
   it('final reject needs notes, goes back to build; resume of a paused job takes a budget from its modal', async () => {
     const job = await project('p', { stage: 'awaiting_final_review' });
     const target = { project: 'p', jobId: '1-init', stage: 'awaiting_final_review', revision: 'delivered-1' };
