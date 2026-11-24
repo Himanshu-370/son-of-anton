@@ -155,6 +155,14 @@ export async function markTurnStopped(project: string, jobId: string, claim: str
   });
 }
 
+/** Another surface owns this spec conversation or round: the caller must stop, not continue without it. */
+export class SpecConflict extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SpecConflict';
+  }
+}
+
 export type SpecJob = { project: string; repoPath: string; jobId: string; jobDir: string; description: string; mode: 'new' | 'change' };
 export type SpecRoundInput =
   | { kind: 'start' }
@@ -387,11 +395,14 @@ export function interactiveSpecHooks(job: SpecJob, deps: { home?: string; now?: 
     async beforeCall({ call, prompt, final, answers }) {
       await withContinuation(job.project, job.jobId, home, async (c) => {
         if (call === 0) {
-          if (c) throw new Error('This spec conversation has already started elsewhere.');
+          if (c && holderAlive(c.holder)) throw new SpecConflict('This spec conversation has already started elsewhere.');
+          // The CLI just created this job, so a saved file for its name is left over (a reused project name):
+          // keep it aside for reference and start fresh.
+          if (c) await fsp.rename(specContinuationPath(job.project, job.jobId, home), `${specContinuationPath(job.project, job.jobId, home)}.replaced-${now()}`);
           await save({ ...fresh(job, 'cli'), holder: holder(), pending: { prompt, final } }, home);
           return;
         }
-        if (!c || c.holder?.claim !== claim || c.status !== 'awaiting') throw new Error('This spec round was answered elsewhere.');
+        if (!c || c.holder?.claim !== claim || c.status !== 'awaiting') throw new SpecConflict('This spec round was answered elsewhere.');
         const last = c.exchanges.at(-1);
         const exchanges = last && answers ? [...c.exchanges.slice(0, -1), { ...last, answers }] : c.exchanges;
         await save({ ...c, exchanges, status: 'running', holder: holder(), pending: { prompt, final }, questions: undefined, askedAt: undefined }, home);

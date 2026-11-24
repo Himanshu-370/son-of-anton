@@ -1,18 +1,40 @@
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
 import { loadSecrets, secretsEnvFile } from '../core/secrets.js';
-import { finishSpec, interactiveSpecHooks, type SpecJob } from '../core/spec-continuation.js';
+import { finishSpec, interactiveSpecHooks, SpecConflict, type SpecJob } from '../core/spec-continuation.js';
 import { loadState } from '../core/state.js';
 import type { KitName } from '../kits/index.js';
 import type { Resolved } from './deps.js';
 
-/** Continuation hooks for a job whose names the store accepts (older or test job IDs just skip it). */
-function hooksFor(job: SpecJob) {
+/**
+ * Continuation hooks for a job whose names the store accepts (older or test job IDs just skip it). They are
+ * best-effort in the terminal: a lock timeout or I/O error warns once and the session goes on without a
+ * continuation, as before Slack. Only a conflict (Slack owns the round) stops the session.
+ */
+function hooksFor(job: SpecJob, warn: (line: string) => void) {
+  let inner: ReturnType<typeof interactiveSpecHooks>;
   try {
-    return interactiveSpecHooks(job);
+    inner = interactiveSpecHooks(job);
   } catch {
     return undefined;
   }
+  let off = false;
+  const guarded = async (call: () => Promise<void>) => {
+    if (off) return;
+    try {
+      await call();
+    } catch (e) {
+      if (e instanceof SpecConflict) throw e;
+      off = true;
+      warn(`Could not save the spec conversation for Slack (${e instanceof Error ? e.message : String(e)}); continuing without it.`);
+    }
+  };
+  return {
+    beforeCall: (info: Parameters<NonNullable<typeof inner.beforeCall>>[0]) => guarded(() => inner.beforeCall!(info)),
+    afterCall: (info: Parameters<NonNullable<typeof inner.afterCall>>[0]) => guarded(() => inner.afterCall!(info)),
+    stopped: (reason: string) => (off ? Promise.resolve(inner.done()) : inner.stopped(reason)),
+    done: () => inner.done(),
+  };
 }
 
 /** Container + spec loop + approval hint, shared by `anton new` and `anton change`. Returns the exit code. */
@@ -42,7 +64,7 @@ export async function runSpecSession(
   let services: { name: string; envVars: string[] }[] = [];
   let kit: KitName = 'fallback';
   const job: SpecJob = { project: p.name, repoPath: p.repoPath, jobId: p.jobId, jobDir: p.jobDir, description: p.description, mode };
-  const hooks = /^[1-9]\d*-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(p.jobId) ? hooksFor(job) : undefined;
+  const hooks = /^[1-9]\d*-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(p.jobId) ? hooksFor(job, d.err) : undefined;
   try {
     const state = await loadState(p.jobDir);
     let warned = false;

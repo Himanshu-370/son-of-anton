@@ -735,6 +735,40 @@ describe('anton accept-risk', () => {
 });
 
 describe('anton new', () => {
+  const hookedSpec = (): SpecDoc => ({ title: 'Habits', summary: 's', outOfScope: [], kit: 'fallback', tech: [], acceptanceChecks: [{ id: 'AC-1', text: 'tracks' }] });
+  const hookedHarness = () => harness({
+    ensureImage: async () => 'img', startContainer: async (slug) => `anton-${slug}`, stopContainer: async () => undefined,
+    onSigint: () => () => undefined,
+    runSpec: async (ctx, _desc, _ask, deps) => {
+      await deps?.hooks?.beforeCall?.({ call: 0, prompt: 'first', final: false });
+      await deps?.hooks?.afterCall?.({ call: 0, prompt: 'first', turn: { kind: 'spec', spec: hookedSpec() }, state: ctx.state });
+      return { spec: hookedSpec(), state: ctx.state };
+    },
+  });
+
+  it('a leftover spec continuation for a reused project name does not block anton new', async () => {
+    const dir = join(home, 'spec-sessions', 'a-habit-tracker');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, '1-init.json'), JSON.stringify({
+      version: 1, project: 'a-habit-tracker', jobId: '1-init', mode: 'new', description: 'an older project', origin: 'slack',
+      status: 'awaiting', round: 1, calls: 1, questions: ['Old?'], askedAt: 1, exchanges: [], updatedAt: 'x',
+    }));
+    const h = hookedHarness();
+    expect(await newCommand('a habit tracker', {}, h.deps)).toBe(0);
+    expect(await loadState(jobDirOf(join(home, 'projects', 'a-habit-tracker'), '1-init'))).toMatchObject({ stage: 'awaiting_spec_approval' });
+    const saved = JSON.parse(await readFile(join(dir, '1-init.json'), 'utf8'));
+    expect(saved).toMatchObject({ description: 'a habit tracker', origin: 'cli', status: 'done' });
+  });
+
+  it('the continuation store failing only warns: anton new still finishes as before', async () => {
+    await mkdir(join(home, 'spec-sessions'), { recursive: true });
+    await writeFile(join(home, 'spec-sessions', 'a-habit-tracker'), 'not a folder');
+    const h = hookedHarness();
+    expect(await newCommand('a habit tracker', {}, h.deps)).toBe(0);
+    expect(await loadState(jobDirOf(join(home, 'projects', 'a-habit-tracker'), '1-init'))).toMatchObject({ stage: 'awaiting_spec_approval' });
+    expect(h.errText()).toMatch(/continuing without/i);
+  });
+
   it('Docker down → exit 2 with the preflight message, no project folder', async () => {
     const exec: ExecFn = async () => ({ exitCode: 1, stdout: '', stderr: 'Cannot connect' });
     const runSpec = vi.fn();
