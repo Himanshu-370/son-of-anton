@@ -543,3 +543,38 @@ describe('pause-bound and used-up cards', () => {
     expect((await dispatchSlackAction(press(resume, 'pm', 'card:T0FAKE:nr1'), deps())).status).toBe('duplicate');
   });
 });
+
+describe('serve retro collection', () => {
+  it('a hung collection never blocks the caller and never overlaps a second one', async () => {
+    const { retroCollector } = await import('../../src/cli/commands/serve.js');
+    let calls = 0;
+    let t = 0;
+    const r = retroCollector(() => { calls++; return new Promise(() => undefined); }, { intervalMs: 1000, now: () => t });
+    const started = Date.now();
+    r.tick();
+    expect(Date.now() - started).toBeLessThan(50);
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    expect(r.running()).toBe(true);
+    t = 10_000;
+    r.tick();
+    await Promise.resolve();
+    expect(calls).toBe(1);
+    await r.settle(10);
+  });
+
+  it('starts the next collection once the previous one has finished and the interval has passed', async () => {
+    const { retroCollector } = await import('../../src/cli/commands/serve.js');
+    let calls = 0;
+    let t = 0;
+    const r = retroCollector(async () => { calls++; throw new Error('network'); }, { intervalMs: 1000, now: () => t });
+    r.tick();
+    await r.settle(100);
+    expect(r.running()).toBe(false);
+    r.tick();
+    t = 2000;
+    r.tick();
+    await r.settle(100);
+    expect(calls).toBe(2);
+  });
+});

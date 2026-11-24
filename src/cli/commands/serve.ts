@@ -10,6 +10,32 @@ import { startSlackService } from '../../slack/service.js';
 import { createSlackRuntime } from '../../slack/transport.js';
 import { guard, resolveDeps, type CliDeps } from '../deps.js';
 
+/**
+ * Retro collection runs beside delivery, never inside it: `tick` starts one collection when it is due and
+ * none is running, and returns at once, so a slow or hung batch fetch cannot delay Slack messages or reminders.
+ */
+export function retroCollector(collect: () => Promise<unknown>, opts: { intervalMs?: number; now?: () => number } = {}) {
+  const interval = opts.intervalMs ?? 15 * 60_000;
+  const now = opts.now ?? Date.now;
+  let next = 0;
+  let running: Promise<void> | undefined;
+  return {
+    tick(): void {
+      if (running || now() < next) return;
+      next = now() + interval;
+      running = Promise.resolve()
+        .then(collect)
+        .then(() => undefined, () => undefined)
+        .finally(() => { running = undefined; });
+    },
+    running: () => running !== undefined,
+    /** Wait for a running collection, at most `ms` (service stop). */
+    async settle(ms: number): Promise<void> {
+      if (running) await Promise.race([running, new Promise((r) => setTimeout(r, ms).unref())]);
+    },
+  };
+}
+
 export async function serveCommand(deps: CliDeps = {}): Promise<number> {
   const d = resolveDeps(deps);
   return guard(d, async () => {
@@ -37,7 +63,9 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
     });
     const runtime = createSlackRuntime(config, credentials, inbound);
     let reconcileAt = 0;
-    let retrosAt = 0;
+    // Finished Retros queue their proposals here, so the coach can post lesson cards without the CLI.
+    // Collecting reads submitted batches; it starts no new model call.
+    const retros = retroCollector(() => collectRetros({ ...d.retro, out: () => undefined }));
     const service = await startSlackService({
       home, roles: SLACK_ROLES, open: runtime.open, log: d.out,
       async drain(connected, signal, canDeliver) {
@@ -47,12 +75,7 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
           await remindPendingSpecs({ home }).catch(() => undefined);
           reconcileAt = Date.now() + 60_000;
         }
-        if (Date.now() >= retrosAt) {
-          // Finished Retros queue their proposals here, so the coach can post lesson cards without the CLI.
-          // Collecting reads submitted batches; it starts no new model call.
-          retrosAt = Date.now() + 15 * 60_000;
-          await collectRetros({ ...d.retro, out: () => undefined }).catch(() => undefined);
-        }
+        retros.tick();
         if (!connected.size) return;
         await drainOutbox({
           home, config, signal,
@@ -79,6 +102,7 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
       await service.stop();
       // Let accepted actions finish their local work; their records make a redelivery safe either way.
       await inbound.idle();
+      await retros.settle(5_000);
     });
     return 0;
   });

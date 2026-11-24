@@ -1,5 +1,6 @@
 import { lessonOccurrence, publishMilestone } from '../slack/events.js';
-import { lstat, readdir } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import { lstat, mkdir, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
@@ -12,6 +13,7 @@ import { allowanceLeftUsd, appendStageCost, recordCost, remainingUsd, usd } from
 import { ROLE_MODELS } from '../core/config.js';
 import { antonHome, jobDir as jobDirOf } from '../core/paths.js';
 import { listProjects } from '../core/registry.js';
+import { acquireLockFile, AlreadyRunning } from '../core/lock.js';
 import { loadSecrets, redact } from '../core/secrets.js';
 import { loadState, saveState } from '../core/state.js';
 import { cleanLessonText } from '../lessons/store.js';
@@ -284,6 +286,21 @@ export async function collectRetros(deps: RetroDeps = {}): Promise<{ collected: 
           return false;
         }
       };
+      // One collector per job across processes (anton serve and anton lessons review): the status is re-read
+      // under the lock, so a Retro is finished and its cost recorded once. A busy job is left to its holder.
+      let release: () => Promise<void>;
+      try {
+        const locks = join(home, 'lessons', 'retro-locks');
+        await mkdir(locks, { recursive: true });
+        release = await acquireLockFile(join(locks, `${p.name}--${createHash('sha256').update(jobId).digest('hex').slice(0, 24)}.lock`));
+      } catch (e) {
+        if (e instanceof AlreadyRunning) {
+          res.pending++;
+          res.notes.push(`${tag}: being collected by another Anton process`);
+        } else retry('lock the retro', e);
+        continue;
+      }
+      try {
       let raw: string | undefined;
       try {
         await assertJobDir(job.repo, job.jobDir);
@@ -333,6 +350,9 @@ export async function collectRetros(deps: RetroDeps = {}): Promise<{ collected: 
         res.notes.push(`${tag}: could not fetch retro results: ${reasonOf(e, key)}`);
       } finally {
         if (!settled) res.pending++;
+      }
+      } finally {
+        await release();
       }
     }
   }
