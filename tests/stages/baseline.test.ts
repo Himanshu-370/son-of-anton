@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readFile, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import type { StageCtx } from '../../src/agent/host-runner.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
 import { fallbackKit } from '../../src/kits/fallback/index.js';
@@ -40,6 +40,7 @@ const reset = async () => { order.push('reset'); };
 const scanners = async () => ({ findings: [finding], unavailable: ['semgrep'] });
 
 describe('runBaseline', () => {
+  beforeEach(() => { order.length = 0; });
   it('baseline records passing test names and scanner refs', async () => {
     const c = await ctx();
     const s = await runBaseline(c, kit(0), plan, { runScanners: scanners, resetWorktree: reset, isClean: async () => true });
@@ -54,7 +55,7 @@ describe('runBaseline', () => {
     const s = await runBaseline(c, kit(1), plan, { runScanners: scanners, resetWorktree: reset, isClean: async () => true });
     const out = JSON.parse(await readFile(join(c.jobDir, 'evidence', 'baseline.json'), 'utf8'));
     expect(out).toMatchObject({ passingTests: [], ran: false });
-    expect(order).toEqual(['reset', 'reset']);
+    expect(order).toEqual(['reset']);
     expect(s.stage).toBe('build');
   });
   it('resets only after baseline.json is written', async () => {
