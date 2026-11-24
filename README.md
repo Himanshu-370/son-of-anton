@@ -199,6 +199,28 @@ The nine Anton roles each have their own Slack bot. Every job posts progress to 
 3. Start `anton serve` in the foreground and run a small CLI job. Check that the PM and other roles post under their own names in the project thread. The service connects outward, and your job can keep running while the service is stopped.
 4. On macOS, run `anton slack service install` to start the service at login. Run `anton slack service status` to check it, or `anton slack service uninstall` to remove it. Service logs live under `~/anton/slack/logs/`.
 
+#### The LaunchAgent, Docker and the API key
+
+A LaunchAgent starts with almost no environment, so install and `anton serve` set up what job controls need:
+
+- **PATH.** `install` finds `docker` on your PATH (or in `/usr/local/bin`, `/opt/homebrew/bin` or Docker Desktop's app folder) and writes its folder, the folder of the `node` running Anton, and `/usr/bin:/bin:/usr/sbin:/sbin` into the agent's PATH. If it cannot find `docker`, install stops and says so. If you move Docker or Node later, run install again.
+- **API key.** `anton serve` uses `ANTHROPIC_API_KEY` from its environment. If that is not set, as under the LaunchAgent, it reads the macOS Keychain item `anthropic-api-key` for your user and keeps the key in memory only. Job runs and spec turns started by the service get it from there. The key is never written to the plist, a file or a log. Store it once with:
+
+  ```sh
+  security add-generic-password -a "$USER" -s anthropic-api-key -w
+  ```
+
+  (`-w` with no value prompts for the key, so it doesn't land in your shell history.)
+- **Runs outlive the service.** The agent sets `AbandonProcessGroup`, so a job run started from Slack keeps going if the service stops or restarts.
+- `anton slack service status` reports whether `docker` was found on the service PATH and whether the Keychain item exists. It never prints the key.
+
+#### Upgrading
+
+- After upgrading Anton, restart `anton serve`. If you use the LaunchAgent, reinstall it so it gets the new PATH and settings: `anton slack service uninstall`, then `anton slack service install`.
+- Existing Slack apps from the first Slack release need no new setup.
+- Install now needs `docker` on your PATH (see above).
+- A spec or delivery that was already waiting before the upgrade has no card. Its thread says to approve it on the Mac with `anton approve <project>`; do that there.
+
 Credentials live in owner-only files under `~/anton/slack/`. Pending updates stay on disk through a restart. Use `anton slack outbox` to see delivery counts and updates that need attention. If Slack restricts a channel invitation, add the owner and role apps to the private channel in Slack. When Slack cannot confirm an operation, Anton records it for review and holds later updates to that channel. Use `anton slack resolve recheck <id>` to look for the existing post again, or `anton slack resolve retry <id>` for a confirmed delivery failure. A private project channel can be verified by explicit ID with `bind-channel`. For an uncertain parent post, `confirm-thread` takes the Slack message timestamp and verifies the sender and delivery marker.
 
 Slack receives milestone summaries and a sanitized copy of the generated spec. To share a QA screenshot, open it locally first, then run `anton slack share-screenshot <project> <check-id>`. Anton queues only the validated image you select. The repo and raw logs stay on your Mac.
@@ -208,8 +230,8 @@ Slack receives milestone summaries and a sanitized copy of the generated spec. T
 Only the owner set during `anton slack setup` can change a job. Everyone else gets "Only the Anton owner can do that here."
 
 - `/anton new <description>` in `#anton` starts a project. `/anton change <description>` in a project channel starts a change job.
-- The PM asks its spec questions in the job thread. Reply in the thread (number your answers when there are several). The spec waits as long as you need, with one reminder after 24 hours. You can also answer in the terminal with `anton spec <project>`.
-- The spec card has **Approve spec** and **Request changes…**. The delivery card has **Approve delivery**, **Reject…** and **Accept risk…** for each open security finding. A paused job gets **Resume…** and **Abandon**. Lesson proposals from the Coach in `#anton` get **Accept**, **Edit…** and **Reject**.
+- The PM asks its spec questions in the job thread. Reply in the thread (number your answers when there are several). A reply that mentions another role or person (for example `@Anton QA what does AC-2 mean?`) is a question for them, not your answer. The spec waits as long as you need, with one reminder after 24 hours. If the service stops in the middle of a PM turn, the thread gets one notice; rerun the turn with `/anton spec retry` or `anton spec <project> --retry`. You can also answer in the terminal with `anton spec <project>`.
+- The spec card has **Approve spec** and **Request changes…**. The delivery card has **Approve delivery**, **Reject…** and **Accept risk…** for each open security finding. A paused job gets **Resume…** and **Abandon**, whatever paused it (budget, an error, no progress, the round limit or `anton stop`). Lesson proposals from the Coach in `#anton` get **Accept**, **Edit…** and **Reject**.
 - A card acts once. A card for an older spec, delivery or pause says it is out of date and changes nothing. A decision made in the CLI makes the matching card out of date too.
 - `/anton status`, `/anton resume [budget <usd>] [accept-as-is]`, `/anton abandon <job id>` and `/anton spec retry` work in the project channel. `/anton help` lists them.
 
@@ -225,7 +247,7 @@ Each answer is one model call with a hard output limit and no tools. The bots ca
 
 Who can ask: members of the project's private channel, checked by Slack user ID on every question. Members can also run `/anton status` there. Shared (Slack Connect) channels get no answers. A question in `#anton` or in a DM gets a pointer to the right project channel, and only if you are a member of it. A question that names more than one project gets no project data.
 
-Paid answers have their own budget, separate from job budgets. Before each call, Anton reserves the most that call could cost. When the call returns, it books the reported cost instead. If the outcome is unknown (a crash or a network error), the full reservation stays booked and the call is not retried. When the month's budget cannot cover an answer, or no `ANTHROPIC_API_KEY` is set for `anton serve`, you get the free status instead. Defaults, in `~/anton/config.yaml`:
+Paid answers have their own budget, separate from job budgets. Before each call, Anton reserves the most that call could cost. When the call returns, it books the reported cost instead. If the API definitely rejected the call (status 400, 401, 403, 404 or 422), nothing is booked and the service log says why. If the outcome is unknown (a crash, a network error, a rate limit or a server error), the full reservation stays booked and the call is not retried. When the month's budget cannot cover an answer, or `anton serve` has no API key (from its environment or the Keychain), you get the free status instead. Defaults, in `~/anton/config.yaml`:
 
 ```yaml
 chat:
