@@ -229,6 +229,14 @@ describe('answerQuestion', () => {
     await answerQuestion(ask('Why is it failing? show the logs'), chatDeps());
     expect(userText(sent[0]!)).not.toContain('Q-ONLY-MARKER');
     expect(userText(sent[0]!)).not.toContain('OUTSIDE-SECRET');
+    // A logs folder swapped for a symlink to another project's logs is skipped too.
+    const fsp = await import('node:fs/promises');
+    await fsp.rm(join(dir, 'logs'), { recursive: true });
+    const qLogs = join(home, 'projects', 'q', '.anton', 'jobs', '1-init', 'logs');
+    await writeFile(join(qLogs, 'error.log'), 'Q-ONLY-MARKER in a log\n');
+    await symlink(qLogs, join(dir, 'logs'));
+    await answerQuestion(ask('Why is it failing? show the logs'), chatDeps());
+    expect(userText(sent[1]!)).not.toContain('Q-ONLY-MARKER');
   });
 });
 

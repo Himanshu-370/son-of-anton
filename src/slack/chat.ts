@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { constants } from 'node:fs';
-import { open } from 'node:fs/promises';
+import { lstat, open, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import type { Message, MessageCreateParamsNonStreaming, ThinkingConfigParam } from '@anthropic-ai/sdk/resources/messages';
@@ -145,6 +145,13 @@ async function excerpt(path: string, max: number, from: 'head' | 'tail'): Promis
   }
 }
 
+/** A job subfolder (logs/, evidence/) that is a real folder in place, not a symlink to somewhere else. */
+async function realSubdir(jobDir: string, name: string): Promise<boolean> {
+  const st = await lstat(join(jobDir, name)).catch(() => undefined);
+  if (!st?.isDirectory()) return false;
+  return (await realpath(join(jobDir, name)).catch(() => '')) === join(await realpath(jobDir), name);
+}
+
 type Source = { name: string; path: string[]; bytes: number; from: 'head' | 'tail' };
 /** Job records each kind may read. Logs and results are eligible only for evidence questions. */
 const SOURCES: Record<'explain' | 'evidence', Source[]> = {
@@ -187,6 +194,7 @@ async function userTurn(input: AuthorizedQuestion, kind: 'explain' | 'evidence',
   await assertJobDir(job.repo, job.jobDir).catch(() => { dirOk = false; });
   for (const src of dirOk ? SOURCES[kind] : []) {
     if (room < 200) break;
+    if (src.path.length > 1 && !(await realSubdir(job.jobDir, src.path[0]!))) continue;
     const raw = await excerpt(join(job.jobDir, ...src.path), Math.min(src.bytes, room), src.from);
     if (raw === undefined) continue;
     const text = clipBytes(scrub(raw, secrets), room);
