@@ -234,6 +234,36 @@ describe('spec conversation in the job thread', () => {
     expect(reminders).toHaveLength(0);
   });
 
+  it('a thread message that mentions another role is a question for it, not the answer to a single question', async () => {
+    const job = await project();
+    outputs.push({ kind: 'questions', questions: ['Who uses it?'] });
+    await openSlackSpec(job, specDeps());
+    const qaBot = config.roles.qa.botUserId;
+    const text = `<@${qaBot}> what does AC-2 mean?`;
+    const access: DispatchDeps['access'] = {
+      channel: async () => ({ isPrivate: true, isShared: false, isArchived: false, teamId: 'T0FAKE' }),
+      members: async () => ['U0OWNER'],
+    };
+    const qaDeps = deps({ access, chat: { home, env: {} } });
+    // The PM's copy of the message event is not an answer: no PM turn, nothing charged.
+    const asPm = await dispatchSlackAction({ ...reply(text), mentions: [qaBot] } as SlackAction, qaDeps);
+    expect(asPm.status).toBe('ignored');
+    expect(requests).toHaveLength(1);
+    expect(await readSpecContinuation('p', '1-init', home)).toMatchObject({ status: 'awaiting', round: 1 });
+    // QA's mention is answered by QA, not suppressed.
+    const asQa = await dispatchSlackAction({
+      via: 'message', key: `event:T0FAKE:Ev${++n}`, actor: owner, eventType: 'app_mention', mentions: [qaBot], text,
+      source: { appId: QA_APP, role: 'qa', channelId: PROJECT_CHANNEL, messageTs: '1700000001.000099', threadTs: THREAD },
+    }, qaDeps);
+    expect(asQa.status).toBe('done');
+    expect(asQa.lines[0]).toMatch(/^QA/);
+    // A plain reply (or one that mentions only the PM) still answers.
+    outputs.push({ kind: 'spec', spec: spec() });
+    const answered = await dispatchSlackAction({ ...reply(`<@${config.roles.pm.botUserId}> just me`), mentions: [config.roles.pm.botUserId] } as SlackAction, qaDeps);
+    expect(answered.status).toBe('done');
+    expect(requests).toHaveLength(2);
+  });
+
   it('lets exactly one of two competing answers (Slack vs Slack, Slack vs CLI) reach the PM', async () => {
     const job = await project();
     outputs.push({ kind: 'questions', questions: ['Who uses it?'] });

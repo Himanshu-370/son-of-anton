@@ -390,6 +390,11 @@ async function commandOperation(a: Extract<SlackAction, { via: 'command' }>, dep
   return { op: { kind: 'resume', target: targetOf(job), ...(budget === undefined ? {} : { budget }), ...(acceptAsIs ? { acceptAsIs } : {}) } };
 }
 
+/** Whether a thread message can be the owner's answer to the PM: it mentions no user or bot but the PM. */
+function answersThePm(a: Extract<SlackAction, { via: 'message' }>, config: SlackConfig): boolean {
+  return (a.mentions ?? []).every((id) => id === config.roles.pm.botUserId);
+}
+
 /** The owner's thread replies and DM instructions. Everything else is discussion (`ignored`). */
 async function messageOperation(
   a: Extract<SlackAction, { via: 'message' }>, deps: DispatchDeps, home: string,
@@ -410,6 +415,8 @@ async function messageOperation(
     return { op: { kind: 'start', mode: 'change', project: c[1]!, description: sanitizeSlackText(c[2], DESCRIPTION_LIMIT) } };
   }
   if (!a.source.threadTs) return result('ignored');
+  // An answer mentions nobody but the PM. A message that mentions another role or person is addressed to them.
+  if (!answersThePm(a, deps.config)) return result('ignored');
   const lookup = deps.jobForThread ?? (async (channel: string, thread: string) => {
     const { jobForThread } = await import('./outbox.js');
     return jobForThread({ config: deps.config, home: deps.home }, channel, thread);
@@ -497,7 +504,8 @@ async function questionRoute(a: Extract<SlackAction, { via: 'message' }>, deps: 
   const first = a.mentions?.find((id) => bots.has(id));
   if (first !== undefined && first !== config.roles[a.source.role].botUserId) return result('ignored');
   // The owner's mention reply to waiting spec questions is an answer, which the message event carries.
-  if (isOwner && a.source.threadTs) {
+  // It is one only when it mentions nobody but the PM; a mention of another role is a question for it.
+  if (isOwner && a.source.threadTs && answersThePm(a, config)) {
     const lookup = deps.jobForThread ?? (async (channel: string, thread: string) => {
       const { jobForThread } = await import('./outbox.js');
       return jobForThread({ config, home: deps.home }, channel, thread);
