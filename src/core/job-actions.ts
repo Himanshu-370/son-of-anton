@@ -6,7 +6,7 @@ import { readRegularFile, writeFileAtomic } from './atomic.js';
 import { budgetSettings, loadAntonConfig } from './anton-config.js';
 import { allowanceUsage, cacheHitRate, parseUsage, stageGroup, totalUsage, usd } from './budget.js';
 import { AREA_ORDER } from './config.js';
-import { commitAll, currentBranch, isClean, listTags as defaultListTags, switchBranch, tag } from './git.js';
+import { commitAll, currentBranch, isClean, listTags as defaultListTags, switchBranch, tagHead } from './git.js';
 import { assertOnJobBranch, currentJobId } from './job.js';
 import { AlreadyRunning, isRunning, waitForLockFile } from './lock.js';
 import { jobDir as jobDirOf } from './paths.js';
@@ -270,7 +270,7 @@ export async function approveJob(target: ActionTarget, d: JobActionDeps): Promis
       await assertOnJobBranch(job.repo, state);
       await readApprovedSpec(job.jobDir);
       await commitAll(job.repo, 'chore: spec approved', await loadSecrets(target.project), { emptyIfNoHead: true });
-      await tag(job.repo, `anton/${job.jobId}/spec-approved`);
+      await tagHead(job.repo, `anton/${job.jobId}/spec-approved`);
       await writeSpawnClaim(job);
       await saveState(job.jobDir, transition(state, 'plan'));
       return { job, next: 'spawn' as const };

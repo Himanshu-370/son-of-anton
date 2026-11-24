@@ -118,6 +118,35 @@ describe('anton approve', () => {
     expect(h.spawned).toEqual(['p']);
   });
 
+  it('completes after a crash left the spec-approved tag at HEAD; a tag elsewhere fails clearly', async () => {
+    const { repo, dir } = await project('p', { stage: 'awaiting_spec_approval' });
+    await execa('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+    await writeFile(join(repo, '.gitignore'), '.anton/\n');
+    const spec: SpecDoc = {
+      title: 'Sum', summary: 's', outOfScope: [], kit: 'fallback', tech: [],
+      acceptanceChecks: [{ id: 'AC-1', text: 'sums' }],
+    };
+    await writeFile(join(dir, 'spec.json'), JSON.stringify(spec));
+    await writeFile(join(dir, 'spec.md'), '# Sum\n\n## Acceptance checks\n\n- **AC-1**: sums\n');
+    const git = (...args: string[]) => execa('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd: repo });
+    // The earlier attempt committed and tagged, then died before saving the state.
+    await git('add', '-A');
+    await git('commit', '-q', '-m', 'chore: spec approved');
+    await git('tag', 'anton/1-init/spec-approved');
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(0);
+    expect((await loadState(dir)).stage).toBe('plan');
+    expect(h.spawned).toEqual(['p']);
+
+    // A tag on another commit is not this approval's: refuse, state unchanged.
+    await saveState(dir, { ...(await loadState(dir)), stage: 'awaiting_spec_approval' });
+    await writeFile(join(repo, 'extra.txt'), 'more');
+    const h2 = harness();
+    expect(await approveCommand('p', h2.deps)).toBe(1);
+    expect(h2.errText()).toMatch(/spec-approved.*another commit/);
+    expect((await loadState(dir)).stage).toBe('awaiting_spec_approval');
+  });
+
   it('a brand-new project with no tracked files still gets the spec-approved commit and tag', async () => {
     const { repo, dir } = await project('p', { stage: 'awaiting_spec_approval' });
     await execa('git', ['init', '-q', '-b', 'main'], { cwd: repo }); // no commits, nothing tracked: only .anton/ exists
