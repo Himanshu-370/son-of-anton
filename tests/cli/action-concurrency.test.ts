@@ -160,3 +160,20 @@ describe('simultaneous decisions across processes', () => {
     expect((await loadState(dir)).stage).toBe('build');
   }, 30_000);
 });
+
+describe('decision lock wait', () => {
+  it('says a decision is in progress, not that anton is already running', async () => {
+    await project();
+    const { acquireLockFile } = await import('../../src/core/lock.js');
+    const { withDecisionLock } = await import('../../src/core/job-actions.js');
+    const release = await acquireLockFile(join(home, 'projects', 'p', '.anton', 'decision.lock'));
+    try {
+      const err = await withDecisionLock('p', async () => 'ran', 50).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).not.toMatch(/already running/);
+      expect((err as Error).message).toMatch(/another decision .* in progress/i);
+    } finally {
+      await release();
+    }
+  });
+});

@@ -8,7 +8,7 @@ import { allowanceUsage, cacheHitRate, parseUsage, stageGroup, totalUsage, usd }
 import { AREA_ORDER } from './config.js';
 import { commitAll, currentBranch, isClean, listTags as defaultListTags, switchBranch, tag } from './git.js';
 import { assertOnJobBranch, currentJobId } from './job.js';
-import { isRunning, waitForLockFile } from './lock.js';
+import { AlreadyRunning, isRunning, waitForLockFile } from './lock.js';
 import { jobDir as jobDirOf } from './paths.js';
 import { getProject, listProjects, type ProjectEntry } from './registry.js';
 import { loadSecrets } from './secrets.js';
@@ -111,7 +111,10 @@ async function underDecisionLock<T>(
 ): Promise<T> {
   const { repoPath } = await getProject(target.project);
   await fsp.mkdir(join(repoPath, '.anton'), { recursive: true });
-  const release = await waitForLockFile(join(repoPath, '.anton', 'decision.lock'), deps.lockWaitMs);
+  const release = await waitForLockFile(join(repoPath, '.anton', 'decision.lock'), deps.lockWaitMs).catch((e: unknown) => {
+    if (e instanceof AlreadyRunning) throw new Error(`Another decision on ${target.project} is in progress. Try again in a moment.`);
+    throw e;
+  });
   try {
     return await body(await loadJob(target.project, opts));
   } finally {

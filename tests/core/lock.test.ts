@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mkdtemp, writeFile, mkdir, access, readFile } from 'node:fs/promises';
+import { chmod, mkdtemp, writeFile, mkdir, access, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { acquireLock, isRunning, AlreadyRunning } from '../../src/core/lock.js';
@@ -108,6 +108,35 @@ describe('lock ownership and takeover', () => {
       await release();
       expect(await exists(p)).toBe(false);
     }
+  });
+
+  it('never takes over a lock file it cannot read (a transient or permission error)', async () => {
+    const { acquireLockFile } = await import('../../src/core/lock.js');
+    const dir = await tmp();
+    const p = join(dir, 'x.lock');
+    await writeFile(p, JSON.stringify({ pid: 999999, nonce: 'held', startedAt: 'x' }));
+    await chmod(p, 0o000);
+    try {
+      const err = await acquireLockFile(p).catch((e) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(AlreadyRunning);
+      expect(String(err.message)).toMatch(/could not read/i);
+      expect(await exists(p)).toBe(true);
+    } finally {
+      await chmod(p, 0o600);
+    }
+    expect(JSON.parse(await readFile(p, 'utf8')).nonce).toBe('held');
+  });
+
+  it('a release retries a read that fails once, then removes its own lock', async () => {
+    const { acquireLockFile } = await import('../../src/core/lock.js');
+    const dir = await tmp();
+    const p = join(dir, 'x.lock');
+    const release = await acquireLockFile(p);
+    await chmod(p, 0o000);
+    setTimeout(() => { void chmod(p, 0o600); }, 15);
+    await release();
+    expect(await exists(p)).toBe(false);
   });
 
   it('a live lock from an older version (pid, no nonce) is respected and survives our release', async () => {

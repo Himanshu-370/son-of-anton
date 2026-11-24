@@ -32,15 +32,26 @@ type LockRead =
   | { kind: 'absent' }
   | { kind: 'live'; pid: number; nonce?: string }
   | { kind: 'dead'; pid: number; nonce?: string }
-  | { kind: 'corrupt' };
+  | { kind: 'corrupt' }
+  /** A read error other than ENOENT (EACCES, EIO, EMFILE, ...): the holder is unknown, so it is never taken over. */
+  | { kind: 'unreadable'; code: string };
+
+/** A lock file that stayed unreadable through the retries. Nothing was removed or taken over. */
+export class LockUnreadable extends Error {
+  constructor(path: string, code: string) {
+    super(`Could not read the lock file ${path} (${code}). Nothing was changed; check its permissions and try again.`);
+    this.name = 'LockUnreadable';
+  }
+}
 
 async function readLock(path: string): Promise<LockRead> {
   let text: string;
   try {
     text = await readFile(path, 'utf8');
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' };
-    return { kind: 'corrupt' };
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT') return { kind: 'absent' };
+    return { kind: 'unreadable', code: code ?? 'unknown error' };
   }
   let body: { pid?: unknown; nonce?: unknown };
   try {
@@ -77,6 +88,9 @@ export async function isRunning(repo: string): Promise<{ running: boolean; pid?:
 const MUTEX_MAX_AGE_MS = 10_000;
 /** Attempts while the lock is changing hands (released, or another waiter is taking over a dead lock). */
 const HANDOFF_ATTEMPTS = 50;
+/** Reads that may fail transiently before a lock counts as unreadable. */
+const READ_ATTEMPTS = 5;
+const readBackoff = (attempt: number) => new Promise((r) => setTimeout(r, 10 * 2 ** attempt));
 
 /** Take the takeover mutex (exclusive link). Returns false if someone else holds it. */
 async function takeMutex(mutex: string, src: string): Promise<boolean> {
@@ -121,6 +135,7 @@ export async function acquireLockFile(path: string): Promise<() => Promise<void>
   const body = JSON.stringify({ pid: process.pid, nonce: uniq, startedAt: new Date().toISOString() });
   try {
     await writeFile(tmp, body);
+    let unreadable = 0;
     for (let attempt = 0; attempt < HANDOFF_ATTEMPTS; attempt++) {
       try {
         // link() fails with EEXIST if the lock exists, and the lock appears with full content.
@@ -132,6 +147,11 @@ export async function acquireLockFile(path: string): Promise<() => Promise<void>
       const seen = await readLock(path);
       if (seen.kind === 'live') throw new AlreadyRunning(seen.pid);
       if (seen.kind === 'absent') continue; // released in between: link again
+      if (seen.kind === 'unreadable') {
+        if (++unreadable >= READ_ATTEMPTS) throw new LockUnreadable(path, seen.code);
+        await readBackoff(unreadable - 1);
+        continue;
+      }
       // Dead or corrupt: take over under the mutex, so a live lock is never moved or removed.
       await writeFile(mtmp, body);
       if (!(await takeMutex(mutex, mtmp))) {
@@ -144,7 +164,7 @@ export async function acquireLockFile(path: string): Promise<() => Promise<void>
         // link fails while it exists, and every other takeover needs the mutex we hold.
         const now = await readLock(path);
         if (now.kind === 'live') throw new AlreadyRunning(now.pid);
-        if (now.kind !== 'absent') await rm(path, { force: true });
+        if (now.kind === 'dead' || now.kind === 'corrupt') await rm(path, { force: true });
       } finally {
         await rm(mutex, { force: true });
         await rm(mtmp, { force: true });
@@ -160,7 +180,12 @@ export async function acquireLockFile(path: string): Promise<() => Promise<void>
 function release(path: string, nonce: string): () => Promise<void> {
   return async () => {
     // Only our own acquisition: nobody else can replace it while we hold it (our pid is alive).
-    const r = await readLock(path);
+    // A transient read error is retried; giving up leaves the file, which is never wrong for someone else's lock.
+    let r = await readLock(path);
+    for (let attempt = 0; r.kind === 'unreadable' && attempt < READ_ATTEMPTS; attempt++) {
+      await readBackoff(attempt);
+      r = await readLock(path);
+    }
     if (r.kind === 'live' && r.nonce === nonce) await rm(path, { force: true });
   };
 }
