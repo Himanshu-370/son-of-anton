@@ -1,16 +1,20 @@
 import { constants } from 'node:fs';
-import { access, mkdir, rm, stat } from 'node:fs/promises';
+import { access, lstat, mkdir, realpath, rm, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { cliPath } from '../cli/deps.js';
 import { readRegularFile, writeFileAtomic } from '../core/atomic.js';
+import { keychainHasAnthropicKey, KEYCHAIN_SERVICE } from '../core/api-key.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
 import { antonHome } from '../core/paths.js';
 import { SLACK_ROLES, slackDirectory } from './config.js';
 
 const LABEL = 'com.son-of-anton.slack';
 
-const fileSystem = { access, mkdir, rm, stat, readRegularFile, writeFileAtomic };
+const fileSystem = { access, lstat, mkdir, realpath, rm, stat, readRegularFile, writeFileAtomic };
+/** Where Docker Desktop and Homebrew put their commands when the shell PATH does not have them. */
+const COMMON_BIN = ['/usr/local/bin', '/opt/homebrew/bin', '/Applications/Docker.app/Contents/Resources/bin'];
+const SYSTEM_PATH = ['/usr/bin', '/bin', '/usr/sbin', '/sbin'];
 
 export type SlackServiceCommandDeps = {
   platform?: NodeJS.Platform;
@@ -19,6 +23,10 @@ export type SlackServiceCommandDeps = {
   nodePath?: string;
   antonPath?: string;
   exec?: ExecFn;
+  /** Directories searched for `docker` at install (default: the shell PATH, then common install dirs). */
+  searchPath?: string;
+  /** macOS account for the Keychain check (default: the current user). */
+  user?: string;
   fs?: typeof fileSystem;
   out?: (line: string) => void;
   err?: (line: string) => void;
@@ -32,7 +40,36 @@ function escapeXml(value: string): string {
     .replaceAll('"', '&quot;').replaceAll("'", '&apos;').replaceAll('\r', '&#13;');
 }
 
-function agentPlist(node: string, anton: string, home: string, logs: string): string {
+async function isExecutable(fs: typeof fileSystem, path: string): Promise<boolean> {
+  try {
+    return (await fs.stat(path)).isFile() && (await fs.access(path, constants.X_OK), true);
+  } catch {
+    return false;
+  }
+}
+
+/** First executable `name` in the absolute directories of `searchPath`. */
+async function findCommand(fs: typeof fileSystem, name: string, searchPath: string): Promise<string | undefined> {
+  for (const dir of searchPath.split(':')) {
+    if (isAbsolute(dir) && await isExecutable(fs, join(dir, name))) return join(dir, name);
+  }
+  return undefined;
+}
+
+/**
+ * The service PATH: docker's directory (and, for a link such as Docker Desktop's, the real one, which holds
+ * its credential helpers), node's, then the system directories. launchd gives an agent almost no PATH.
+ */
+async function servicePath(fs: typeof fileSystem, docker: string, node: string): Promise<string> {
+  const dirs = [dirname(docker)];
+  if ((await fs.lstat(docker)).isSymbolicLink()) dirs.push(dirname(await fs.realpath(docker)));
+  dirs.push(dirname(node), ...SYSTEM_PATH);
+  const unique = [...new Set(dirs)];
+  if (unique.some((dir) => dir.includes(':'))) throw new Error('The docker or node directory contains ":", which PATH cannot hold.');
+  return unique.join(':');
+}
+
+function agentPlist(node: string, anton: string, home: string, logs: string, path: string): string {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -49,10 +86,14 @@ function agentPlist(node: string, anton: string, home: string, logs: string): st
   <dict>
     <key>ANTON_HOME</key>
     <string>${escapeXml(home)}</string>
+    <key>PATH</key>
+    <string>${escapeXml(path)}</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
+  <true/>
+  <key>AbandonProcessGroup</key>
   <true/>
   <key>StandardOutPath</key>
   <string>${escapeXml(join(logs, 'stdout.log'))}</string>
@@ -137,6 +178,19 @@ export async function slackServiceCommand(
       } else {
         out(current === undefined ? 'Slack LaunchAgent is not installed.' : 'Slack LaunchAgent is installed but not loaded.');
       }
+      // What the service itself will see: the installed PATH, and the Keychain (its shell environment is empty).
+      let path = '';
+      if (current !== undefined) {
+        const property = await exec('/usr/bin/plutil', ['-extract', 'EnvironmentVariables.PATH', 'raw', '-o', '-', plist]).catch(() => undefined);
+        path = property?.exitCode === 0 ? property.stdout.replace(/\r?\n$/, '') : '';
+      }
+      const docker = path ? await findCommand(fs, 'docker', path) : undefined;
+      out(docker ? `Docker: found at ${docker}.`
+        : current === undefined ? 'Docker: not checked (the service is not installed).'
+          : 'Docker: not found on the service PATH. Reinstall with docker on your PATH.');
+      out(await keychainHasAnthropicKey({ exec, platform: 'darwin', user: deps.user })
+        ? 'Anthropic API key: found in the macOS Keychain.'
+        : `Anthropic API key: not found in the macOS Keychain (service ${KEYCHAIN_SERVICE}). Slack job controls and paid answers need it.`);
       return 0;
     }
 
@@ -158,7 +212,11 @@ export async function slackServiceCommand(
     const home = resolve(antonHome());
     const slack = await slackDirectory(home, true);
     const logs = join(slack!, 'logs');
-    const config = agentPlist(node, anton, home, logs);
+    const docker = await findCommand(fs, 'docker', deps.searchPath ?? [process.env.PATH ?? '', ...COMMON_BIN].join(':'));
+    if (!docker) {
+      throw new Error('Could not find docker on your PATH. Install Docker Desktop (or put docker on PATH), then re-run install.');
+    }
+    const config = agentPlist(node, anton, home, logs, await servicePath(fs, docker, node));
     if (loaded && current === config) {
       await fs.mkdir(logs, { recursive: true, mode: 0o700 });
       out('Slack LaunchAgent is already installed and loaded.');
