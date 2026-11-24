@@ -137,7 +137,8 @@ export async function withDecisionLock<T>(project: string, body: (fresh: LoadedJ
 export async function reopenSpec<T>(
   target: ActionTarget,
   d: Pick<JobActionDeps, 'err' | 'listTags' | 'lockWaitMs'>,
-  claim: (job: LoadedJob) => Promise<T>,
+  /** Returns undefined to refuse (it reports why itself); the job then stays at checkpoint 1. */
+  claim: (job: LoadedJob) => Promise<T | undefined>,
 ): Promise<{ outcome: ActionOutcome; claimed?: T; job?: LoadedJob }> {
   const nothing = 'Nothing to revise';
   const deps = d as JobActionDeps;
@@ -155,6 +156,7 @@ export async function reopenSpec<T>(
     }
     await assertOnJobBranch(job.repo, job.state);
     const claimed = await claim(job);
+    if (claimed === undefined) return { outcome: refused() };
     await saveState(job.jobDir, transition(job.state, 'spec'));
     return { outcome: done, claimed, job };
   });

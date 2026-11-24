@@ -14,6 +14,8 @@ import {
 } from './config.js';
 import { jobId as jobIdSchema, projectId as projectIdSchema } from './events.js';
 import { sanitizeSlackText } from './inbound.js';
+import type { SpecRoundDeps } from '../core/spec-continuation.js';
+import { cardModal, type ModalKind, type ModalView } from './views.js';
 
 /*
  * The Slack side of the shared job actions. Every input is a typed, allowlisted operation. Mutations need
@@ -25,19 +27,26 @@ import { sanitizeSlackText } from './inbound.js';
 export type SlackActor = { teamId: string; userId: string; isBot: boolean };
 export type SlackSource = { appId: string; role: SlackRole; channelId: string; messageTs?: string; threadTs?: string };
 /** Values a card's form (Task 5 modals) may carry. All text is cleaned here before use. */
-export type CardInput = { notes?: string; reason?: string; budgetUsd?: number };
+export type CardInput = { notes?: string; reason?: string; text?: string; budgetUsd?: number };
 
 export type SlackAction =
   | { via: 'command'; key: string; actor: SlackActor; source: SlackSource; text: string }
-  | { via: 'card'; key: string; actor: SlackActor; source: SlackSource; token: string; input?: CardInput }
-  /** Plain messages are never orders. Spec conversation and role Q&A (Tasks 5 and 6) plug in here. */
-  | { via: 'message'; key: string; actor: SlackActor; source: SlackSource; text: string };
+  | { via: 'card'; key: string; actor: SlackActor; source: SlackSource; token: string; input?: CardInput; triggerId?: string }
+  /**
+   * Plain messages are never orders, with two explicit exceptions for the owner: answers to waiting spec
+   * questions in the job thread, and `new …` / `change <project> …` in a DM to the PM. Role Q&A is Task 6.
+   */
+  | { via: 'message'; key: string; actor: SlackActor; source: SlackSource; text: string; eventType?: 'message' | 'app_mention' };
 
 export type ActionResultStatus =
   | 'done' | 'duplicate' | 'in-progress' | 'denied' | 'ignored' | 'stale' | 'refused' | 'unsupported' | 'failed';
 export type ActionResult = { status: ActionResultStatus; lines: string[] };
 
-export const CARD_KINDS = ['approve', 'reject', 'resume', 'abandon', 'accept-risk', 'lesson-accept', 'lesson-reject'] as const;
+export const CARD_KINDS = [
+  'approve', 'reject', 'resume', 'abandon', 'accept-risk', 'spec-revise', 'lesson-accept', 'lesson-edit', 'lesson-reject',
+] as const;
+/** Cards whose click opens a form; the submission carries the input. */
+const MODAL_KINDS: readonly CardKind[] = ['reject', 'spec-revise', 'accept-risk', 'lesson-edit', 'resume'];
 export type CardKind = (typeof CARD_KINDS)[number];
 /** Roles whose apps have interactivity enabled in the manifest. */
 const INTERACTIVE_ROLES: readonly SlackRole[] = ['pm', 'qa', 'coach'];
@@ -50,10 +59,17 @@ export type Operation =
   | { kind: 'resume'; target: ActionTarget; budget?: number; acceptAsIs?: boolean }
   | { kind: 'abandon'; target: ActionTarget }
   | { kind: 'accept-risk'; target: ActionTarget; findingId: string; reason: string }
-  | { kind: 'lesson'; decision: 'accept' | 'reject'; proposal: { id: string; revision: string } };
+  | { kind: 'lesson'; decision: 'accept' | 'reject'; proposal: { id: string; revision: string }; text?: string }
+  | { kind: 'start'; mode: 'new' | 'change'; project?: string; description: string }
+  | { kind: 'spec-answer'; target: ActionTarget; round: number; answers: string[] }
+  | { kind: 'spec-revise'; target: ActionTarget; notes: string }
+  | { kind: 'spec-retry'; target: ActionTarget };
 
 export const NOTES_LIMIT = 4000;
 export const REASON_LIMIT = 500;
+export const DESCRIPTION_LIMIT = 2000;
+export const ANSWER_LIMIT = 4000;
+const LESSON_LIMIT = 300;
 const COMMAND_LIMIT = 200;
 const RECORD_TTL_MS = 30 * 24 * 3600_000;
 const CARD_TTL_MS = 90 * 24 * 3600_000;
@@ -168,7 +184,18 @@ export interface DispatchDeps {
   jobs: Omit<JobActionDeps, 'out' | 'err'>;
   /** The project whose recorded channel ID this is. Defaults to the outbox's channel map. */
   projectForChannel?: (channelId: string) => Promise<string | undefined>;
+  /** The job whose thread this is. Defaults to the outbox's thread map. */
+  jobForThread?: (channelId: string, threadTs: string) => Promise<{ project: string; jobId: string } | undefined>;
+  /** Spec session effects (Docker, the PM agent). Without them, starting work and spec answers are unsupported. */
+  spec?: SlackSpecDeps;
 }
+
+export type SlackSpecDeps = Omit<SpecRoundDeps, 'surface'> & { preflight: () => Promise<void> };
+
+export type ModalDecision =
+  | { kind: 'modal'; view: ModalView }
+  | { kind: 'direct' }
+  | { kind: 'denied' | 'refused'; result: ActionResult };
 
 const result = (status: ActionResultStatus, ...lines: string[]): ActionResult => ({ status, lines });
 const DENIED = result('denied', 'Only the Anton owner can do that here.');
@@ -186,9 +213,16 @@ function authorized(a: SlackAction, config: SlackConfig): boolean {
 /** Route one normalized Slack input. Never throws; denied or forged input never reaches a job action. */
 export async function dispatchSlackAction(input: SlackAction, deps: DispatchDeps): Promise<ActionResult> {
   try {
-    if (input.via === 'message') return result('ignored');
-    if (!authorized(input, deps.config)) return DENIED;
     const home = deps.home ?? antonHome();
+    if (input.via === 'message') {
+      // Anyone else's message is discussion, never an answer or an order.
+      if (!authorized(input, deps.config)) return result('ignored');
+      const resolved = await messageOperation(input, deps, home);
+      if ('status' in resolved) return resolved;
+      if (resolved.op.kind === 'status') return result('ignored');
+      return await claimAndRun(input, resolved.op, deps, home);
+    }
+    if (!authorized(input, deps.config)) return DENIED;
     const resolved = input.via === 'card' ? await cardOperation(input, home) : await commandOperation(input, deps);
     if ('status' in resolved) return resolved;
     const { op } = resolved;
@@ -199,15 +233,44 @@ export async function dispatchSlackAction(input: SlackAction, deps: DispatchDeps
   }
 }
 
-async function cardOperation(a: Extract<SlackAction, { via: 'card' }>, home: string): Promise<{ op: Operation } | ActionResult> {
-  if (!/^[a-f0-9]{32}$/.test(a.token)) return DENIED;
+async function boundCard(a: Extract<SlackAction, { via: 'card' }>, home: string): Promise<CardBinding | undefined> {
+  if (!/^[a-f0-9]{32}$/.test(a.token)) return undefined;
   const card = (await readSlackFile(home, 'actions.json', storeSchema))?.cards[a.token];
   // Bound to the app, channel and message the card was posted as.
   if (!card || card.appId !== a.source.appId || card.role !== a.source.role || card.channelId !== a.source.channelId
-    || card.messageTs === undefined || card.messageTs !== a.source.messageTs) return DENIED;
+    || card.messageTs === undefined || card.messageTs !== a.source.messageTs) return undefined;
+  return card;
+}
+
+/**
+ * For a click: whether to open the card's form first. Local reads only, so the modal opens before the trigger
+ * expires. A click that is not the owner's, or not on the card as posted, opens nothing.
+ */
+export async function prepareCardModal(a: Extract<SlackAction, { via: 'card' }>, deps: DispatchDeps): Promise<ModalDecision> {
+  if (!authorized(a, deps.config)) return { kind: 'denied', result: DENIED };
+  const home = deps.home ?? antonHome();
+  const card = await boundCard(a, home);
+  if (!card || !a.source.messageTs) return { kind: 'denied', result: DENIED };
+  if (!MODAL_KINDS.includes(card.kind) || a.input) return { kind: 'direct' };
+  let initial: string | undefined;
+  if (card.kind === 'lesson-edit') {
+    const p = (await readProposals(home)).find((x) => x.id === card.proposal?.id);
+    if (!p || proposalRevision(p) !== card.proposal?.revision) return { kind: 'refused', result: result('stale', 'That proposal changed or was already decided.') };
+    initial = p.text;
+  }
+  return { kind: 'modal', view: cardModal(card.kind as ModalKind, { token: a.token, channelId: card.channelId, messageTs: a.source.messageTs }, initial) };
+}
+
+async function cardOperation(a: Extract<SlackAction, { via: 'card' }>, home: string): Promise<{ op: Operation } | ActionResult> {
+  const card = await boundCard(a, home);
+  if (!card) return DENIED;
   const input = a.input ?? {};
   if (card.kind === 'lesson-accept' || card.kind === 'lesson-reject') {
     return { op: { kind: 'lesson', decision: card.kind === 'lesson-accept' ? 'accept' : 'reject', proposal: card.proposal! } };
+  }
+  if (card.kind === 'lesson-edit') {
+    const text = sanitizeSlackText(input.text, LESSON_LIMIT);
+    return text ? { op: { kind: 'lesson', decision: 'accept', proposal: card.proposal!, text } } : result('refused', 'Write the lesson text to save.');
   }
   const target = card.target!;
   switch (card.kind) {
@@ -216,6 +279,10 @@ async function cardOperation(a: Extract<SlackAction, { via: 'card' }>, home: str
     case 'reject': {
       const notes = sanitizeSlackText(input.notes, NOTES_LIMIT);
       return notes ? { op: { kind: 'reject', target, notes } } : result('refused', 'Add notes that say what to change.');
+    }
+    case 'spec-revise': {
+      const notes = sanitizeSlackText(input.notes, NOTES_LIMIT);
+      return notes ? { op: { kind: 'spec-revise', target, notes } } : result('refused', 'Add notes that say what to change in the spec.');
     }
     case 'resume': {
       const budget = input.budgetUsd;
@@ -229,10 +296,13 @@ async function cardOperation(a: Extract<SlackAction, { via: 'card' }>, home: str
   }
 }
 
-const USAGE = 'Try: /anton status, /anton resume [budget <usd>] [accept-as-is], /anton abandon <job id>';
+const USAGE = 'Try: /anton status, /anton new <description> (in #anton), /anton change <description>, /anton spec retry, '
+  + '/anton resume [budget <usd>] [accept-as-is], /anton abandon <job id>';
 
 async function commandOperation(a: Extract<SlackAction, { via: 'command' }>, deps: DispatchDeps): Promise<{ op: Operation } | ActionResult> {
-  const words = sanitizeSlackText(a.text, COMMAND_LIMIT).split(/\s+/).filter(Boolean);
+  const text = sanitizeSlackText(a.text, DESCRIPTION_LIMIT + 50);
+  const first = (text.split(/\s+/)[0] ?? '').toLowerCase();
+  const words = (first === 'new' || first === 'change' ? text : text.slice(0, COMMAND_LIMIT)).split(/\s+/).filter(Boolean);
   const verb = (words.shift() ?? 'status').toLowerCase();
   const inAnton = a.source.channelId === deps.config.channelId;
   const lookup = deps.projectForChannel ?? (async (channel: string) => {
@@ -241,6 +311,20 @@ async function commandOperation(a: Extract<SlackAction, { via: 'command' }>, dep
   });
   const project = inAnton ? undefined : await lookup(a.source.channelId);
   if (verb === 'help') return result('done', USAGE);
+  if (verb === 'new' || verb === 'change') {
+    const description = sanitizeSlackText(words.join(' '), DESCRIPTION_LIMIT);
+    if (!description) return result('refused', `Describe the work: /anton ${verb} <description>`);
+    if (verb === 'new') {
+      return inAnton ? { op: { kind: 'start', mode: 'new', description } } : result('refused', 'Start new projects in #anton.');
+    }
+    return project ? { op: { kind: 'start', mode: 'change', project, description } } : result('refused', 'Run /anton change in the project channel.');
+  }
+  if (verb === 'spec') {
+    if (words.join(' ').toLowerCase() !== 'retry') return result('refused', 'Answer spec questions in the job thread. To rerun an interrupted PM turn: /anton spec retry');
+    if (!project) return result('refused', 'Run this in the project channel.');
+    const job = await loadJob(project);
+    return { op: { kind: 'spec-retry', target: targetOf(job) } };
+  }
   if (verb === 'status') {
     if (words.length) return result('refused', USAGE);
     if (inAnton) return { op: { kind: 'status' } };
@@ -274,6 +358,47 @@ async function commandOperation(a: Extract<SlackAction, { via: 'command' }>, dep
   return { op: { kind: 'resume', target: targetOf(job), ...(budget === undefined ? {} : { budget }), ...(acceptAsIs ? { acceptAsIs } : {}) } };
 }
 
+/** The owner's thread replies and DM instructions. Everything else is discussion (`ignored`). */
+async function messageOperation(
+  a: Extract<SlackAction, { via: 'message' }>, deps: DispatchDeps, home: string,
+): Promise<{ op: Operation } | ActionResult> {
+  // A mention also arrives as a message event; only the message event can act, so one reply acts once.
+  if (a.eventType === 'app_mention' || a.source.role !== 'pm') return result('ignored');
+  const text = sanitizeSlackText(a.text, ANSWER_LIMIT);
+  if (/^D[A-Z0-9]+$/.test(a.source.channelId)) {
+    if (a.source.threadTs) return result('ignored');
+    const m = /^(new|change)\s+([\s\S]+)$/i.exec(text);
+    if (!m) return result('ignored');
+    if (m[1]!.toLowerCase() === 'new') {
+      const description = sanitizeSlackText(m[2], DESCRIPTION_LIMIT);
+      return description ? { op: { kind: 'start', mode: 'new', description } } : result('ignored');
+    }
+    const c = /^([a-z0-9]+(?:-[a-z0-9]+)*)\s+([\s\S]+)$/.exec(m[2]!);
+    if (!c) return result('refused', 'Name the project: change <project> <description>');
+    return { op: { kind: 'start', mode: 'change', project: c[1]!, description: sanitizeSlackText(c[2], DESCRIPTION_LIMIT) } };
+  }
+  if (!a.source.threadTs) return result('ignored');
+  const lookup = deps.jobForThread ?? (async (channel: string, thread: string) => {
+    const { jobForThread } = await import('./outbox.js');
+    return jobForThread({ config: deps.config, home: deps.home }, channel, thread);
+  });
+  const job = await lookup(a.source.channelId, a.source.threadTs);
+  if (!job) return result('ignored');
+  const { readSpecContinuation, specStatus } = await import('../core/spec-continuation.js');
+  const c = await readSpecContinuation(job.project, job.jobId, home).catch(() => undefined);
+  if (!c) return result('ignored');
+  const status = specStatus(c);
+  if (status === 'stopped') {
+    return result('refused', `${job.project}: the last PM turn was interrupted and its result is unknown (it may have been charged).`,
+      'Nothing was repeated. To run it again: /anton spec retry');
+  }
+  if (status !== 'awaiting' || !c.questions?.length) return result('ignored');
+  const { parseThreadAnswers } = await import('./spec-session.js');
+  const answers = parseThreadAnswers(text, c.questions.length);
+  if (!answers) return result('refused', `Number your answers 1. to ${c.questions.length}. so each reaches its question.`);
+  return { op: { kind: 'spec-answer', target: { project: job.project, jobId: job.jobId, stage: 'spec' }, round: c.round, answers } };
+}
+
 async function status(project?: string): Promise<ActionResult> {
   const rows = await jobStatusRows(project);
   if (!rows.length) return result('done', 'No projects yet.');
@@ -290,16 +415,23 @@ async function stillPending(op: Exclude<Operation, { kind: 'status' }>, deps: Di
       return p !== undefined && proposalRevision(p) === op.proposal.revision;
     }
     if (op.kind === 'accept-risk') return true; // recording a risk is idempotent
+    // A paid PM turn whose outcome is unknown is never repeated automatically.
+    if (op.kind === 'start' || op.kind === 'spec-retry') return false;
+    if (op.kind === 'spec-answer') {
+      const { readSpecContinuation, specStatus } = await import('../core/spec-continuation.js');
+      const c = await readSpecContinuation(op.target.project, op.target.jobId, home);
+      return c !== undefined && specStatus(c) === 'awaiting' && c.round === op.round;
+    }
     const job = await loadJob(op.target.project);
     if (job.jobId !== op.target.jobId || job.state.stage !== op.target.stage) return false;
     return op.target.revision === undefined || (await checkpointRevision(job, deps.jobs.listTags)) === op.target.revision;
   } catch {
-    return true;
+    return op.kind !== 'start' && op.kind !== 'spec-retry' && op.kind !== 'spec-answer' && op.kind !== 'spec-revise';
   }
 }
 
 async function claimAndRun(
-  input: Exclude<SlackAction, { via: 'message' }>, op: Exclude<Operation, { kind: 'status' }>, deps: DispatchDeps, home: string,
+  input: SlackAction, op: Exclude<Operation, { kind: 'status' }>, deps: DispatchDeps, home: string,
 ): Promise<ActionResult> {
   // Only targets the store can hold are claimable, so a record never makes the store unreadable.
   if ('target' in op && !targetSchema.safeParse(op.target).success) return result('refused', 'That project or job name cannot be used from Slack.');
@@ -355,9 +487,22 @@ async function claimAndRun(
 
 const clean = (line: string) => sanitizeSlackText(line, 1000);
 
+
 async function run(op: Exclude<Operation, { kind: 'status' }>, deps: DispatchDeps, home: string): Promise<ActionResult> {
+  if (op.kind === 'start' || op.kind === 'spec-answer' || op.kind === 'spec-revise' || op.kind === 'spec-retry') {
+    if (!deps.spec) return result('unsupported', 'Spec sessions run in anton serve.');
+    const session = await import('./spec-session.js');
+    switch (op.kind) {
+      case 'start': return session.startSlackJob(op, deps.spec);
+      case 'spec-answer': return session.submitSpecAnswers({ ...op.target, round: op.round }, op.answers, deps.spec);
+      case 'spec-revise': return session.reviseSlackSpec(op.target, op.notes, deps.spec, deps.jobs.listTags);
+      case 'spec-retry': return session.retrySlackSpec(op.target, deps.spec);
+    }
+  }
   if (op.kind === 'lesson') {
-    const r = await decideProposal({ proposalId: op.proposal.id, decision: op.decision, revision: op.proposal.revision }, home);
+    const r = await decideProposal({
+      proposalId: op.proposal.id, decision: op.decision, revision: op.proposal.revision, ...(op.text ? { text: op.text } : {}),
+    }, home);
     switch (r.status) {
       case 'accepted': return result('done', `Added ${r.id} to ${r.file}.md`);
       case 'duplicate': return result('done', `Already saved: ${r.id}`);

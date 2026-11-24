@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { SlackRole } from './config.js';
-import type { ActionResult, SlackAction } from './actions.js';
+import type { ActionResult, ModalDecision, SlackAction } from './actions.js';
+import { MODAL_CALLBACK, readModalInput, type ModalView } from './views.js';
 
 /*
  * Socket Mode input, normalized from the fields Slack supplies. Identity comes only from Slack IDs.
@@ -55,7 +56,8 @@ export function normalizeCommand(body: unknown, role: SlackRole): Normalized {
       via: 'command', key: `cmd:${d.team_id}:${d.trigger_id}`,
       actor: { teamId: d.team_id, userId: d.user_id, isBot: false },
       source: { appId: d.api_app_id, role, channelId: d.channel_id },
-      text: sanitizeSlackText(d.text, 200),
+      // Room for a job description; the router limits each use further.
+      text: sanitizeSlackText(d.text, 3000),
     },
   };
 }
@@ -68,6 +70,7 @@ const blockActionBody = z.object({
   channel: z.object({ id: channel }),
   container: z.object({ message_ts: ts }),
   actions: z.array(z.object({ action_id: z.string().max(255), value: z.string().regex(/^[a-f0-9]{32}$/), action_ts: ts })).length(1),
+  trigger_id: z.string().regex(/^[A-Za-z0-9.]{1,100}$/).optional(),
   enterprise: z.null().optional(),
 });
 
@@ -85,6 +88,51 @@ export function normalizeBlockAction(body: unknown, role: SlackRole): Normalized
       actor: { teamId: d.team.id, userId: d.user.id, isBot: false },
       source: { appId: d.api_app_id, role, channelId: d.channel.id, messageTs: d.container.message_ts },
       token: act.value,
+      ...(d.trigger_id ? { triggerId: d.trigger_id } : {}),
+    },
+  };
+}
+
+const viewBody = z.object({
+  type: z.literal('view_submission'),
+  team: z.object({ id: team }),
+  user: z.object({ id: user, team_id: team.optional() }),
+  api_app_id: app,
+  view: z.object({
+    id: z.string().regex(/^V[A-Z0-9]{1,31}$/),
+    callback_id: z.literal(MODAL_CALLBACK),
+    private_metadata: z.string().max(3000),
+    state: z.object({ values: z.record(z.string(), z.unknown()) }),
+  }),
+  enterprise: z.null().optional(),
+});
+const modalMeta = z.strictObject({ token: z.string().regex(/^[a-f0-9]{32}$/), channelId: channel, messageTs: ts });
+
+/**
+ * A submitted card modal. The channel and message come from the private metadata Anton set when it opened the
+ * view; the router still checks them against the stored card. Keyed by the view ID, which one submission keeps.
+ */
+export function normalizeViewSubmission(body: unknown, role: SlackRole): Normalized {
+  const b = viewBody.safeParse(body);
+  if (!b.success) return ignored('unreadable view');
+  const d = b.data;
+  if (d.user.team_id !== undefined && d.user.team_id !== d.team.id) return ignored('foreign user');
+  let meta: z.infer<typeof modalMeta>;
+  try {
+    const parsed = modalMeta.safeParse(JSON.parse(d.view.private_metadata));
+    if (!parsed.success) return ignored('unreadable view');
+    meta = parsed.data;
+  } catch {
+    return ignored('unreadable view');
+  }
+  return {
+    kind: 'action',
+    action: {
+      via: 'card', key: `card:${d.team.id}:view:${d.view.id}`,
+      actor: { teamId: d.team.id, userId: d.user.id, isBot: false },
+      source: { appId: d.api_app_id, role, channelId: meta.channelId, messageTs: meta.messageTs },
+      token: meta.token,
+      input: readModalInput(undefined, d.view.state.values),
     },
   };
 }
@@ -114,7 +162,7 @@ export function normalizeEvent(body: unknown, role: SlackRole): Normalized {
   return {
     kind: 'action',
     action: {
-      via: 'message', key: `event:${d.team_id}:${d.event_id}`,
+      via: 'message', key: `event:${d.team_id}:${d.event_id}`, eventType: e.type,
       actor: { teamId: d.team_id, userId: e.user, isBot: false },
       source: { appId: d.api_app_id, role, channelId: e.channel, messageTs: e.ts, ...(e.thread_ts ? { threadTs: e.thread_ts } : {}) },
       text: sanitizeSlackText(e.text, 4000),
@@ -126,10 +174,15 @@ export type Reply = { response_type: 'ephemeral'; text: string; replace_original
 type Ack = (reply?: Reply) => Promise<void>;
 type Respond = (reply: Reply) => Promise<unknown>;
 
+/** Post a private reply to the acting user (an ephemeral message), for inputs without a response URL. */
+type Notify = (text: string) => Promise<unknown>;
+type OpenView = (triggerId: string, view: ModalView) => Promise<unknown>;
+
 export interface InboundHandler {
   command(body: unknown, role: SlackRole, ack: Ack, respond: Respond): Promise<void>;
-  action(body: unknown, role: SlackRole, ack: Ack, respond: Respond): Promise<void>;
-  event(body: unknown, role: SlackRole): Promise<void>;
+  action(body: unknown, role: SlackRole, ack: Ack, respond: Respond, openView?: OpenView): Promise<void>;
+  view(body: unknown, role: SlackRole, ack: () => Promise<void>, notify: (action: SlackAction) => Notify): Promise<void>;
+  event(body: unknown, role: SlackRole, notify?: (action: SlackAction) => Notify): Promise<void>;
   /** Resolves when all accepted work has finished (service stop and tests). */
   idle(): Promise<void>;
 }
@@ -152,6 +205,8 @@ export function renderResult(r: ActionResult): string {
  */
 export function createInboundHandler(deps: {
   dispatch(action: SlackAction): Promise<ActionResult>;
+  /** Whether a card click opens a modal first. Fast and local: it runs before the trigger expires. */
+  prepareModal?(action: Extract<SlackAction, { via: 'card' }>): Promise<ModalDecision>;
   log?: (message: string) => void;
   maxPending?: number;
 }): InboundHandler {
@@ -172,7 +227,7 @@ export function createInboundHandler(deps: {
     await respond({ response_type: 'ephemeral', text: renderResult(r), replace_original: false }).catch(() => log('Slack reply failed.'));
   }
 
-  async function interactive(n: Normalized, ack: Ack, respond: Respond, ackText: boolean): Promise<void> {
+  async function interactive(n: Normalized, ack: Ack, respond: Respond, ackText: boolean, openView?: OpenView): Promise<void> {
     if (n.kind === 'ignored') {
       await ack(ackText ? { response_type: 'ephemeral', text: 'Anton could not read that.' } : undefined);
       return;
@@ -185,17 +240,46 @@ export function createInboundHandler(deps: {
       return;
     }
     const action = n.action;
+    if (action.via === 'card' && deps.prepareModal) {
+      // Open the modal at once (the trigger lasts three seconds); the submission does the work.
+      const decision = await deps.prepareModal(action).catch((): ModalDecision => ({ kind: 'refused', result: { status: 'failed', lines: [] } }));
+      if (decision.kind === 'modal') {
+        if (!action.triggerId || !openView) return reply(respond, { status: 'refused', lines: ['Anton could not open the form. Try again.'] });
+        await openView(action.triggerId, decision.view).catch(() => reply(respond, { status: 'refused', lines: ['Anton could not open the form. Try again.'] }));
+        return;
+      }
+      if (decision.kind !== 'direct') return reply(respond, decision.result);
+    }
     start(async () => reply(respond, await deps.dispatch(action)));
   }
 
   return {
     command: (body, role, ack, respond) => interactive(normalizeCommand(body, role), ack, respond, true),
-    action: (body, role, ack, respond) => interactive(normalizeBlockAction(body, role), ack, respond, false),
-    async event(body, role) {
+    action: (body, role, ack, respond, openView) => interactive(normalizeBlockAction(body, role), ack, respond, false, openView),
+    async view(body, role, ack, notify) {
+      // Closing the modal is the acknowledgement; the result arrives as a private message.
+      await ack();
+      const n = normalizeViewSubmission(body, role);
+      if (n.kind === 'ignored') return;
+      const action = n.action;
+      const send = notify(action);
+      if (active.size >= max) {
+        await send('Anton is busy. Try again in a moment.').catch(() => log('Slack reply failed.'));
+        return;
+      }
+      start(async () => {
+        const r = await deps.dispatch(action);
+        if (r.status !== 'ignored') await send(renderResult(r)).catch(() => log('Slack reply failed.'));
+      });
+    },
+    async event(body, role, notify) {
       const n = normalizeEvent(body, role);
       if (n.kind === 'ignored' || active.size >= max) return;
       const action = n.action;
-      start(async () => { await deps.dispatch(action); });
+      start(async () => {
+        const r = await deps.dispatch(action);
+        if (r.status !== 'ignored' && notify) await notify(action)(renderResult(r)).catch(() => log('Slack reply failed.'));
+      });
     },
     async idle() {
       while (active.size) await Promise.allSettled([...active]);
