@@ -76,3 +76,21 @@ describe('lock', () => {
     await release();
   });
 });
+
+describe('waitForLockFile under contention', () => {
+  it('never lets two waiters in this process hold the lock at once', async () => {
+    const { waitForLockFile } = await import('../../src/core/lock.js');
+    const dir = await (await import('node:fs/promises')).mkdtemp(join((await import('node:os')).tmpdir(), 'anton-lock-race-'));
+    let inside = 0;
+    let most = 0;
+    await Promise.all(Array.from({ length: 30 }, async () => {
+      const release = await waitForLockFile(join(dir, 'x.lock'));
+      inside++;
+      most = Math.max(most, inside);
+      await new Promise((r) => setTimeout(r, 1));
+      inside--;
+      await release();
+    }));
+    expect(most).toBe(1);
+  });
+});

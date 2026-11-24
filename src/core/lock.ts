@@ -28,6 +28,14 @@ async function readHolder(path: string): Promise<number | undefined> {
   }
 }
 
+/** Whether the lock file is there at all. A holder that just released it must not be "taken over". */
+async function lockExists(path: string): Promise<boolean> {
+  return stat(path).then(() => true, (e: NodeJS.ErrnoException) => {
+    if (e.code === 'ENOENT') return false;
+    throw e;
+  });
+}
+
 /** The pid recorded in the repo's run lock, alive or not. */
 export async function lockHolder(repo: string): Promise<number | undefined> {
   return readHolder(lockPath(repo));
@@ -90,12 +98,15 @@ export async function acquireLockFile(path: string): Promise<() => Promise<void>
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
       const pid = await readHolder(path);
       if (pid !== undefined && pidAlive(pid)) throw new AlreadyRunning(pid);
+      // Released in the meantime: retry the plain link. Taking over here could remove a newer holder's lock.
+      if (!(await lockExists(path))) throw new AlreadyRunning(0);
       // Dead/unparseable holder: serialize takeover so a live lock is never moved or removed.
       await writeFile(mtmp, body());
       haveMutex = await takeMutex(mutex, mtmp);
       if (!haveMutex) throw new AlreadyRunning(pid ?? 0);
       const again = await readHolder(path);
       if (again !== undefined && pidAlive(again)) throw new AlreadyRunning(again);
+      if (!(await lockExists(path))) throw new AlreadyRunning(0);
       await rm(path, { force: true });
       try {
         await link(tmp, path);
