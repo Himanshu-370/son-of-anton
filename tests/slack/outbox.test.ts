@@ -515,9 +515,9 @@ it('replays captured checkpoints in order after an offline job progresses', asyn
   ]);
   expect(transport.postMessage.mock.calls.map(([request]) => request.text)).toEqual([
     'Job 1',
-    'Spec was prepared for approval. Check the CLI for current status.',
+    'Spec was prepared for approval. Review it on the Mac, then run: anton approve demo',
     'Build plan ready',
-    'Delivery was prepared for final review. Check the CLI for current status.',
+    'Delivery was prepared for final review. Review it on the Mac, then run: anton approve demo',
   ]);
   expect(transport.uploadArtifact).toHaveBeenCalledTimes(1);
 });

@@ -2,7 +2,7 @@ import type { JobState } from '../core/state.js';
 import { publishMilestone, type Milestone } from './events.js';
 
 type WithoutJobIdentity<T> = T extends unknown ? Omit<T, 'scope' | 'source' | 'project' | 'jobId'> : never;
-type JobMilestone = WithoutJobIdentity<Extract<Milestone, { scope: 'job' }>>;
+export type JobMilestone = WithoutJobIdentity<Extract<Milestone, { scope: 'job' }>>;
 
 export async function publishJobMilestone(
   state: JobState, milestone: JobMilestone, publish: (event: Milestone) => Promise<void> = publishMilestone,

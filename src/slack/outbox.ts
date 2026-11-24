@@ -26,7 +26,11 @@ const channelRequest = z.strictObject({
 });
 const destination = { teamId, channelId, role, botUserId: userId, marker };
 const messageRequest = z.strictObject({
-  ...destination, threadTs: ts.optional(), text: z.string().max(200), unfurlLinks: z.literal(false), unfurlMedia: z.literal(false),
+  ...destination, threadTs: ts.optional(), text: z.string().max(3000), unfurlLinks: z.literal(false), unfurlMedia: z.literal(false),
+  /** Block Kit content composed by Anton (cards, questions); every value in it is Anton-written or cleaned. */
+  blocks: z.array(z.record(z.string(), z.unknown())).max(50).optional(),
+  /** Card tokens to bind to the posted message once Slack returns its timestamp. */
+  cards: z.array(z.string().regex(/^[a-f0-9]{32}$/)).max(30).optional(),
 });
 const uploadRequest = z.strictObject({ ...destination, threadTs: ts, eventTs: ts });
 const claimSchema = z.discriminatedUnion('kind', [
@@ -105,6 +109,10 @@ export interface DrainOutboxDeps extends QueueLocation {
   /** Stops taking new claims. The transport owns the timeout or cancellation of an active request. */
   signal?: AbortSignal;
   loadProjectSecrets?: (project: string, home: string) => Promise<Record<string, string>>;
+  /** Rich content for a milestone message (questions, review cards). Without it, every message is plain text. */
+  compose?: (event: Milestone, channelId: string) => Promise<{ text: string; blocks: Record<string, unknown>[]; cards?: string[] } | undefined>;
+  /** Bind card tokens to the posted message (before the send is acknowledged, so a crash reconciles and retries). */
+  attachCards?: (tokens: string[], channelId: string, ts: string) => Promise<void>;
 }
 
 const MAX_ATTEMPTS = 5;
@@ -220,6 +228,35 @@ export async function inspectOutbox(queue: QueueLocation): Promise<Store> {
   return readStore(loc.path);
 }
 
+/**
+ * The project whose channel Anton created (or the owner bound by ID) as `channelId`. Names are never used:
+ * a channel Anton did not record maps to no project.
+ */
+export async function projectForChannel(queue: QueueLocation, channel: string): Promise<string | undefined> {
+  if (!channelId.safeParse(channel).success || channel === queue.config.channelId) return undefined;
+  const { channels } = await inspectOutbox(queue);
+  const lanes = Object.entries(channels).filter(([lane, id]) => id === channel && lane.startsWith('proj:'));
+  return lanes.length === 1 ? lanes[0]![0].slice('proj:'.length) : undefined;
+}
+
+/** The channel recorded for a project, only if it maps back to that project alone. */
+export async function channelForProject(queue: QueueLocation, project: string): Promise<string | undefined> {
+  const id = (await inspectOutbox(queue)).channels[`proj:${project}`];
+  return id && (await projectForChannel(queue, id)) === project ? id : undefined;
+}
+
+/** The job whose thread Anton posted as `threadTs` in that project's recorded channel. */
+export async function jobForThread(queue: QueueLocation, channel: string, threadTs: string): Promise<{ project: string; jobId: string } | undefined> {
+  if (!channelId.safeParse(channel).success || !ts.safeParse(threadTs).success) return undefined;
+  const { channels, threads } = await inspectOutbox(queue);
+  const matches = Object.entries(threads).flatMap(([key, value]) => {
+    if (value !== threadTs) return [];
+    const m = /^proj:([a-z0-9]+(?:-[a-z0-9]+)*):([1-9]\d*-[a-z0-9-]+)$/.exec(key);
+    return m && channels[`proj:${m[1]}`] === channel ? [{ project: m[1]!, jobId: m[2]! }] : [];
+  });
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 const laneKey = (event: Milestone) => event.scope === 'workspace' ? '#anton' : `proj:${event.project}`;
 const threadKey = (event: Extract<Milestone, { scope: 'job' }>) => `${laneKey(event)}:${event.jobId}`;
 const markerFor = (...key: string[]) => `anton-${hash(JSON.stringify(key))}`;
@@ -302,8 +339,16 @@ async function nextOperation(entry: Entry, store: Store, deps: DrainOutboxDeps):
     } } };
   }
   if (!entry.messageTs) {
+    let composed: Awaited<ReturnType<NonNullable<DrainOutboxDeps['compose']>>>;
+    try {
+      composed = deps.compose ? await deps.compose(event, channel) : undefined;
+    } catch {
+      throw new ArtifactPreparationError('artifact-unavailable');
+    }
     return { claim: { kind: 'message', request: {
-      ...dest, ...flags, ...(parent ? { threadTs: parent } : {}), text: eventText(event),
+      ...dest, ...flags, ...(parent ? { threadTs: parent } : {}), text: composed?.text.slice(0, 3000) || eventText(event),
+      ...(composed?.blocks.length ? { blocks: composed.blocks.slice(0, 50) } : {}),
+      ...(composed?.cards?.length ? { cards: composed.cards.slice(0, 30) } : {}),
       marker: markerFor(...identity, 'message', entry.id),
     } } };
   }
@@ -421,6 +466,16 @@ export async function resolveOutboxEntry(
   return result;
 }
 
+async function attach(deps: DrainOutboxDeps, claim: OutboxClaim, messageTs: string): Promise<boolean> {
+  if (claim.kind !== 'message' || !claim.request.cards?.length || !deps.attachCards) return true;
+  try {
+    await deps.attachCards(claim.request.cards, claim.request.channelId, messageTs);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function drainOutbox(deps: DrainOutboxDeps): Promise<void> {
   if (deps.signal?.aborted) return;
   const loc = await openQueue(deps);
@@ -443,6 +498,10 @@ export async function drainOutbox(deps: DrainOutboxDeps): Promise<void> {
       if (entry.claim) {
         const claim = entry.claim;
         const result = await reconcileClaim(deps, claim);
+        if (result.status === 'found' && 'ts' in result && !(await attach(deps, claim, result.ts))) {
+          skipped.add(laneKey(entry.event));
+          continue;
+        }
         if (deps.signal?.aborted && (result.status === 'unavailable' || result.status === 'retry')) break;
         await update((snapshot, current) => {
           if (result.status === 'found' && acknowledge(snapshot, current, claim, result, deps.config)) return;
@@ -534,6 +593,10 @@ export async function drainOutbox(deps: DrainOutboxDeps): Promise<void> {
           }
         });
         continue;
+      }
+      if ('ts' in receipt && !(await attach(deps, claim, receipt.ts))) {
+        skipped.add(laneKey(entry.event));
+        continue; // The persisted claim reconciles to the same message, and attaching is repeated then.
       }
       await update((snapshot, current) => {
         if (!acknowledge(snapshot, current, claim, receipt, deps.config)) skipped.add(laneKey(current.event));

@@ -71,6 +71,12 @@ export function buildProgram(deps: CliDeps = {}): Command {
     .option('--budget <usd>', 'spend cap for this job in USD')
     .action(async (p: string, desc: string, o: { budget?: string }) => exit(await changeCommand(p, desc, o, deps)));
   program
+    .command('spec')
+    .description('Answer the PM\'s waiting spec questions in the terminal (for a spec started in Slack)')
+    .argument('<project>')
+    .option('--retry', 'rerun an interrupted PM turn (it may cost again)')
+    .action(async (p: string, o: { retry?: boolean }) => exit(await (await import('./commands/spec.js')).specCommand(p, o, deps)));
+  program
     .command('approve')
     .description('Approve the spec (starts the build) or the final delivery')
     .argument('<project>')

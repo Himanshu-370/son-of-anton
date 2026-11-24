@@ -38,7 +38,7 @@ const credentialsSchema = z.record(z.enum(SLACK_ROLES), roleCredentialsSchema);
 
 export type SlackConfig = z.infer<typeof configSchema>;
 export type SlackCredentials = z.infer<typeof credentialsSchema>;
-type SlackFile = 'config.json' | 'credentials.json' | 'setup.json' | 'setup-credentials.json';
+type SlackFile = 'config.json' | 'credentials.json' | 'setup.json' | 'setup-credentials.json' | 'actions.json' | 'chat-budget.json';
 const dir = (home: string) => join(home, 'slack');
 const missing = (error: unknown) => (error as NodeJS.ErrnoException).code === 'ENOENT';
 

@@ -1,13 +1,41 @@
-import { publishJobMilestone } from '../slack/job-milestones.js';
 import { join } from 'node:path';
 import type { StageCtx } from '../agent/host-runner.js';
-import { estimateCost } from '../core/history.js';
 import { loadSecrets, secretsEnvFile } from '../core/secrets.js';
-import { loadState, saveState, transition } from '../core/state.js';
-import { selectKit, type KitName } from '../kits/index.js';
-import { specRevision } from '../slack/events.js';
-import { writeSpec } from '../stages/spec.js';
+import { finishSpec, interactiveSpecHooks, SpecConflict, type SpecJob } from '../core/spec-continuation.js';
+import { loadState } from '../core/state.js';
+import type { KitName } from '../kits/index.js';
 import type { Resolved } from './deps.js';
+
+/**
+ * Continuation hooks for a job whose names the store accepts (older or test job IDs just skip it). They are
+ * best-effort in the terminal: a lock timeout or I/O error warns once and the session goes on without a
+ * continuation, as before Slack. Only a conflict (Slack owns the round) stops the session.
+ */
+function hooksFor(job: SpecJob, warn: (line: string) => void) {
+  let inner: ReturnType<typeof interactiveSpecHooks>;
+  try {
+    inner = interactiveSpecHooks(job);
+  } catch {
+    return undefined;
+  }
+  let off = false;
+  const guarded = async (call: () => Promise<void>) => {
+    if (off) return;
+    try {
+      await call();
+    } catch (e) {
+      if (e instanceof SpecConflict) throw e;
+      off = true;
+      warn(`Could not save the spec conversation for Slack (${e instanceof Error ? e.message : String(e)}); continuing without it.`);
+    }
+  };
+  return {
+    beforeCall: (info: Parameters<NonNullable<typeof inner.beforeCall>>[0]) => guarded(() => inner.beforeCall!(info)),
+    afterCall: (info: Parameters<NonNullable<typeof inner.afterCall>>[0]) => guarded(() => inner.afterCall!(info)),
+    stopped: (reason: string) => (off ? Promise.resolve(inner.done()) : inner.stopped(reason)),
+    done: () => inner.done(),
+  };
+}
 
 /** Container + spec loop + approval hint, shared by `anton new` and `anton change`. Returns the exit code. */
 export async function runSpecSession(
@@ -35,6 +63,8 @@ export async function runSpecSession(
   });
   let services: { name: string; envVars: string[] }[] = [];
   let kit: KitName = 'fallback';
+  const job: SpecJob = { project: p.name, repoPath: p.repoPath, jobId: p.jobId, jobDir: p.jobDir, description: p.description, mode };
+  const hooks = /^[1-9]\d*-[a-z0-9]+(?:-[a-z0-9]+)*$/.test(p.jobId) ? hooksFor(job, d.err) : undefined;
   try {
     const state = await loadState(p.jobDir);
     let warned = false;
@@ -45,20 +75,12 @@ export async function runSpecSession(
     };
     const ctx: StageCtx = { project: p.name, repo: p.repoPath, container, jobDir: p.jobDir, state, stage: 'spec', secrets, kit: 'fallback', warn };
     if (mode === 'change') ctx.state = await d.ensureRepoMap(ctx);
-    const r = await d.runSpec(ctx, p.description, d.ask, {}, mode);
+    const r = await d.runSpec(ctx, p.description, d.ask, hooks ? { hooks } : {}, mode);
     services = r.spec.services ?? [];
-    // The kit is picked here, not by the PM agent; the user can change the Kit: line at approval.
-    const files = mode === 'change' ? await d.listFiles(p.repoPath) : [];
-    kit = selectKit(p.description, files).name as KitName;
-    // History is a convenience: an unreadable file must not fail the spec stage.
-    const history = await d.readHistory().catch(() => []);
-    const estimate = estimateCost(history, { kind: mode, kit, checks: r.spec.acceptanceChecks.length });
-    await writeSpec(p.jobDir, { ...r.spec, kit }, secrets, estimate);
-    const next = transition(r.state, 'awaiting_spec_approval');
-    await saveState(p.jobDir, next);
-    const occurrence = await specRevision(p.jobDir);
-    if (occurrence) await publishJobMilestone(next, { kind: 'spec-ready', occurrence });
+    kit = (await finishSpec(job, r.spec, r.state, d, secrets)).kit;
+    hooks?.done();
   } catch (e) {
+    await hooks?.stopped(e instanceof Error ? e.message : String(e));
     // `spec` has no paused edge, so the job can't be resumed: point at abandon + a fresh run.
     const msg = e instanceof Error ? e.message : String(e);
     d.err(`Spec stage failed: ${msg}. Clean up with: ${hint}`);

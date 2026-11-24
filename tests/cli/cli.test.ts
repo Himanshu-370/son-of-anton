@@ -118,6 +118,35 @@ describe('anton approve', () => {
     expect(h.spawned).toEqual(['p']);
   });
 
+  it('completes after a crash left the spec-approved tag at HEAD; a tag elsewhere fails clearly', async () => {
+    const { repo, dir } = await project('p', { stage: 'awaiting_spec_approval' });
+    await execa('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+    await writeFile(join(repo, '.gitignore'), '.anton/\n');
+    const spec: SpecDoc = {
+      title: 'Sum', summary: 's', outOfScope: [], kit: 'fallback', tech: [],
+      acceptanceChecks: [{ id: 'AC-1', text: 'sums' }],
+    };
+    await writeFile(join(dir, 'spec.json'), JSON.stringify(spec));
+    await writeFile(join(dir, 'spec.md'), '# Sum\n\n## Acceptance checks\n\n- **AC-1**: sums\n');
+    const git = (...args: string[]) => execa('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { cwd: repo });
+    // The earlier attempt committed and tagged, then died before saving the state.
+    await git('add', '-A');
+    await git('commit', '-q', '-m', 'chore: spec approved');
+    await git('tag', 'anton/1-init/spec-approved');
+    const h = harness();
+    expect(await approveCommand('p', h.deps)).toBe(0);
+    expect((await loadState(dir)).stage).toBe('plan');
+    expect(h.spawned).toEqual(['p']);
+
+    // A tag on another commit is not this approval's: refuse, state unchanged.
+    await saveState(dir, { ...(await loadState(dir)), stage: 'awaiting_spec_approval' });
+    await writeFile(join(repo, 'extra.txt'), 'more');
+    const h2 = harness();
+    expect(await approveCommand('p', h2.deps)).toBe(1);
+    expect(h2.errText()).toMatch(/spec-approved.*another commit/);
+    expect((await loadState(dir)).stage).toBe('awaiting_spec_approval');
+  });
+
   it('a brand-new project with no tracked files still gets the spec-approved commit and tag', async () => {
     const { repo, dir } = await project('p', { stage: 'awaiting_spec_approval' });
     await execa('git', ['init', '-q', '-b', 'main'], { cwd: repo }); // no commits, nothing tracked: only .anton/ exists
@@ -346,6 +375,23 @@ describe('anton stop', () => {
     expect(slept).toBeGreaterThanOrEqual(10_000);
     expect(stopped).toEqual(['anton-p']);
     expect(await loadState(dir)).toMatchObject({ stage: 'paused', pausedFrom: 'build', pauseReason: 'interrupted' });
+  });
+});
+
+describe('anton stop (Slack)', () => {
+  it('queues a paused card for the interrupted job when Slack is set up', async () => {
+    const { writeSlackFile } = await import('../../src/slack/config.js');
+    const { inspectOutbox } = await import('../../src/slack/outbox.js');
+    const roles = Object.fromEntries(['pm', 'tech_lead', 'frontend', 'backend', 'infra', 'qa', 'code_reviewer', 'security_reviewer', 'coach']
+      .map((role, i) => [role, { appId: `A0FAKE${i}`, botUserId: `U0BOT${i}` }]));
+    const config = { teamId: 'T0FAKE', ownerId: 'U0OWNER', channelId: 'C0ANTON', roles };
+    await writeSlackFile(home, 'config.json', config);
+    await project('p', { stage: 'build', round: 1 });
+    expect(await stopCommand('p', harness().deps)).toBe(0);
+    const { entries } = await inspectOutbox({ config: config as never, home });
+    expect(entries.map((e) => e.event)).toContainEqual(expect.objectContaining({
+      kind: 'paused', project: 'p', jobId: '1-init', occurrence: 'paused-1', reason: 'interrupted',
+    }));
   });
 });
 
@@ -689,6 +735,40 @@ describe('anton accept-risk', () => {
 });
 
 describe('anton new', () => {
+  const hookedSpec = (): SpecDoc => ({ title: 'Habits', summary: 's', outOfScope: [], kit: 'fallback', tech: [], acceptanceChecks: [{ id: 'AC-1', text: 'tracks' }] });
+  const hookedHarness = () => harness({
+    ensureImage: async () => 'img', startContainer: async (slug) => `anton-${slug}`, stopContainer: async () => undefined,
+    onSigint: () => () => undefined,
+    runSpec: async (ctx, _desc, _ask, deps) => {
+      await deps?.hooks?.beforeCall?.({ call: 0, prompt: 'first', final: false });
+      await deps?.hooks?.afterCall?.({ call: 0, prompt: 'first', turn: { kind: 'spec', spec: hookedSpec() }, state: ctx.state });
+      return { spec: hookedSpec(), state: ctx.state };
+    },
+  });
+
+  it('a leftover spec continuation for a reused project name does not block anton new', async () => {
+    const dir = join(home, 'spec-sessions', 'a-habit-tracker');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, '1-init.json'), JSON.stringify({
+      version: 1, project: 'a-habit-tracker', jobId: '1-init', mode: 'new', description: 'an older project', origin: 'slack',
+      status: 'awaiting', round: 1, calls: 1, questions: ['Old?'], askedAt: 1, exchanges: [], updatedAt: 'x',
+    }));
+    const h = hookedHarness();
+    expect(await newCommand('a habit tracker', {}, h.deps)).toBe(0);
+    expect(await loadState(jobDirOf(join(home, 'projects', 'a-habit-tracker'), '1-init'))).toMatchObject({ stage: 'awaiting_spec_approval' });
+    const saved = JSON.parse(await readFile(join(dir, '1-init.json'), 'utf8'));
+    expect(saved).toMatchObject({ description: 'a habit tracker', origin: 'cli', status: 'done' });
+  });
+
+  it('the continuation store failing only warns: anton new still finishes as before', async () => {
+    await mkdir(join(home, 'spec-sessions'), { recursive: true });
+    await writeFile(join(home, 'spec-sessions', 'a-habit-tracker'), 'not a folder');
+    const h = hookedHarness();
+    expect(await newCommand('a habit tracker', {}, h.deps)).toBe(0);
+    expect(await loadState(jobDirOf(join(home, 'projects', 'a-habit-tracker'), '1-init'))).toMatchObject({ stage: 'awaiting_spec_approval' });
+    expect(h.errText()).toMatch(/continuing without/i);
+  });
+
   it('Docker down → exit 2 with the preflight message, no project folder', async () => {
     const exec: ExecFn = async () => ({ exitCode: 1, stdout: '', stderr: 'Cannot connect' });
     const runSpec = vi.fn();

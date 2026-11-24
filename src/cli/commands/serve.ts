@@ -1,14 +1,53 @@
+import { KEYCHAIN_SERVICE } from '../../core/api-key.js';
 import { antonHome } from '../../core/paths.js';
 import { SLACK_ROLES, loadSlackConfig, loadSlackCredentials } from '../../slack/config.js';
 import { drainOutbox, inspectOutbox, resolveOutboxEntry, type OutboxResolution } from '../../slack/outbox.js';
 import { reconcileCheckpoints } from '../../slack/reconcile.js';
+import { attachCardMessage, dispatchSlackAction, prepareCardModal, type DispatchDeps } from '../../slack/actions.js';
+import { composeSlackMessage, remindPendingSpecs } from '../../slack/spec-session.js';
+import { collectRetros } from '../../retro/run.js';
+import { createInboundHandler } from '../../slack/inbound.js';
 import { startSlackService } from '../../slack/service.js';
 import { createSlackRuntime } from '../../slack/transport.js';
+import { slackSetupApi } from '../../slack/setup-api.js';
 import { guard, resolveDeps, type CliDeps } from '../deps.js';
+
+/**
+ * Retro collection runs beside delivery, never inside it: `tick` starts one collection when it is due and
+ * none is running, and returns at once, so a slow or hung batch fetch cannot delay Slack messages or reminders.
+ */
+export function retroCollector(collect: () => Promise<unknown>, opts: { intervalMs?: number; now?: () => number } = {}) {
+  const interval = opts.intervalMs ?? 15 * 60_000;
+  const now = opts.now ?? Date.now;
+  let next = 0;
+  let running: Promise<void> | undefined;
+  return {
+    tick(): void {
+      if (running || now() < next) return;
+      next = now() + interval;
+      running = Promise.resolve()
+        .then(collect)
+        .then(() => undefined, () => undefined)
+        .finally(() => { running = undefined; });
+    },
+    running: () => running !== undefined,
+    /** Wait for a running collection, at most `ms` (service stop). */
+    async settle(ms: number): Promise<void> {
+      if (running) await Promise.race([running, new Promise((r) => setTimeout(r, ms).unref())]);
+    },
+  };
+}
 
 export async function serveCommand(deps: CliDeps = {}): Promise<number> {
   const d = resolveDeps(deps);
   return guard(d, async () => {
+    // A LaunchAgent starts with an empty environment: the key comes from the Keychain, held in this
+    // process's environment only, so job runs and spec turns spawned from here inherit it.
+    const source = await d.ensureApiKey();
+    if (source === 'keychain') d.out('Anthropic API key: loaded from the macOS Keychain.');
+    else if (!source) {
+      d.err(`No Anthropic API key in the environment or the macOS Keychain (service ${KEYCHAIN_SERVICE}). Slack job controls and paid answers will not work.`);
+    }
     const home = antonHome();
     const config = await loadSlackConfig(home);
     const credentials = config && await loadSlackCredentials(home);
@@ -16,21 +55,54 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
       d.err('Run anton slack setup before starting the Slack service.');
       return 1;
     }
-    const runtime = createSlackRuntime(config, credentials);
+    // Slack orders run the same job actions as the CLI, in this process, with its effects.
+    // Spec turns (the PM in Docker) run here too, with the same effects as anton new and anton spec.
+    const dispatchDeps: DispatchDeps = {
+      config, home,
+      jobs: { preflight: d.preflight, spawnRun: d.spawnRun, stopContainer: d.stopContainer, retro: d.retro },
+      spec: {
+        home, preflight: d.preflight, ensureImage: d.ensureImage, startContainer: d.startContainer, stopContainer: d.stopContainer,
+        runAgent: d.runAgent, ensureRepoMap: d.ensureRepoMap, listFiles: d.listFiles, readHistory: d.readHistory,
+      },
+      // Membership is read live with the PM's token (groups:read), by user ID. The token stays in this closure:
+      // role Q&A and its model call never see a Slack credential.
+      access: {
+        channel: (channelId) => slackSetupApi.channelInfo(credentials.pm.botToken, channelId),
+        members: (channelId) => slackSetupApi.channelMembers(credentials.pm.botToken, channelId),
+      },
+      chat: { home },
+    };
+    const inbound = createInboundHandler({
+      log: d.out,
+      dispatch: (action) => dispatchSlackAction(action, dispatchDeps),
+      prepareModal: (action) => prepareCardModal(action, dispatchDeps),
+    });
+    const runtime = createSlackRuntime(config, credentials, inbound);
     let reconcileAt = 0;
+    // Finished Retros queue their proposals here, so the coach can post lesson cards without the CLI.
+    // Collecting reads submitted batches; it starts no new model call.
+    const retros = retroCollector(() => collectRetros({ ...d.retro, out: () => undefined }));
     const service = await startSlackService({
       home, roles: SLACK_ROLES, open: runtime.open, log: d.out,
       async drain(connected, signal, canDeliver) {
         if (signal.aborted) return;
         if (Date.now() >= reconcileAt) {
           await reconcileCheckpoints({ home, loadConfig: async () => config });
+          await remindPendingSpecs({ home }).catch(() => undefined);
           reconcileAt = Date.now() + 60_000;
         }
+        retros.tick();
         if (!connected.size) return;
         await drainOutbox({
           home, config, signal,
           canDeliver,
           transport: runtime.transport(signal),
+          compose: (event, channelId) => composeSlackMessage(event, { config, home, channelId }),
+          attachCards: async (tokens, channelId, ts) => {
+            for (const token of tokens) {
+              if (!(await attachCardMessage(token, channelId, ts, { home }))) throw new Error('card binding failed');
+            }
+          },
         });
       },
     });
@@ -42,7 +114,12 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
       };
       const removeSigint = d.onSigint(clean);
       process.once('SIGTERM', clean);
-    }).finally(() => service.stop());
+    }).finally(async () => {
+      await service.stop();
+      // Let accepted actions finish their local work; their records make a redelivery safe either way.
+      await inbound.idle();
+      await retros.settle(5_000);
+    });
     return 0;
   });
 }

@@ -3,7 +3,10 @@ import { z } from 'zod';
 import { SLACK_ROLES, type SlackConfig, type SlackCredentials, type SlackRole } from './config.js';
 import { OutboxDeliveryError, type OutboxMessageRequest, type OutboxTransport } from './outbox.js';
 import type { RoleConnection } from './service.js';
+import type { InboundHandler } from './inbound.js';
 import { slackSetupApi } from './setup-api.js';
+import type { SlackAction } from './actions.js';
+import { MODAL_CALLBACK } from './views.js';
 
 const quiet: Logger = {
   debug() {}, info() {}, warn() {}, error() {}, setLevel() {}, setName() {},
@@ -103,6 +106,7 @@ export function createSlackTransport(config: SlackConfig, deps: TransportDeps): 
         channel: request.channelId,
         ...(request.threadTs ? { thread_ts: request.threadTs } : {}),
         text: request.text,
+        ...(request.blocks?.length ? { blocks: request.blocks as never } : {}),
         mrkdwn: false,
         unfurl_links: request.unfurlLinks,
         unfurl_media: request.unfurlMedia,
@@ -153,7 +157,14 @@ export function createSlackTransport(config: SlackConfig, deps: TransportDeps): 
   };
 }
 
-export function createSlackRuntime(config: SlackConfig, credentials: SlackCredentials) {
+/** Roles whose manifests enable interactivity (see manifests.ts). */
+const INTERACTIVE: readonly SlackRole[] = ['pm', 'qa', 'coach'];
+
+/**
+ * `inbound` receives owner commands, card clicks and messages. Without it, the PM only points to the CLI.
+ * Handlers acknowledge at once; the action runs in the background.
+ */
+export function createSlackRuntime(config: SlackConfig, credentials: SlackCredentials, inbound?: InboundHandler) {
   const clients = new Map(SLACK_ROLES.map((role) => [
     role, new webApi.WebClient(credentials[role].botToken, webOptions),
   ]));
@@ -177,9 +188,32 @@ export function createSlackRuntime(config: SlackConfig, credentials: SlackCreden
       receiver, token: botToken, botId: auth.bot_id, botUserId: expected.botUserId,
       tokenVerificationEnabled: false, logger: quiet, clientOptions: webOptions,
     });
-    if (role === 'pm') app.command('/anton', async ({ ack }) => {
-      await ack({ response_type: 'ephemeral', text: 'Use the Anton CLI to manage jobs.' });
-    });
+    if (!inbound) {
+      if (role === 'pm') app.command('/anton', async ({ ack }) => {
+        await ack({ response_type: 'ephemeral', text: 'Use the Anton CLI to manage jobs.' });
+      });
+    } else {
+      if (role === 'pm') app.command('/anton', async ({ ack, body, respond }) => {
+        await inbound.command(body, role, (reply) => ack(reply), (reply) => respond(reply));
+      });
+      const client = clients.get(role)!;
+      // A private reply to the acting user in the channel (and thread) of the input.
+      const notify = (action: SlackAction) => (text: string) => client.chat.postEphemeral({
+        channel: action.source.channelId, user: action.actor.userId, text, mrkdwn: false,
+        ...(action.via === 'message' && action.source.threadTs ? { thread_ts: action.source.threadTs } : {}),
+      } as never);
+      if (INTERACTIVE.includes(role)) {
+        app.action(/.*/, async ({ ack, body, respond }) => {
+          await inbound.action(body, role, () => ack(), (reply) => respond(reply),
+            (triggerId, view) => client.views.open({ trigger_id: triggerId, view: view as never }));
+        });
+        app.view(MODAL_CALLBACK, async ({ ack, body }) => {
+          await inbound.view(body, role, () => ack(), notify);
+        });
+      }
+      app.event('message', async ({ body }) => { await inbound.event(body, role, notify); });
+      app.event('app_mention', async ({ body }) => { await inbound.event(body, role, notify); });
+    }
 
     let connected = false;
     let closed = false;

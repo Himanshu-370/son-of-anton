@@ -106,6 +106,36 @@ describe('runUnattended', () => {
     });
   });
 
+  it('publishes a paused milestone for every pause reason, bound to that pause', async () => {
+    const publishMilestone = vi.fn(async () => {});
+    const f = fakes({ publishMilestone, runBuild: async () => { throw new Error('boom'); } });
+    await runUnattended('p', f.deps);
+    expect(publishMilestone).toHaveBeenCalledWith({
+      scope: 'job', source: 'factory', project: 'p', jobId: '1-init', kind: 'paused', occurrence: 'paused-1', reason: 'error',
+    });
+
+    await setup({ stage: 'verify', round: 1 });
+    await writeFile(join(dir, 'plan.json'), JSON.stringify(plan));
+    const publish2 = vi.fn(async () => {});
+    const g = fakes({
+      publishMilestone: publish2,
+      runVerify: async (ctx: StageCtx): Promise<VerifyResult> => {
+        const s = pause(ctx.state, 'no_progress');
+        await saveState(ctx.jobDir, s);
+        return { state: s, passed: false, results: [], runOk: true, failureReport: 'rep' };
+      },
+    });
+    await runUnattended('p', g.deps);
+    expect(publish2).toHaveBeenCalledWith({
+      scope: 'job', source: 'factory', project: 'p', jobId: '1-init', kind: 'paused', occurrence: 'paused-1', reason: 'no_progress',
+    });
+
+    await setup();
+    const publish3 = vi.fn(async () => {});
+    await runUnattended('p', fakes({ publishMilestone: publish3, runBuild: async () => { throw new BudgetExceeded(1, 1); } }).deps);
+    expect(publish3).toHaveBeenCalledWith(expect.objectContaining({ kind: 'paused', occurrence: 'paused-1', reason: 'budget_cap' }));
+  });
+
   it('does not send an approval prompt for a finished bench job', async () => {
     await setup({ bench: 'r1' });
     const f = fakes();

@@ -247,6 +247,18 @@ export async function tag(repo: string, name: string): Promise<void> {
   await git(repo, ['tag', name]);
 }
 
+/**
+ * Tag HEAD, idempotently: a tag that already points at HEAD (an earlier attempt that died before saving its
+ * state) counts as done. A tag on another commit is refused with a clear error.
+ */
+export async function tagHead(repo: string, name: string): Promise<void> {
+  const existing = (await listTags(repo, name)).includes(name);
+  if (!existing) return tag(repo, name);
+  if ((await revParse(repo, name)) !== (await headSha(repo))) {
+    throw new Error(`Tag ${name} already exists on another commit. Check it with: git -C ${repo} show ${name}`);
+  }
+}
+
 /** Tags matching a `git tag -l` glob pattern. */
 export async function listTags(repo: string, pattern: string): Promise<string[]> {
   const out = await git(repo, ['tag', '-l', pattern]);

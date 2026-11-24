@@ -35,6 +35,11 @@ export const AntonConfigSchema = z
       .strict()
       .optional(),
     retro: z.object({ batch: z.boolean().optional() }).strict().optional(),
+    /** Paid Slack answers: a monthly pool (UTC month) and a cap per answer, separate from build budgets. */
+    chat: z
+      .object({ monthlyUsd: z.number().min(0).optional(), perAnswerUsd: z.number().positive().optional() })
+      .strict()
+      .optional(),
   })
   .strict();
 
@@ -61,6 +66,11 @@ export function budgetSettings(cfg: AntonConfig): { defaultUsd: number; allowanc
     allowances: cfg.budget?.allowances ?? DEFAULT_ALLOWANCES,
     taskBudgets: cfg.budget?.taskBudgets ?? true,
   };
+}
+
+/** Defaults: $5 a month and $0.10 an answer. `monthlyUsd: 0` turns paid answers off (status stays free). */
+export function chatSettings(cfg: AntonConfig): { monthlyUsd: number; perAnswerUsd: number } {
+  return { monthlyUsd: cfg.chat?.monthlyUsd ?? 5, perAnswerUsd: cfg.chat?.perAnswerUsd ?? 0.1 };
 }
 
 /** Retro goes through the Batch API (half price, collected later) unless `retro.batch: false`. */

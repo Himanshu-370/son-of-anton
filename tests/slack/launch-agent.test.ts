@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19,6 +19,8 @@ describe('Slack LaunchAgent', () => {
   let deps: SlackServiceCommandDeps;
   let loaded: boolean;
   let installedConfig: string | undefined;
+  let dockerPath: string;
+  let keychainItem: boolean;
   const out = vi.fn<(line: string) => void>();
   const err = vi.fn<(line: string) => void>();
   const exec = vi.fn<NonNullable<SlackServiceCommandDeps['exec']>>();
@@ -33,7 +35,12 @@ describe('Slack LaunchAgent', () => {
     await mkdir(dirname(antonPath));
     await writeFile(nodePath, '', { mode: 0o700 });
     await writeFile(antonPath, '');
-    deps = { platform: 'darwin', uid: 501, homeDir: root, nodePath, antonPath, exec, out, err };
+    dockerPath = join(root, 'docker bin', 'docker');
+    await mkdir(dirname(dockerPath));
+    await writeFile(dockerPath, '', { mode: 0o700 });
+    deps = { platform: 'darwin', uid: 501, user: 'tester', homeDir: root, nodePath, antonPath, exec, out, err,
+      searchPath: `${join(root, 'empty')}:${dirname(dockerPath)}` };
+    keychainItem = false;
     vi.stubEnv('ANTON_HOME', antonHome);
     vi.stubEnv('SLACK_BOT_TOKEN', fakeSecret);
     out.mockClear();
@@ -41,6 +48,16 @@ describe('Slack LaunchAgent', () => {
     loaded = false;
     installedConfig = undefined;
     exec.mockReset().mockImplementation(async (command, args) => {
+      if (command === '/usr/bin/security') {
+        expect(args).toEqual(['find-generic-password', '-a', 'tester', '-s', 'anthropic-api-key']);
+        return keychainItem ? success : { exitCode: 44, stdout: '', stderr: 'not found' };
+      }
+      if (command === '/usr/bin/plutil') {
+        const key = args[1]!.replace('EnvironmentVariables.', '');
+        const xml = await readFile(plist, 'utf8').catch(() => '');
+        const value = new RegExp(`<key>${key}</key>\\s*<string>([^<]*)</string>`).exec(xml)?.[1];
+        return value === undefined ? { exitCode: 1, stdout: '', stderr: '' } : { ...success, stdout: `${value}\n` };
+      }
       expect(command).toBe('/bin/launchctl');
       switch (args[0]) {
         case 'print':
@@ -68,7 +85,7 @@ describe('Slack LaunchAgent', () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it('installs at login with absolute arguments, durable logs and only ANTON_HOME in the environment', async () => {
+  it('installs at login with absolute arguments, durable logs and only ANTON_HOME and PATH in the environment', async () => {
     expect(await slackServiceCommand('install', deps)).toBe(0);
     const xml = await readFile(plist, 'utf8');
     expect(xml).not.toContain(fakeSecret);
@@ -89,8 +106,13 @@ describe('Slack LaunchAgent', () => {
         RunAtLoad: true,
         StandardOutPath: join(logs, 'stdout.log'),
         StandardErrorPath: join(logs, 'stderr.log'),
+        AbandonProcessGroup: true,
       });
-      expect(config.EnvironmentVariables).toEqual({ ANTON_HOME: antonHome });
+      expect(config.EnvironmentVariables).toEqual({
+        ANTON_HOME: antonHome,
+        PATH: [dirname(dockerPath), dirname(deps.nodePath!), '/usr/bin', '/bin', '/usr/sbin', '/sbin'].join(':'),
+      });
+      expect(xml).not.toContain('ANTHROPIC_API_KEY');
     }
   });
 
@@ -106,16 +128,55 @@ describe('Slack LaunchAgent', () => {
     expect(installedConfig).toContain('next-home');
   });
 
-  it('reports status without printing the launchctl dump', async () => {
+  it('refuses to install when docker cannot be found', async () => {
+    expect(await slackServiceCommand('install', { ...deps, searchPath: join(root, 'empty') })).toBe(1);
+    await expect(stat(plist)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(err.mock.lastCall?.[0]).toMatch(/docker/i);
+  });
+
+  it('adds the real directory of a linked docker so its helpers resolve', async () => {
+    const linked = join(root, 'links');
+    await mkdir(linked);
+    await symlink(dockerPath, join(linked, 'docker'));
+    expect(await slackServiceCommand('install', { ...deps, searchPath: linked })).toBe(0);
+    const path = /<key>PATH<\/key>\s*<string>([^<]*)<\/string>/.exec(await readFile(plist, 'utf8'))?.[1] ?? '';
+    expect(path.split(':').slice(0, 2)).toEqual([linked, dirname(await realpath(dockerPath))]);
+  });
+
+  it('lets job runners outlive the agent', async () => {
+    expect(await slackServiceCommand('install', deps)).toBe(0);
+    expect(await readFile(plist, 'utf8')).toMatch(/<key>AbandonProcessGroup<\/key>\s*<true\/>/);
+  });
+
+  it('reports whether docker and the Keychain key were found, never the key', async () => {
+    expect(await slackServiceCommand('install', deps)).toBe(0);
+    out.mockClear();
     expect(await slackServiceCommand('status', deps)).toBe(0);
-    expect(out.mock.lastCall?.[0]).toContain('not installed');
+    const lines = out.mock.calls.map(([line]) => line);
+    expect(lines).toContain(`Docker: found at ${dockerPath}.`);
+    expect(lines.some((line) => /API key: not found in the macOS Keychain/.test(line))).toBe(true);
+    keychainItem = true;
+    out.mockClear();
+    expect(await slackServiceCommand('status', deps)).toBe(0);
+    expect(out.mock.calls.map(([line]) => line)).toContain('Anthropic API key: found in the macOS Keychain.');
+    expect(exec.mock.calls.every(([, args]) => !args.includes('-w'))).toBe(true);
+    await rm(dockerPath);
+    out.mockClear();
+    expect(await slackServiceCommand('status', deps)).toBe(0);
+    expect(out.mock.calls.map(([line]) => line).some((line) => /^Docker: not found/.test(line))).toBe(true);
+  });
+
+  it('reports status without printing the launchctl dump', async () => {
+    const said = (text: string) => out.mock.calls.some(([line]) => line.includes(text));
+    expect(await slackServiceCommand('status', deps)).toBe(0);
+    expect(said('not installed')).toBe(true);
     expect(await slackServiceCommand('install', deps)).toBe(0);
     expect(await slackServiceCommand('status', deps)).toBe(0);
     expect(out.mock.calls.map(([line]) => line)).toContain('Slack LaunchAgent is running.');
-    expect(out.mock.lastCall?.[0]).toContain('health is not available');
+    expect(said('health is not available')).toBe(true);
     loaded = false;
     expect(await slackServiceCommand('status', deps)).toBe(0);
-    expect(out.mock.lastCall?.[0]).toContain('installed but not loaded');
+    expect(said('installed but not loaded')).toBe(true);
     expect(JSON.stringify(out.mock.calls)).not.toContain(fakeSecret);
   });
 
@@ -130,7 +191,7 @@ describe('Slack LaunchAgent', () => {
       return { ...success, stdout: `${antonHome}\n` };
     });
     expect(await slackServiceCommand('status', deps)).toBe(0);
-    expect(out.mock.lastCall?.[0]).toMatch(/^Slack roles offline: tech_lead,/);
+    expect(out.mock.calls.some(([line]) => /^Slack roles offline: tech_lead,/.test(line))).toBe(true);
   });
 
   it('removes the agent repeatedly and preserves its logs', async () => {

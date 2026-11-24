@@ -328,6 +328,29 @@ describe('collectRetros', () => {
     expect((await collectRetros(deps(fake().client))).failed).toEqual([]);
   });
 
+  it('two concurrent collectors (serve and lessons review) finish a Retro and record its cost once', async () => {
+    await submitted();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const f = fake();
+    let fetched = 0;
+    const slow: RetroClient = { ...f.client, getBatch: async (...a) => { fetched++; await gate; return f.client.getBatch(...a); } };
+    const first = collectRetros(deps(slow));
+    // Let the first collector take the job's lock and start its fetch.
+    while (fetched === 0) await new Promise((r) => setTimeout(r, 5));
+    const second = await collectRetros(deps(slow));
+    expect(second).toMatchObject({ collected: 0, pending: 1 });
+    expect(second.notes.join(' ')).toContain('being collected by another Anton process');
+    release();
+    expect((await first).collected).toBe(1);
+    expect((await collectRetros(deps(slow))).collected).toBe(0);
+    expect(fetched).toBe(1);
+    const s = await loadState(dir);
+    expect(s.stageSpentUsd?.retro).toBeCloseTo(0.05);
+    expect(s.spentUsd).toBeCloseTo(1.05);
+    expect(await readProposals(home)).toHaveLength(2);
+  });
+
   it('retro cost is recorded under retro', async () => {
     await submitted();
     await collectRetros(deps(fake().client));

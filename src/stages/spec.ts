@@ -59,12 +59,66 @@ export class SpecNotProduced extends Error {
   }
 }
 
-export type SpecDeps = { runAgent?: typeof defaultRunAgent };
+/** Persistence points around each PM call (the host-side spec continuation). Absent in plain runs. */
+export type SpecHooks = {
+  /** Before the paid call: `answers` are the owner's answers that produced `prompt` (absent on the first call). */
+  beforeCall?: (info: { call: number; prompt: string; final: boolean; answers?: string[] }) => Promise<void>;
+  /** After a valid reply, before any question is asked. */
+  afterCall?: (info: { call: number; prompt: string; turn: SpecTurn; state: JobState }) => Promise<void>;
+};
+export type SpecDeps = { runAgent?: typeof defaultRunAgent; hooks?: SpecHooks };
 
 const SPEC_ONLY_JSON_SCHEMA = z.toJSONSchema(SpecOnlyTurnSchema) as Record<string, unknown>;
 const SPEC_TURN_JSON_SCHEMA = z.toJSONSchema(z.object(turnShape)) as Record<string, unknown>;
 
 const CHANGE_NOTE = `This is a change to an existing codebase, so the spec covers the change, not the whole project. Read .anton/repo-map.md and the relevant code first. List what must keep working (existing behaviour the change must not break) as acceptance checks. If the repo has few or no tests, propose characterization acceptance checks that pin the current behaviour before the change.`;
+
+export const FINAL_ROUND_NOTE = '\n\nYou have no more question rounds. Please write the spec now.';
+
+/** The first PM prompt for a new project or a change. */
+export function initialSpecPrompt(description: string, mode: 'new' | 'change'): string {
+  let prompt = mode === 'change' ? `Description of the change:\n\n${description}` : `Description of what to build:\n\n${description}`;
+  if (mode === 'change') prompt += `\n\n${CHANGE_NOTE}`;
+  return prompt;
+}
+
+/** The owner's answers as the PM receives them, from either surface. */
+export function answersPrompt(questions: string[], answers: string[]): string {
+  return questions.map((q, i) => `Q: ${q}\nA: ${answers[i] ?? '(no answer)'}`).join('\n\n');
+}
+
+export type SpecTurn = { kind: 'questions'; questions: string[] } | { kind: 'spec'; spec: SpecDoc };
+export type SpecTurnResult = { turn: SpecTurn; state: JobState; sessionId: string; totalUsd: number; usage?: StageCtx['baseUsage'] };
+
+/**
+ * One PM call. `resume` continues an SDK session whose transcript is still in the running container; without
+ * it the call is a fresh session (zero SDK offset) and the job's persisted spend stays the cost base.
+ */
+export async function specTurn(
+  ctx: StageCtx,
+  input: { prompt: string; final: boolean; resume?: { sessionId: string; baseUsd: number } },
+  deps: SpecDeps = {},
+): Promise<SpecTurnResult> {
+  const run = deps.runAgent ?? defaultRunAgent;
+  const { model, effort } = ROLE_MODELS.pm;
+  const req: AgentRequest = {
+    role: 'pm',
+    model,
+    effort,
+    systemPrompt: await loadPrompt('spec.md'),
+    prompt: input.prompt,
+    outputSchema: input.final ? SPEC_ONLY_JSON_SCHEMA : SPEC_TURN_JSON_SCHEMA,
+    ...(input.resume ? { resumeSessionId: input.resume.sessionId, baseUsd: input.resume.baseUsd } : {}),
+    maxTurns: 30,
+    budgetUsd: remainingUsd(ctx.state),
+  };
+  const res = await run(ctx, req);
+  const parsed = SpecTurnSchema.parse(res.output);
+  const turn: SpecTurn = parsed.kind === 'spec'
+    ? { kind: 'spec', spec: { ...parsed.spec!, kit: 'fallback' } }
+    : { kind: 'questions', questions: parsed.questions! };
+  return { turn, state: res.state, sessionId: res.sessionId, totalUsd: res.totalUsd ?? 0, usage: res.usage };
+}
 
 /**
  * Question loop. Returns the spec and the latest job state (cost accounting from runAgent).
@@ -76,40 +130,27 @@ export async function runSpec(
   deps: SpecDeps = {},
   mode: 'new' | 'change' = 'new',
 ): Promise<{ spec: SpecDoc; state: JobState }> {
-  const run = deps.runAgent ?? defaultRunAgent;
-  const systemPrompt = await loadPrompt('spec.md');
-  const { model, effort } = ROLE_MODELS.pm;
   let cur: StageCtx = ctx;
   let sessionId: string | undefined;
   /** The previous call's cumulative SDK total; a resumed session's total continues from it. */
   let baseUsd = 0;
-  let prompt = mode === 'change' ? `Description of the change:\n\n${description}` : `Description of what to build:\n\n${description}`;
-  if (mode === 'change') prompt += `\n\n${CHANGE_NOTE}`;
+  let prompt = initialSpecPrompt(description, mode);
+  let answers: string[] | undefined;
 
   for (let call = 0; call <= MAX_QUESTION_ROUNDS; call++) {
     const final = call === MAX_QUESTION_ROUNDS;
-    if (final) prompt += '\n\nYou have no more question rounds. Please write the spec now.';
-    const req: AgentRequest = {
-      role: 'pm',
-      model,
-      effort,
-      systemPrompt,
-      prompt,
-      outputSchema: final ? SPEC_ONLY_JSON_SCHEMA : SPEC_TURN_JSON_SCHEMA,
-      ...(sessionId ? { resumeSessionId: sessionId, baseUsd } : {}),
-      maxTurns: 30,
-      budgetUsd: remainingUsd(cur.state),
-    };
-    const res = await run(cur, req);
+    if (final) prompt += FINAL_ROUND_NOTE;
+    await deps.hooks?.beforeCall?.({ call, prompt, final, ...(answers ? { answers } : {}) });
+    const res = await specTurn(cur, { prompt, final, ...(sessionId ? { resume: { sessionId, baseUsd } } : {}) }, deps);
     cur = { ...cur, state: res.state, baseUsage: res.usage };
     sessionId = res.sessionId;
-    baseUsd = res.totalUsd ?? 0;
-    const turn = SpecTurnSchema.parse(res.output);
-    if (turn.kind === 'spec') return { spec: { ...turn.spec!, kit: 'fallback' }, state: res.state };
+    baseUsd = res.totalUsd;
+    await deps.hooks?.afterCall?.({ call, prompt, turn: res.turn, state: res.state });
+    if (res.turn.kind === 'spec') return { spec: res.turn.spec, state: res.state };
     if (final) throw new SpecNotProduced();
-    const questions = turn.questions!;
-    const answers = await ask(questions);
-    prompt = questions.map((q, i) => `Q: ${q}\nA: ${answers[i] ?? '(no answer)'}`).join('\n\n');
+    const questions = res.turn.questions;
+    answers = await ask(questions);
+    prompt = answersPrompt(questions, answers);
   }
   throw new SpecNotProduced();
 }

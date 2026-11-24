@@ -4,12 +4,11 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
+import { ensureAnthropicKey } from '../core/api-key.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
 import { cloneShallow as gitCloneShallow, listFiles as gitListFiles } from '../core/git.js';
-import { currentJobId } from '../core/job.js';
-import { jobDir as jobDirOf } from '../core/paths.js';
-import { getProject } from '../core/registry.js';
-import { loadState, type JobState } from '../core/state.js';
+import { loadJob } from '../core/job-actions.js';
+import type { JobState } from '../core/state.js';
 import {
   ensureImage as dockerEnsureImage,
   preflight as dockerPreflight,
@@ -57,6 +56,8 @@ export type CliDeps = {
   runAgent?: typeof defaultRunAgent;
   /** Whether stdin is a terminal; when not, `anton plugins update` declines without asking. */
   isTTY?: () => boolean;
+  /** `anton serve`: keep ANTHROPIC_API_KEY from the environment or load it from the macOS Keychain (memory only). */
+  ensureApiKey?: () => Promise<'environment' | 'keychain' | undefined>;
   /** Retro client, env (for ANTHROPIC_API_KEY) and home; `out` comes from the command. */
   retro?: Omit<RetroDeps, 'out'>;
 };
@@ -138,6 +139,7 @@ export function resolveDeps(d: CliDeps = {}): Resolved {
     cloneShallow: d.cloneShallow ?? gitCloneShallow,
     runAgent: d.runAgent ?? defaultRunAgent,
     isTTY: d.isTTY ?? (() => process.stdin.isTTY === true),
+    ensureApiKey: d.ensureApiKey ?? (() => ensureAnthropicKey({ exec })),
     retro: d.retro ?? {},
   };
 }
@@ -146,10 +148,7 @@ export type ResolvedJob = { name: string; repo: string; jobId: string; jobDir: s
 
 /** A project's current job and its state. */
 export async function resolveJob(name: string): Promise<ResolvedJob> {
-  const { repoPath: repo } = await getProject(name);
-  const jobId = await currentJobId(repo);
-  const jobDir = jobDirOf(repo, jobId);
-  return { name, repo, jobId, jobDir, state: await loadState(jobDir) };
+  return loadJob(name, { allowBench: true });
 }
 
 /** Bench owns the lifecycle of its temporary jobs. */

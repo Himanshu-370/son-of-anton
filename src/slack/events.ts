@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { SlackConfig, SlackRole } from './config.js';
 import { antonHome } from '../core/paths.js';
+import { PAUSE_REASONS, type PauseReason } from '../core/state.js';
 
 export { specRevision } from './artifacts.js';
 
@@ -24,6 +25,10 @@ export const MilestoneSchema = z.discriminatedUnion('kind', [
     checkId, sha256: digest,
   }).refine(({ occurrence, checkId, sha256 }) => occurrence === `${checkId}:${sha256}`),
   z.strictObject({ ...job, kind: z.literal('build-handoff'), occurrence, role: z.enum(['frontend', 'backend', 'infra']) }),
+  z.strictObject({ ...job, kind: z.enum(['spec-questions', 'spec-reminder']), occurrence: z.string().regex(/^round-[1-9]\d{0,5}$/) }),
+  z.strictObject({ ...job, kind: z.literal('spec-stopped'), occurrence: z.string().uuid() }),
+  // One per pause, whatever its reason: the occurrence is the pause number the card is bound to.
+  z.strictObject({ ...job, kind: z.literal('paused'), occurrence: z.string().regex(/^paused-\d{1,15}$/), reason: z.enum(PAUSE_REASONS) }),
   z.strictObject({
     ...job, occurrence,
     kind: z.enum(['plan-ready', 'checks-complete', 'code-review-complete', 'security-review-complete', 'budget-warning', 'budget-paused']),
@@ -33,8 +38,18 @@ export const MilestoneSchema = z.discriminatedUnion('kind', [
 
 export type Milestone = z.infer<typeof MilestoneSchema>;
 
+/** A Retro's lesson-proposed occurrence names its job; the coach card lists that job's queued proposals. */
+export const lessonOccurrence = (project: string, jobId: string) => `${project}:${jobId}`;
+export function lessonOccurrenceJob(occurrence: string): { project: string; jobId: string } | undefined {
+  const [project, jobId, ...rest] = occurrence.split(':');
+  return project && jobId && !rest.length && projectId.safeParse(project).success && jobId.length <= 72 ? { project, jobId } : undefined;
+}
+
 const milestones = {
   'spec-ready': ['pm', 'Spec was prepared for approval'],
+  'spec-questions': ['pm', 'The PM has questions about the spec'],
+  'spec-reminder': ['pm', 'Reminder: the PM is still waiting for your answers'],
+  'spec-stopped': ['pm', 'The PM turn stopped before it finished. Nothing was repeated'],
   'plan-ready': ['tech_lead', 'Build plan ready'],
   'build-handoff': [null, 'Build handoff complete'],
   'checks-complete': ['qa', 'Verification checks complete'],
@@ -44,6 +59,7 @@ const milestones = {
   'security-review-complete': ['security_reviewer', 'Security review complete'],
   'budget-warning': ['pm', 'Budget warning'],
   'budget-paused': ['pm', 'Job paused at the budget limit'],
+  paused: ['pm', 'Job paused'],
   'lesson-proposed': ['coach', 'Lesson proposed'],
   'bench-summary': ['pm', 'Benchmark summary'],
   'plugin-updated': ['pm', 'Plugin configuration updated'],
@@ -53,13 +69,27 @@ export function eventRole(event: Milestone): SlackRole {
   return event.kind === 'build-handoff' ? event.role : milestones[event.kind][0];
 }
 
+/** Fixed wording per pause reason; nothing from the job's error text reaches Slack. */
+export const PAUSE_TEXT: Record<PauseReason, string> = {
+  budget_cap: 'Job paused at the budget limit',
+  allowance: 'Job paused at the budget limit (stage allowance)',
+  error: 'Job paused after an error',
+  no_progress: 'Job paused: no progress between verify rounds',
+  round_cap: 'Job paused: verify round limit reached',
+  interrupted: 'Job paused: the run was stopped',
+};
+
 export function eventText(event: Milestone): string {
-  const [, title] = milestones[event.kind];
+  const title = event.kind === 'paused' ? PAUSE_TEXT[event.reason] : milestones[event.kind][1];
   const counts = (['count', 'passed', 'failed'] as const).flatMap((name) =>
     event[name] === undefined ? [] : [`${name}: ${event[name]}`]);
   const text = counts.length ? `${title} (${counts.join(', ')})` : title;
+  if (event.kind === 'spec-stopped') {
+    return `${text}. To run it again, use /anton spec retry in the project channel, or on the Mac: anton spec ${event.project} --retry`;
+  }
+  // Plain text only when no card could be built (a corrupt file, or a checkpoint queued before cards existed).
   return event.kind === 'spec-ready' || event.kind === 'delivery-ready'
-    ? `${text}. Check the CLI for current status.`
+    ? `${text}. Review it on the Mac, then run: anton approve ${event.project}`
     : text;
 }
 

@@ -43,6 +43,8 @@ export const JobStateSchema = z.object({
   completedFixAreas: z.array(z.enum(['frontend', 'backend', 'infra'])).optional(),
   /** HEAD at the last verify pass; the next review round diffs from here. */
   reviewedSha: z.string().optional(),
+  /** How many times this job has paused; numbers each pause so a decision made for one pause is stale at the next. */
+  pauses: z.number().int().min(0).optional(),
   /** How many times the final review rejected this job. */
   rejects: z.number().int().min(0).optional(),
   /** Set by the bench runner; copied into the history line. */
@@ -68,7 +70,8 @@ export class InvalidTransition extends Error {
  */
 const EDGES: Record<Stage, Stage[]> = {
   spec: ['awaiting_spec_approval', 'abandoned'],
-  awaiting_spec_approval: ['plan', 'abandoned'],
+  // Back to spec when the owner requests changes; the revised spec needs a fresh approval.
+  awaiting_spec_approval: ['plan', 'spec', 'abandoned'],
   plan: ['baseline', 'build', 'paused', 'abandoned'],
   baseline: ['build', 'paused', 'abandoned'],
   build: ['verify', 'paused', 'abandoned'],
@@ -100,7 +103,7 @@ export function transition(s: JobState, to: Stage, extra: Partial<JobState> = {}
 
 export function pause(s: JobState, reason: PauseReason): JobState {
   if (!EDGES[s.stage].includes('paused')) throw new InvalidTransition(s.stage, 'paused');
-  return { ...s, stage: 'paused', pausedFrom: s.stage, pauseReason: reason };
+  return { ...s, stage: 'paused', pausedFrom: s.stage, pauseReason: reason, pauses: (s.pauses ?? 0) + 1 };
 }
 
 export function unpause(s: JobState): JobState {

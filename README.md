@@ -190,24 +190,87 @@ To measure Caveman or Ponytail, initialize the bench and install the plugin. Tes
 4. Read the comparison for changes in delivery, checks passing, first-try pass rate, rounds, cost and cache hit rate.
 5. Keep the plugin or remove it from those roles based on the comparison.
 
-## Slack milestone updates
+## Slack team
 
-Phase 6a gives the nine Anton roles their own Slack bots. Jobs you run from the CLI can post progress to one thread per job in a private project channel. Workspace updates go to private `#anton`. The two job checkpoints still use the CLI in this phase.
+The nine Anton roles each have their own Slack bot. Every job posts progress to one thread in a private project channel, whether you started it from the CLI or from Slack. Workspace updates go to private `#anton`. The CLI keeps working the whole time, and you can switch between the two at any checkpoint.
 
 1. Use a dedicated Slack test workspace for the first setup. Copy its workspace ID and your member ID. In [Slack app settings](https://api.slack.com/apps), generate a configuration access token for that workspace.
 2. Run `anton slack setup` in a terminal. It creates the nine apps and guides you through installing each app and creating an app-level token with the `connections:write` scope. Enter tokens at the hidden prompts. You can rerun setup to resume an interrupted installation. Setup shows any app or channel ID it needs you to confirm. Rerun setup to renew a role’s credentials or rebind the workspace channel, then restart the service.
 3. Start `anton serve` in the foreground and run a small CLI job. Check that the PM and other roles post under their own names in the project thread. The service connects outward, and your job can keep running while the service is stopped.
 4. On macOS, run `anton slack service install` to start the service at login. Run `anton slack service status` to check it, or `anton slack service uninstall` to remove it. Service logs live under `~/anton/slack/logs/`.
 
+#### The LaunchAgent, Docker and the API key
+
+A LaunchAgent starts with almost no environment, so install and `anton serve` set up what job controls need:
+
+- **PATH.** `install` finds `docker` on your PATH (or in `/usr/local/bin`, `/opt/homebrew/bin` or Docker Desktop's app folder) and writes its folder, the folder of the `node` running Anton, and `/usr/bin:/bin:/usr/sbin:/sbin` into the agent's PATH. If it cannot find `docker`, install stops and says so. If you move Docker or Node later, run install again.
+- **API key.** `anton serve` uses `ANTHROPIC_API_KEY` from its environment. If that is not set, as under the LaunchAgent, it reads the macOS Keychain item `anthropic-api-key` for your user and keeps the key in memory only. Job runs and spec turns started by the service get it from there. The key is never written to the plist, a file or a log. Store it once with:
+
+  ```sh
+  security add-generic-password -a "$USER" -s anthropic-api-key -w
+  ```
+
+  (`-w` with no value prompts for the key, so it doesn't land in your shell history.)
+- **Runs outlive the service.** The agent sets `AbandonProcessGroup`, so a job run started from Slack keeps going if the service stops or restarts.
+- `anton slack service status` reports whether `docker` was found on the service PATH and whether the Keychain item exists. It never prints the key.
+
+#### Upgrading
+
+- After upgrading Anton, restart `anton serve`. If you use the LaunchAgent, reinstall it so it gets the new PATH and settings: `anton slack service uninstall`, then `anton slack service install`.
+- Existing Slack apps from the first Slack release need no new setup.
+- Install now needs `docker` on your PATH (see above).
+- A spec or delivery that was already waiting before the upgrade has no card. Its thread says to approve it on the Mac with `anton approve <project>`; do that there.
+
 Credentials live in owner-only files under `~/anton/slack/`. Pending updates stay on disk through a restart. Use `anton slack outbox` to see delivery counts and updates that need attention. If Slack restricts a channel invitation, add the owner and role apps to the private channel in Slack. When Slack cannot confirm an operation, Anton records it for review and holds later updates to that channel. Use `anton slack resolve recheck <id>` to look for the existing post again, or `anton slack resolve retry <id>` for a confirmed delivery failure. A private project channel can be verified by explicit ID with `bind-channel`. For an uncertain parent post, `confirm-thread` takes the Slack message timestamp and verifies the sender and delivery marker.
 
-Slack receives milestone summaries and a sanitized copy of the generated spec. Review the current spec and make approval decisions in the CLI. To share a QA screenshot, open it locally first, then run `anton slack share-screenshot <project> <check-id>`. Anton queues only the validated image you select. The repo and raw logs stay on your Mac.
+Slack receives milestone summaries and a sanitized copy of the generated spec. To share a QA screenshot, open it locally first, then run `anton slack share-screenshot <project> <check-id>`. Anton queues only the validated image you select. The repo and raw logs stay on your Mac.
+
+### Running jobs from Slack
+
+Only the owner set during `anton slack setup` can change a job. Everyone else gets "Only the Anton owner can do that here."
+
+- `/anton new <description>` in `#anton` starts a project. `/anton change <description>` in a project channel starts a change job.
+- The PM asks its spec questions in the job thread. Reply in the thread (number your answers when there are several). A reply that mentions another role or person (for example `@Anton QA what does AC-2 mean?`) is a question for them, not your answer. The spec waits as long as you need, with one reminder after 24 hours. If the service stops in the middle of a PM turn, the thread gets one notice; rerun the turn with `/anton spec retry` or `anton spec <project> --retry`. You can also answer in the terminal with `anton spec <project>`.
+- The spec card has **Approve spec** and **Request changes…**. The delivery card has **Approve delivery**, **Reject…** and **Accept risk…** for each open security finding. A paused job gets **Resume…** and **Abandon**, whatever paused it (budget, an error, no progress, the round limit or `anton stop`). Lesson proposals from the Coach in `#anton` get **Accept**, **Edit…** and **Reject**.
+- A card acts once. A card for an older spec, delivery or pause says it is out of date and changes nothing. A decision made in the CLI makes the matching card out of date too.
+- `/anton status`, `/anton resume [budget <usd>] [accept-as-is]`, `/anton abandon <job id>` and `/anton spec retry` work in the project channel. `/anton help` lists them.
+
+### Asking the team
+
+Mention a role bot in a project channel to ask about that project, for example `@Anton QA why is AC-2 failing?`. The bot you mention answers, privately to you, in the channel or thread.
+
+- **Status** questions ("what's the status?", "how much has it spent?") are answered from the job records. They are free.
+- **Explanations** ("how does the streak counter work?") go to Claude Haiku 5.5 with short excerpts of the spec, plan and failure report.
+- **Evidence** questions (about logs, errors, failing tests) go to Claude Sonnet 5.5 with the ends of the job logs and the failure report.
+
+Each answer is one model call with a hard output limit and no tools. The bots cannot change anything, and the excerpts come only from that project. Secret values and tokens are removed before the call and again before the answer is posted. Mentions and links are removed from both the question and the answer.
+
+Who can ask: members of the project's private channel, checked by Slack user ID on every question. Members can also run `/anton status` there. Shared (Slack Connect) channels get no answers. A question in `#anton` or in a DM gets a pointer to the right project channel, and only if you are a member of it. A question that names more than one project gets no project data.
+
+Paid answers have their own budget, separate from job budgets. Before each call, Anton reserves the most that call could cost. When the call returns, it books the reported cost instead. If the API definitely rejected the call (status 400, 401, 403, 404 or 422), nothing is booked and the service log says why. If the outcome is unknown (a crash, a network error, a rate limit or a server error), the full reservation stays booked and the call is not retried. When the month's budget cannot cover an answer, or `anton serve` has no API key (from its environment or the Keychain), you get the free status instead. Defaults, in `~/anton/config.yaml`:
+
+```yaml
+chat:
+  monthlyUsd: 5        # per UTC calendar month; 0 turns paid answers off
+  perAnswerUsd: 0.10   # an answer whose worst case is above this gets the status instead
+```
+
+The ledger is `~/anton/slack/chat-budget.json`.
+
+### Testing Slack
 
 Use `ANTON_HOME` with a separate local data directory when testing a different workspace. After setup, you can verify all nine identities with the opt-in Slack smoke test below. It creates one private channel and posts synthetic messages. You can archive the channel after checking the thread.
 
 ```sh
 ANTON_SLACK_E2E=1 ANTON_SLACK_TEST_HOME=/path/to/test-home ANTON_SLACK_TEST_TEAM_ID=your-test-workspace-id \
   npx vitest run tests/e2e/slack-service.e2e.test.ts
+```
+
+The workflow test covers both front ends with fake agents. With `ANTON_E2E=1` alone it runs against a fake workspace, for free: a Slack-started spec approved in the CLI, a CLI job approved from its Slack card, role questions, permissions, replayed deliveries and a reconnect. With the same Slack variables as above it also runs in the test workspace: the nine bots connect, membership is checked live, a card thread is posted and the service reconnects. Slack cannot send a person's clicks for a test, so those inputs are made up from the workspace's real IDs. Click a card yourself once to check the real button path. A separate opt-in makes one real paid answer (about $0.01):
+
+```sh
+ANTON_E2E=1 npx vitest run tests/e2e/slack-workflow.e2e.test.ts
+ANTON_CHAT_PAID_E2E=1 ANTHROPIC_API_KEY=... npx vitest run tests/e2e/slack-workflow.e2e.test.ts
 ```
 
 ## Where things live
@@ -269,7 +332,7 @@ The last one builds a real project end to end with the API and costs up to about
 
 ## Limits
 
-Two kits (fallback and web), CLI job controls, and optional Slack milestone updates. See the [roadmap](docs/superpowers/plans/2026-11-19-son-of-anton-roadmap.md).
+Two kits (fallback and web), job controls from the CLI and from Slack, and role Q&A in Slack. See the [roadmap](docs/superpowers/plans/2026-11-19-son-of-anton-roadmap.md).
 
 ## License
 
