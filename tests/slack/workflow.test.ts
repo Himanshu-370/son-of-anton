@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { describe, it, expect, beforeEach } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -189,6 +190,48 @@ describe('spec conversation in the job thread', () => {
     outputs.push({ kind: 'spec', spec: spec() });
     expect((await dispatchSlackAction(reply('me'), deps())).status).toBe('done');
     expect((await loadState(job.jobDir)).stage).toBe('awaiting_spec_approval');
+  });
+
+  it('posts one stopped notice for a PM turn whose process died, across sweeps', async () => {
+    const job = await project();
+    outputs.push({ kind: 'questions', questions: ['Who uses it?'] });
+    await openSlackSpec(job, specDeps());
+    // The service died mid-turn: the continuation still says running, held by a process that is gone.
+    const dead = spawnSync(process.execPath, ['-e', '']).pid!;
+    const path = join(home, 'spec-sessions', 'p', '1-init.json');
+    const saved = JSON.parse(await readFile(path, 'utf8'));
+    const claim = '00000000-0000-4000-8000-000000000001';
+    await writeFile(path, JSON.stringify({ ...saved, status: 'running', holder: { surface: 'slack', pid: dead, claim, at: 1 }, pending: { prompt: 'p', final: false } }));
+    const notices: Milestone[] = [];
+    const sweep = () => remindPendingSpecs({ home, publish: async (m) => { notices.push(m); } });
+    await sweep();
+    await sweep();
+    expect(notices).toEqual([{ scope: 'job', source: 'factory', kind: 'spec-stopped', project: 'p', jobId: '1-init', occurrence: claim }]);
+    expect(await readSpecContinuation('p', '1-init', home)).toMatchObject({ status: 'stopped', pending: { prompt: 'p' } });
+    const { eventText } = await import('../../src/slack/events.js');
+    expect(eventText(notices[0]!)).toMatch(/\/anton spec retry/);
+    expect(eventText(notices[0]!)).toContain('anton spec p --retry');
+    // The owner can still retry it.
+    outputs.push({ kind: 'spec', spec: spec() });
+    const { retrySlackSpec } = await import('../../src/slack/spec-session.js');
+    expect((await retrySlackSpec({ project: 'p', jobId: '1-init' } as never, specDeps())).status).toBe('done');
+    void job;
+  });
+
+  it('does not remind about a job that was abandoned or replaced', async () => {
+    const job = await project();
+    const t0 = Date.now();
+    outputs.push({ kind: 'questions', questions: ['Who uses it?'] });
+    await openSlackSpec(job, specDeps({ now: () => t0 }));
+    const reminders: Milestone[] = [];
+    const remind = () => remindPendingSpecs({ home, now: () => t0 + SPEC_REMINDER_MS + 1, publish: async (m) => { reminders.push(m); } });
+    await saveState(job.jobDir, { ...(await loadState(job.jobDir)), stage: 'abandoned' });
+    await remind();
+    expect(reminders).toHaveLength(0);
+    await saveState(job.jobDir, { ...(await loadState(job.jobDir)), stage: 'spec' });
+    await project('p', {}, '2-next');
+    await remind();
+    expect(reminders).toHaveLength(0);
   });
 
   it('lets exactly one of two competing answers (Slack vs Slack, Slack vs CLI) reach the PM', async () => {

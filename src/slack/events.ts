@@ -49,7 +49,7 @@ const milestones = {
   'spec-ready': ['pm', 'Spec was prepared for approval'],
   'spec-questions': ['pm', 'The PM has questions about the spec'],
   'spec-reminder': ['pm', 'Reminder: the PM is still waiting for your answers'],
-  'spec-stopped': ['pm', 'The PM turn stopped. Nothing was repeated; check the CLI'],
+  'spec-stopped': ['pm', 'The PM turn stopped before it finished. Nothing was repeated'],
   'plan-ready': ['tech_lead', 'Build plan ready'],
   'build-handoff': [null, 'Build handoff complete'],
   'checks-complete': ['qa', 'Verification checks complete'],
@@ -84,6 +84,9 @@ export function eventText(event: Milestone): string {
   const counts = (['count', 'passed', 'failed'] as const).flatMap((name) =>
     event[name] === undefined ? [] : [`${name}: ${event[name]}`]);
   const text = counts.length ? `${title} (${counts.join(', ')})` : title;
+  if (event.kind === 'spec-stopped') {
+    return `${text}. To run it again, use /anton spec retry in the project channel, or on the Mac: anton spec ${event.project} --retry`;
+  }
   return event.kind === 'spec-ready' || event.kind === 'delivery-ready'
     ? `${text}. Check the CLI for current status.`
     : text;

@@ -2,13 +2,13 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { commitAll } from '../core/git.js';
-import { createChangeJob, createNewProject } from '../core/job.js';
+import { createChangeJob, createNewProject, currentJobId } from '../core/job.js';
 import { checkpointRevision, loadJob, preflightOr2, reopenSpec, type ActionTarget } from '../core/job-actions.js';
 import { antonHome, jobDir as jobDirOf } from '../core/paths.js';
 import { getProject } from '../core/registry.js';
 import { loadSecrets } from '../core/secrets.js';
 import {
-  claimSpecRound, holderAlive, listSpecContinuations, markReminded, readSpecContinuation, runClaimedRound, runSpecRound,
+  claimSpecRound, holderAlive, listSpecContinuations, markReminded, markTurnStopped, readSpecContinuation, runClaimedRound, runSpecRound,
   SPEC_REMINDER_MS, specStatus, type SpecJob, type SpecRoundDeps, type SpecRoundResult,
 } from '../core/spec-continuation.js';
 import { loadState } from '../core/state.js';
@@ -18,6 +18,7 @@ import { SpecDocBaseSchema } from '../stages/spec.js';
 import type { ActionResult, NewCard, SlackSpecDeps } from './actions.js';
 import { readCheckedFile } from './artifacts.js';
 import type { SlackConfig } from './config.js';
+import { registeredProjects } from './reconcile.js';
 import { lessonOccurrenceJob, PAUSE_TEXT, publishMilestone, type Milestone } from './events.js';
 import { renderReview, type ReviewButton, type SlackBlock } from './views.js';
 
@@ -124,9 +125,22 @@ export function parseThreadAnswers(text: string, count: number): string[] | unde
   return answers.length === count && answers.every((a) => a.trim()) ? answers.map((a) => a.trim()) : undefined;
 }
 
+/** Whether a continuation's job is still its project's current job and still at the spec stage. */
+async function stillAtSpec(project: string, jobId: string, home: string): Promise<boolean> {
+  try {
+    const entry = (await registeredProjects(home)).find((p) => p.name === project);
+    if (!entry || (await currentJobId(entry.repoPath)) !== jobId) return false;
+    return (await loadState(jobDirOf(entry.repoPath, jobId))).stage === 'spec';
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Exactly one reminder per waiting round, 24 hours after the questions. Nothing expires. Restart-safe: the
- * flag is on disk and the outbox ignores a repeat of the same occurrence.
+ * The spec sweep. Exactly one reminder per waiting round, 24 hours after the questions; nothing expires.
+ * A PM turn whose process died (a restart or crash) gets one stopped notice that says how to retry.
+ * Only a job that is still current and at the spec stage is followed up. Restart-safe: the flags are on
+ * disk and the outbox ignores a repeat of the same occurrence.
  */
 export async function remindPendingSpecs(deps: { home?: string; now?: () => number; publish?: (m: Milestone) => Promise<void> } = {}): Promise<number> {
   const home = deps.home ?? antonHome();
@@ -134,10 +148,18 @@ export async function remindPendingSpecs(deps: { home?: string; now?: () => numb
   const publish = deps.publish ?? ((m: Milestone) => publishMilestone(m, { home }));
   let sent = 0;
   for (const c of await listSpecContinuations(home)) {
+    const job = { scope: 'job', source: 'factory', project: c.project, jobId: c.jobId } as const;
+    if (c.status === 'running' && c.holder && specStatus(c) === 'stopped') {
+      if (!(await stillAtSpec(c.project, c.jobId, home))) continue;
+      // Publish first: a crash before the mark repeats the same occurrence, which the outbox drops.
+      await publish({ ...job, kind: 'spec-stopped', occurrence: c.holder.claim });
+      if (await markTurnStopped(c.project, c.jobId, c.holder.claim, home)) sent++;
+      continue;
+    }
     if (specStatus(c) !== 'awaiting' || c.reminded || c.askedAt === undefined || now - c.askedAt < SPEC_REMINDER_MS) continue;
     if (holderAlive(c.holder)) continue; // the terminal is asking right now
-    const event: Milestone = { scope: 'job', source: 'factory', kind: 'spec-reminder', project: c.project, jobId: c.jobId, occurrence: `round-${c.round}` };
-    await publish(event);
+    if (!(await stillAtSpec(c.project, c.jobId, home))) continue;
+    await publish({ ...job, kind: 'spec-reminder', occurrence: `round-${c.round}` });
     if (await markReminded(c.project, c.jobId, c.round, home)) sent++;
   }
   return sent;

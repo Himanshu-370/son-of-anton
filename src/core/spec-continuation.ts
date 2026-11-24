@@ -143,6 +143,18 @@ export async function markReminded(project: string, jobId: string, round: number
   });
 }
 
+/**
+ * A turn whose process died (a serve restart or crash): record it as stopped, keeping its pending prompt
+ * for an explicit retry. True only for the caller that records it, so the notice goes out once.
+ */
+export async function markTurnStopped(project: string, jobId: string, claim: string, home = antonHome()): Promise<boolean> {
+  return withContinuation(project, jobId, home, async (c) => {
+    if (!c || c.status !== 'running' || c.holder?.claim !== claim || holderAlive(c.holder)) return false;
+    await save({ ...c, status: 'stopped', holder: undefined, stopReason: 'the process running the PM turn ended before it finished' }, home);
+    return true;
+  });
+}
+
 export type SpecJob = { project: string; repoPath: string; jobId: string; jobDir: string; description: string; mode: 'new' | 'change' };
 export type SpecRoundInput =
   | { kind: 'start' }
