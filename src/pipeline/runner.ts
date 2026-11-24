@@ -257,6 +257,9 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
         }
       }
       log(`stopped at stage: ${state.stage}`);
+      if (state.stage === 'paused' && state.pauseReason) {
+        await publishJobMilestone(state, { kind: 'paused', occurrence: `paused-${state.pauses ?? 0}`, reason: state.pauseReason }, deps.publishMilestone);
+      }
       if (!bench) {
         if (state.stage === 'paused') final = pauseMessage(project, state.pauseReason, await failureKinds(jobDir));
         else if (state.stage === 'awaiting_final_review') {
@@ -277,11 +280,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       if (ACTIVE_STAGES.includes(latest.stage)) {
         const paused = pause(latest, reason);
         await saveState(jobDir, paused);
-        if (reason === 'budget_cap' || reason === 'allowance') {
-          await publishJobMilestone(paused, {
-            kind: 'budget-paused', occurrence: `paused-${paused.pauses ?? 0}`,
-          }, deps.publishMilestone);
-        }
+        await publishJobMilestone(paused, { kind: 'paused', occurrence: `paused-${paused.pauses ?? 0}`, reason }, deps.publishMilestone);
         if (!bench) final = e instanceof AllowanceExceeded ? allowanceHint(project, e.group, e.spentUsd, e.limitUsd) : pauseMessage(project, reason);
       }
     }

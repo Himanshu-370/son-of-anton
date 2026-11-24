@@ -349,6 +349,23 @@ describe('anton stop', () => {
   });
 });
 
+describe('anton stop (Slack)', () => {
+  it('queues a paused card for the interrupted job when Slack is set up', async () => {
+    const { writeSlackFile } = await import('../../src/slack/config.js');
+    const { inspectOutbox } = await import('../../src/slack/outbox.js');
+    const roles = Object.fromEntries(['pm', 'tech_lead', 'frontend', 'backend', 'infra', 'qa', 'code_reviewer', 'security_reviewer', 'coach']
+      .map((role, i) => [role, { appId: `A0FAKE${i}`, botUserId: `U0BOT${i}` }]));
+    const config = { teamId: 'T0FAKE', ownerId: 'U0OWNER', channelId: 'C0ANTON', roles };
+    await writeSlackFile(home, 'config.json', config);
+    await project('p', { stage: 'build', round: 1 });
+    expect(await stopCommand('p', harness().deps)).toBe(0);
+    const { entries } = await inspectOutbox({ config: config as never, home });
+    expect(entries.map((e) => e.event)).toContainEqual(expect.objectContaining({
+      kind: 'paused', project: 'p', jobId: '1-init', occurrence: 'paused-1', reason: 'interrupted',
+    }));
+  });
+});
+
 describe('anton stop (lock cleanup)', () => {
   const lockFile = (repo: string) => join(repo, '.anton', 'run.lock');
   function killer(onKill?: () => void) {

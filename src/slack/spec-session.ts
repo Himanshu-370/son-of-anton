@@ -18,7 +18,7 @@ import { SpecDocBaseSchema } from '../stages/spec.js';
 import type { ActionResult, NewCard, SlackSpecDeps } from './actions.js';
 import { readCheckedFile } from './artifacts.js';
 import type { SlackConfig } from './config.js';
-import { lessonOccurrenceJob, publishMilestone, type Milestone } from './events.js';
+import { lessonOccurrenceJob, PAUSE_TEXT, publishMilestone, type Milestone } from './events.js';
 import { renderReview, type ReviewButton, type SlackBlock } from './views.js';
 
 /*
@@ -237,7 +237,10 @@ export async function composeSlackMessage(event: Milestone, deps: ComposeDeps): 
     });
     return { ...view, cards: tokens };
   }
-  if (event.scope === 'job' && event.kind === 'budget-paused') {
+  if (event.scope === 'job' && (event.kind === 'paused' || event.kind === 'budget-paused')) {
+    // `budget-paused` is the pre-upgrade form of a budget pause still waiting in a queue.
+    const reason = event.kind === 'paused' ? event.reason : 'budget_cap';
+    const budget = reason === 'budget_cap' || reason === 'allowance';
     // Bound to this pause: a card from an earlier pause is stale at a later one.
     const revision = /^paused-\d{1,15}$/.test(event.occurrence) ? event.occurrence : (await checkpointRevision(await loadJob(event.project))) ?? 'paused-0';
     const target = { project: event.project, jobId: event.jobId, stage: 'paused' as const, revision };
@@ -246,7 +249,9 @@ export async function composeSlackMessage(event: Milestone, deps: ComposeDeps): 
       await card({ kind: 'abandon', role: 'pm', target }, 'Abandon', 'danger', 'This abandons the job. It cannot be resumed.'),
     ];
     const view = renderReview({ kind: 'paused', project: event.project, jobId: event.jobId }, {
-      mention, title: 'Job paused at the budget limit', lines: ['Resume with a higher budget, or abandon the job.'], buttons,
+      mention, title: PAUSE_TEXT[reason],
+      lines: [budget ? 'Resume with a higher budget, or abandon the job.' : 'Check the job on the Mac (anton status), then resume or abandon it.'],
+      buttons,
     });
     return { ...view, cards: tokens };
   }

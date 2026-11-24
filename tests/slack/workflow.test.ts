@@ -478,6 +478,34 @@ describe('posting cards and opening modals', () => {
     expect(spawned).toEqual(['p']);
   });
 
+  it('posts a card for every pause reason; a card from an earlier pause is stale at the next one', async () => {
+    const job = await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'error', pauses: 1 });
+    const cardFor = async (event: Milestone, ts: string) => {
+      const m = await composeSlackMessage(event, { config, home, channelId: PROJECT_CHANNEL });
+      for (const t of m?.cards ?? []) await attachCardMessage(t, PROJECT_CHANNEL, ts, { home });
+      const buttons = (m?.blocks as { elements?: { value: string; text: { text: string } }[] }[] | undefined ?? []).flatMap((b) => b.elements ?? []);
+      const find = (label: string) => ({ token: buttons.find((b) => b.text.text.startsWith(label))!.value, channelId: PROJECT_CHANNEL, ts });
+      return { text: m?.text ?? '', resume: find('Resume'), abandon: find('Abandon') };
+    };
+    const paused = (reason: string, n: number) =>
+      ({ scope: 'job', source: 'factory', kind: 'paused', project: 'p', jobId: '1-init', occurrence: `paused-${n}`, reason }) as Milestone;
+    const first = await cardFor(paused('error', 1), '1700000200.000001');
+    expect(first.text).toMatch(/error/i);
+    expect(first.text).not.toMatch(/budget limit/);
+
+    // Resumed, then paused again for no progress: the first card no longer acts.
+    await saveState(job.jobDir, { ...(await loadState(job.jobDir)), pauseReason: 'no_progress', pauses: 2 });
+    const second = await cardFor(paused('no_progress', 2), '1700000200.000002');
+    expect(second.text).toMatch(/no progress/i);
+    expect((await dispatchSlackAction(press(first.abandon, 'pm', 'card:T0FAKE:pz1'), deps())).status).toBe('stale');
+    expect((await loadState(job.jobDir)).stage).toBe('paused');
+    expect((await dispatchSlackAction(press(second.resume, 'pm', 'card:T0FAKE:pz2', { budgetUsd: 20 }), deps())).status).toBe('done');
+    expect(spawned).toEqual(['p']);
+
+    const budget = await composeSlackMessage(paused('budget_cap', 3), { config, home, channelId: PROJECT_CHANNEL });
+    expect(budget?.text).toContain('budget limit');
+  });
+
   it('opens the modal from the click without dispatching; the submission dispatches once', async () => {
     const { createInboundHandler } = await import('../../src/slack/inbound.js');
     const dispatched: SlackAction[] = [];

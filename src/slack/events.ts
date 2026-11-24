@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { SlackConfig, SlackRole } from './config.js';
 import { antonHome } from '../core/paths.js';
+import { PAUSE_REASONS, type PauseReason } from '../core/state.js';
 
 export { specRevision } from './artifacts.js';
 
@@ -26,6 +27,8 @@ export const MilestoneSchema = z.discriminatedUnion('kind', [
   z.strictObject({ ...job, kind: z.literal('build-handoff'), occurrence, role: z.enum(['frontend', 'backend', 'infra']) }),
   z.strictObject({ ...job, kind: z.enum(['spec-questions', 'spec-reminder']), occurrence: z.string().regex(/^round-[1-9]\d{0,5}$/) }),
   z.strictObject({ ...job, kind: z.literal('spec-stopped'), occurrence: z.string().uuid() }),
+  // One per pause, whatever its reason: the occurrence is the pause number the card is bound to.
+  z.strictObject({ ...job, kind: z.literal('paused'), occurrence: z.string().regex(/^paused-\d{1,15}$/), reason: z.enum(PAUSE_REASONS) }),
   z.strictObject({
     ...job, occurrence,
     kind: z.enum(['plan-ready', 'checks-complete', 'code-review-complete', 'security-review-complete', 'budget-warning', 'budget-paused']),
@@ -56,6 +59,7 @@ const milestones = {
   'security-review-complete': ['security_reviewer', 'Security review complete'],
   'budget-warning': ['pm', 'Budget warning'],
   'budget-paused': ['pm', 'Job paused at the budget limit'],
+  paused: ['pm', 'Job paused'],
   'lesson-proposed': ['coach', 'Lesson proposed'],
   'bench-summary': ['pm', 'Benchmark summary'],
   'plugin-updated': ['pm', 'Plugin configuration updated'],
@@ -65,8 +69,18 @@ export function eventRole(event: Milestone): SlackRole {
   return event.kind === 'build-handoff' ? event.role : milestones[event.kind][0];
 }
 
+/** Fixed wording per pause reason; nothing from the job's error text reaches Slack. */
+export const PAUSE_TEXT: Record<PauseReason, string> = {
+  budget_cap: 'Job paused at the budget limit',
+  allowance: 'Job paused at the budget limit (stage allowance)',
+  error: 'Job paused after an error',
+  no_progress: 'Job paused: no progress between verify rounds',
+  round_cap: 'Job paused: verify round limit reached',
+  interrupted: 'Job paused: the run was stopped',
+};
+
 export function eventText(event: Milestone): string {
-  const [, title] = milestones[event.kind];
+  const title = event.kind === 'paused' ? PAUSE_TEXT[event.reason] : milestones[event.kind][1];
   const counts = (['count', 'passed', 'failed'] as const).flatMap((name) =>
     event[name] === undefined ? [] : [`${name}: ${event[name]}`]);
   const text = counts.length ? `${title} (${counts.join(', ')})` : title;
