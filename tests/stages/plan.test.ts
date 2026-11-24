@@ -120,6 +120,11 @@ describe('serve and url', () => {
   it('fallback plan without serve is fine', async () => {
     await expect(runPlan(ctx, spec, { runAgent: run({ commands, tasks }) })).resolves.toBeDefined();
   });
+  it('fallback plan that sets url without serve drops both instead of failing', async () => {
+    const { plan } = await runPlan(ctx, spec, { runAgent: run({ commands: { ...commands, run: 'npm start', url: 'http://localhost:8080/' }, tasks }) });
+    expect(plan.commands).toEqual({ ...commands, run: 'npm start' });
+    expect(await readFile(join(ctx.jobDir, 'plan.md'), 'utf8')).not.toContain('url:');
+  });
   it('plan.md renders serve and url', async () => {
     await runPlan(ctx, webSpec, { runAgent: run({ commands: serveCmds, tasks }) });
     const md = await readFile(join(ctx.jobDir, 'plan.md'), 'utf8');

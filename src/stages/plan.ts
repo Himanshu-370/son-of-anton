@@ -92,7 +92,13 @@ export async function runPlan(
     budgetUsd: remainingUsd(ctx.state),
   };
   const res = await run(ctx, req);
-  const plan = PlanSchema.parse(res.output);
+  let output = res.output as { commands?: Record<string, unknown> } | undefined;
+  // serve/url only matter to the web kit; a stray url in another kit's plan must not fail a paid planning call.
+  if (spec.kit !== 'web' && output?.commands && typeof output.commands === 'object') {
+    const { serve: _serve, url: _url, ...rest } = output.commands;
+    output = { ...output, commands: rest };
+  }
+  const plan = PlanSchema.parse(output);
   if (spec.kit === 'web' && !plan.commands.serve) throw new PlanInvalid('Web kit plans must set commands.serve and commands.url');
   validatePlanCoverage(plan, spec.acceptanceChecks.map((c) => c.id));
   validatePlanAreas(plan);
