@@ -87,8 +87,9 @@ export function eventText(event: Milestone): string {
   if (event.kind === 'spec-stopped') {
     return `${text}. To run it again, use /anton spec retry in the project channel, or on the Mac: anton spec ${event.project} --retry`;
   }
+  // Plain text only when no card could be built (a corrupt file, or a checkpoint queued before cards existed).
   return event.kind === 'spec-ready' || event.kind === 'delivery-ready'
-    ? `${text}. Check the CLI for current status.`
+    ? `${text}. Review it on the Mac, then run: anton approve ${event.project}`
     : text;
 }
 
