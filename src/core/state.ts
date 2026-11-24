@@ -68,7 +68,8 @@ export class InvalidTransition extends Error {
  */
 const EDGES: Record<Stage, Stage[]> = {
   spec: ['awaiting_spec_approval', 'abandoned'],
-  awaiting_spec_approval: ['plan', 'abandoned'],
+  // Back to spec when the owner requests changes; the revised spec needs a fresh approval.
+  awaiting_spec_approval: ['plan', 'spec', 'abandoned'],
   plan: ['baseline', 'build', 'paused', 'abandoned'],
   baseline: ['build', 'paused', 'abandoned'],
   build: ['verify', 'paused', 'abandoned'],

@@ -24,6 +24,8 @@ export const MilestoneSchema = z.discriminatedUnion('kind', [
     checkId, sha256: digest,
   }).refine(({ occurrence, checkId, sha256 }) => occurrence === `${checkId}:${sha256}`),
   z.strictObject({ ...job, kind: z.literal('build-handoff'), occurrence, role: z.enum(['frontend', 'backend', 'infra']) }),
+  z.strictObject({ ...job, kind: z.enum(['spec-questions', 'spec-reminder']), occurrence: z.string().regex(/^round-[1-9]\d{0,5}$/) }),
+  z.strictObject({ ...job, kind: z.literal('spec-stopped'), occurrence: z.string().uuid() }),
   z.strictObject({
     ...job, occurrence,
     kind: z.enum(['plan-ready', 'checks-complete', 'code-review-complete', 'security-review-complete', 'budget-warning', 'budget-paused']),
@@ -35,6 +37,9 @@ export type Milestone = z.infer<typeof MilestoneSchema>;
 
 const milestones = {
   'spec-ready': ['pm', 'Spec was prepared for approval'],
+  'spec-questions': ['pm', 'The PM has questions about the spec'],
+  'spec-reminder': ['pm', 'Reminder: the PM is still waiting for your answers'],
+  'spec-stopped': ['pm', 'The PM turn stopped. Nothing was repeated; check the CLI'],
   'plan-ready': ['tech_lead', 'Build plan ready'],
   'build-handoff': [null, 'Build handoff complete'],
   'checks-complete': ['qa', 'Verification checks complete'],

@@ -125,6 +125,41 @@ async function mismatch(fresh: LoadedJob, target: ActionTarget, deps: JobActionD
   return undefined;
 }
 
+/** Run `body` under the project's decision lock (the spec session's own transitions). */
+export async function withDecisionLock<T>(project: string, body: (fresh: LoadedJob) => Promise<T>, lockWaitMs?: number): Promise<T> {
+  return underDecisionLock({ project, jobId: '', stage: 'spec' }, { lockWaitMs } as JobActionDeps, {}, body);
+}
+
+/**
+ * Request changes at spec approval: under the lock, check the exact spec the owner saw and move the job back to
+ * `spec`. `claim` runs inside the lock too (the spec continuation's round claim); its refusal leaves the job as it was.
+ */
+export async function reopenSpec<T>(
+  target: ActionTarget,
+  d: Pick<JobActionDeps, 'err' | 'listTags' | 'lockWaitMs'>,
+  claim: (job: LoadedJob) => Promise<T>,
+): Promise<{ outcome: ActionOutcome; claimed?: T; job?: LoadedJob }> {
+  const nothing = 'Nothing to revise';
+  const deps = d as JobActionDeps;
+  const pre = await loadJob(target.project);
+  if (await staleBeforeLock(pre, target, deps, nothing)) return { outcome: stale };
+  return underDecisionLock(target, deps, {}, async (job) => {
+    const why = await mismatch(job, target, deps);
+    if (why) {
+      d.err(staleMessage(job, target, why, nothing));
+      return { outcome: stale };
+    }
+    if (job.state.stage !== 'awaiting_spec_approval') {
+      d.err(`${nothing} (stage: ${job.state.stage})`);
+      return { outcome: refused() };
+    }
+    await assertOnJobBranch(job.repo, job.state);
+    const claimed = await claim(job);
+    await saveState(job.jobDir, transition(job.state, 'spec'));
+    return { outcome: done, claimed, job };
+  });
+}
+
 /** Fast pre-lock check: a target that has already moved is stale before any slow work. */
 async function staleBeforeLock(pre: LoadedJob, target: ActionTarget, d: JobActionDeps, nothing: string): Promise<boolean> {
   const why = await mismatch(pre, target, d);
