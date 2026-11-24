@@ -1,3 +1,4 @@
+import { KEYCHAIN_SERVICE } from '../../core/api-key.js';
 import { antonHome } from '../../core/paths.js';
 import { SLACK_ROLES, loadSlackConfig, loadSlackCredentials } from '../../slack/config.js';
 import { drainOutbox, inspectOutbox, resolveOutboxEntry, type OutboxResolution } from '../../slack/outbox.js';
@@ -40,6 +41,13 @@ export function retroCollector(collect: () => Promise<unknown>, opts: { interval
 export async function serveCommand(deps: CliDeps = {}): Promise<number> {
   const d = resolveDeps(deps);
   return guard(d, async () => {
+    // A LaunchAgent starts with an empty environment: the key comes from the Keychain, held in this
+    // process's environment only, so job runs and spec turns spawned from here inherit it.
+    const source = await d.ensureApiKey();
+    if (source === 'keychain') d.out('Anthropic API key: loaded from the macOS Keychain.');
+    else if (!source) {
+      d.err(`No Anthropic API key in the environment or the macOS Keychain (service ${KEYCHAIN_SERVICE}). Slack job controls and paid answers will not work.`);
+    }
     const home = antonHome();
     const config = await loadSlackConfig(home);
     const credentials = config && await loadSlackCredentials(home);
