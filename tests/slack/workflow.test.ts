@@ -445,3 +445,66 @@ describe('views', () => {
     expect(m?.text).toContain('2. Second?');
   });
 });
+
+describe('posting cards and opening modals', () => {
+  it('posts a budget-paused card through the outbox and binds its buttons to the posted message', async () => {
+    await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'budget_cap', spentUsd: 10 });
+    const { enqueueMilestone, drainOutbox } = await import('../../src/slack/outbox.js');
+    await enqueueMilestone({ scope: 'job', source: 'factory', kind: 'budget-paused', project: 'p', jobId: '1-init', occurrence: 'pause1' }, { config, home });
+    let ts = 0;
+    const posted: { channelId: string; blocks?: unknown[]; threadTs?: string }[] = [];
+    const transport = {
+      createProjectChannel: async () => ({ channelId: PROJECT_CHANNEL }),
+      postMessage: async (r: { channelId: string; blocks?: unknown[]; threadTs?: string }) => { posted.push(r); return { ts: `1700000100.00000${++ts}` }; },
+      lookupMarker: async () => ({ status: 'unavailable' as const }),
+    };
+    const { composeSlackMessage: compose } = await import('../../src/slack/spec-session.js');
+    for (let i = 0; i < 4; i++) {
+      await drainOutbox({
+        home, config, transport: transport as never, now: () => Date.now() + i * 10_000,
+        compose: (event, channelId) => compose(event, { config, home, channelId }),
+        attachCards: async (tokens, channelId, at) => { for (const t of tokens) await attachCardMessage(t, channelId, at, { home }); },
+      });
+    }
+    const card = posted.find((p) => p.blocks?.length);
+    expect(card).toBeDefined();
+    const buttons = (card!.blocks as { elements?: { value: string; text: { text: string } }[] }[]).flatMap((b) => b.elements ?? []);
+    const resume = buttons.find((b) => b.text.text.startsWith('Resume'))!;
+    const msgTs = `1700000100.00000${posted.indexOf(card!) + 1}`;
+    const c = { token: resume.value, channelId: PROJECT_CHANNEL, ts: msgTs };
+    const decision = await prepareCardModal(press(c, 'pm', 'card:T0FAKE:pc1') as Extract<SlackAction, { via: 'card' }>, deps());
+    expect(decision.kind).toBe('modal');
+    expect((await dispatchSlackAction(press(c, 'pm', 'card:T0FAKE:pc2', { budgetUsd: 20 }), deps())).status).toBe('done');
+    expect(spawned).toEqual(['p']);
+  });
+
+  it('opens the modal from the click without dispatching; the submission dispatches once', async () => {
+    const { createInboundHandler } = await import('../../src/slack/inbound.js');
+    const dispatched: SlackAction[] = [];
+    const opened: string[] = [];
+    const h = createInboundHandler({
+      dispatch: async (a) => { dispatched.push(a); return { status: 'done', lines: ['ok'] }; },
+      prepareModal: async () => ({ kind: 'modal', view: cardModal('reject', { token: 'd'.repeat(32), channelId: PROJECT_CHANNEL, messageTs: '1700000000.000100' }) }),
+    });
+    const click = {
+      type: 'block_actions', team: { id: 'T0FAKE' }, user: { id: 'U0OWNER' }, api_app_id: QA_APP, channel: { id: PROJECT_CHANNEL },
+      container: { message_ts: '1700000000.000100' }, trigger_id: '123.456.abc',
+      actions: [{ action_id: 'anton_1', value: 'd'.repeat(32), action_ts: '1700000000.000200' }],
+    };
+    let acked = 0;
+    await h.action(click, 'qa', async () => { acked++; }, async () => undefined, async (trigger) => { opened.push(trigger); });
+    await h.idle();
+    expect(acked).toBe(1);
+    expect(opened).toEqual(['123.456.abc']);
+    expect(dispatched).toHaveLength(0);
+    const view = cardModal('reject', { token: 'd'.repeat(32), channelId: PROJECT_CHANNEL, messageTs: '1700000000.000100' });
+    const notes: string[] = [];
+    await h.view({
+      type: 'view_submission', team: { id: 'T0FAKE' }, user: { id: 'U0OWNER' }, api_app_id: QA_APP,
+      view: { id: 'V0FAKE2', callback_id: view.callback_id, private_metadata: view.private_metadata, state: { values: { notes: { notes: { value: 'Fix' } } } } },
+    }, 'qa', async () => undefined, () => async (text) => { notes.push(text); });
+    await h.idle();
+    expect(dispatched).toHaveLength(1);
+    expect(notes).toEqual(['ok']);
+  });
+});

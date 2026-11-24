@@ -2,7 +2,9 @@ import { antonHome } from '../../core/paths.js';
 import { SLACK_ROLES, loadSlackConfig, loadSlackCredentials } from '../../slack/config.js';
 import { drainOutbox, inspectOutbox, resolveOutboxEntry, type OutboxResolution } from '../../slack/outbox.js';
 import { reconcileCheckpoints } from '../../slack/reconcile.js';
-import { dispatchSlackAction } from '../../slack/actions.js';
+import { attachCardMessage, dispatchSlackAction, prepareCardModal, type DispatchDeps } from '../../slack/actions.js';
+import { composeSlackMessage, remindPendingSpecs } from '../../slack/spec-session.js';
+import { collectRetros } from '../../retro/run.js';
 import { createInboundHandler } from '../../slack/inbound.js';
 import { startSlackService } from '../../slack/service.js';
 import { createSlackRuntime } from '../../slack/transport.js';
@@ -19,28 +21,49 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
       return 1;
     }
     // Slack orders run the same job actions as the CLI, in this process, with its effects.
+    // Spec turns (the PM in Docker) run here too, with the same effects as anton new and anton spec.
+    const dispatchDeps: DispatchDeps = {
+      config, home,
+      jobs: { preflight: d.preflight, spawnRun: d.spawnRun, stopContainer: d.stopContainer, retro: d.retro },
+      spec: {
+        home, preflight: d.preflight, ensureImage: d.ensureImage, startContainer: d.startContainer, stopContainer: d.stopContainer,
+        runAgent: d.runAgent, ensureRepoMap: d.ensureRepoMap, listFiles: d.listFiles, readHistory: d.readHistory,
+      },
+    };
     const inbound = createInboundHandler({
       log: d.out,
-      dispatch: (action) => dispatchSlackAction(action, {
-        config, home,
-        jobs: { preflight: d.preflight, spawnRun: d.spawnRun, stopContainer: d.stopContainer, retro: d.retro },
-      }),
+      dispatch: (action) => dispatchSlackAction(action, dispatchDeps),
+      prepareModal: (action) => prepareCardModal(action, dispatchDeps),
     });
     const runtime = createSlackRuntime(config, credentials, inbound);
     let reconcileAt = 0;
+    let retrosAt = 0;
     const service = await startSlackService({
       home, roles: SLACK_ROLES, open: runtime.open, log: d.out,
       async drain(connected, signal, canDeliver) {
         if (signal.aborted) return;
         if (Date.now() >= reconcileAt) {
           await reconcileCheckpoints({ home, loadConfig: async () => config });
+          await remindPendingSpecs({ home }).catch(() => undefined);
           reconcileAt = Date.now() + 60_000;
+        }
+        if (Date.now() >= retrosAt) {
+          // Finished Retros queue their proposals here, so the coach can post lesson cards without the CLI.
+          // Collecting reads submitted batches; it starts no new model call.
+          retrosAt = Date.now() + 15 * 60_000;
+          await collectRetros({ ...d.retro, out: () => undefined }).catch(() => undefined);
         }
         if (!connected.size) return;
         await drainOutbox({
           home, config, signal,
           canDeliver,
           transport: runtime.transport(signal),
+          compose: (event, channelId) => composeSlackMessage(event, { config, home, channelId }),
+          attachCards: async (tokens, channelId, ts) => {
+            for (const token of tokens) {
+              if (!(await attachCardMessage(token, channelId, ts, { home }))) throw new Error('card binding failed');
+            }
+          },
         });
       },
     });

@@ -35,6 +35,13 @@ export const MilestoneSchema = z.discriminatedUnion('kind', [
 
 export type Milestone = z.infer<typeof MilestoneSchema>;
 
+/** A Retro's lesson-proposed occurrence names its job; the coach card lists that job's queued proposals. */
+export const lessonOccurrence = (project: string, jobId: string) => `${project}:${jobId}`;
+export function lessonOccurrenceJob(occurrence: string): { project: string; jobId: string } | undefined {
+  const [project, jobId, ...rest] = occurrence.split(':');
+  return project && jobId && !rest.length && projectId.safeParse(project).success && jobId.length <= 72 ? { project, jobId } : undefined;
+}
+
 const milestones = {
   'spec-ready': ['pm', 'Spec was prepared for approval'],
   'spec-questions': ['pm', 'The PM has questions about the spec'],

@@ -18,7 +18,7 @@ import { SpecDocBaseSchema } from '../stages/spec.js';
 import type { ActionResult, NewCard, SlackSpecDeps } from './actions.js';
 import { readCheckedFile } from './artifacts.js';
 import type { SlackConfig } from './config.js';
-import { publishMilestone, type Milestone } from './events.js';
+import { lessonOccurrenceJob, publishMilestone, type Milestone } from './events.js';
 import { renderReview, type ReviewButton, type SlackBlock } from './views.js';
 
 /*
@@ -249,7 +249,8 @@ export async function composeSlackMessage(event: Milestone, deps: ComposeDeps): 
     return { ...view, cards: tokens };
   }
   if (event.scope === 'workspace' && event.kind === 'lesson-proposed') {
-    const [project, jobId] = event.occurrence.split(':');
+    const { project, jobId } = lessonOccurrenceJob(event.occurrence) ?? {};
+    if (!project) return undefined;
     const proposals = (await readProposals(home)).filter((p) => p.project === project && p.jobId === jobId).slice(0, 7);
     if (!proposals.length) return undefined;
     const sections = [];
@@ -262,7 +263,7 @@ export async function composeSlackMessage(event: Milestone, deps: ComposeDeps): 
       sections.push({ text: `${what}\nWhy: ${p.why}`, buttons });
     }
     const view = renderReview({ kind: 'lessons' }, {
-      mention, title: `The coach proposes ${proposals.length} lesson(s) from ${project ?? 'a job'}`,
+      mention, title: `The coach proposes ${proposals.length} lesson(s) from ${project}`,
       lines: ['Retro output is untrusted until you accept it.'], sections,
     });
     return { ...view, cards: tokens };

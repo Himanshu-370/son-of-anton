@@ -5,6 +5,8 @@ import { OutboxDeliveryError, type OutboxMessageRequest, type OutboxTransport } 
 import type { RoleConnection } from './service.js';
 import type { InboundHandler } from './inbound.js';
 import { slackSetupApi } from './setup-api.js';
+import type { SlackAction } from './actions.js';
+import { MODAL_CALLBACK } from './views.js';
 
 const quiet: Logger = {
   debug() {}, info() {}, warn() {}, error() {}, setLevel() {}, setName() {},
@@ -104,6 +106,7 @@ export function createSlackTransport(config: SlackConfig, deps: TransportDeps): 
         channel: request.channelId,
         ...(request.threadTs ? { thread_ts: request.threadTs } : {}),
         text: request.text,
+        ...(request.blocks?.length ? { blocks: request.blocks as never } : {}),
         mrkdwn: false,
         unfurl_links: request.unfurlLinks,
         unfurl_media: request.unfurlMedia,
@@ -193,11 +196,23 @@ export function createSlackRuntime(config: SlackConfig, credentials: SlackCreden
       if (role === 'pm') app.command('/anton', async ({ ack, body, respond }) => {
         await inbound.command(body, role, (reply) => ack(reply), (reply) => respond(reply));
       });
-      if (INTERACTIVE.includes(role)) app.action(/.*/, async ({ ack, body, respond }) => {
-        await inbound.action(body, role, () => ack(), (reply) => respond(reply));
-      });
-      app.event('message', async ({ body }) => { await inbound.event(body, role); });
-      app.event('app_mention', async ({ body }) => { await inbound.event(body, role); });
+      const client = clients.get(role)!;
+      // A private reply to the acting user in the channel (and thread) of the input.
+      const notify = (action: SlackAction) => (text: string) => client.chat.postEphemeral({
+        channel: action.source.channelId, user: action.actor.userId, text, mrkdwn: false,
+        ...(action.via === 'message' && action.source.threadTs ? { thread_ts: action.source.threadTs } : {}),
+      } as never);
+      if (INTERACTIVE.includes(role)) {
+        app.action(/.*/, async ({ ack, body, respond }) => {
+          await inbound.action(body, role, () => ack(), (reply) => respond(reply),
+            (triggerId, view) => client.views.open({ trigger_id: triggerId, view: view as never }));
+        });
+        app.view(MODAL_CALLBACK, async ({ ack, body }) => {
+          await inbound.view(body, role, () => ack(), notify);
+        });
+      }
+      app.event('message', async ({ body }) => { await inbound.event(body, role, notify); });
+      app.event('app_mention', async ({ body }) => { await inbound.event(body, role, notify); });
     }
 
     let connected = false;
