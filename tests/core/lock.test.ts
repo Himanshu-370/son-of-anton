@@ -77,20 +77,79 @@ describe('lock', () => {
   });
 });
 
-describe('waitForLockFile under contention', () => {
-  it('never lets two waiters in this process hold the lock at once', async () => {
+describe('lock ownership and takeover', () => {
+  it('a release removes only its own acquisition, even in the same process', async () => {
+    const { acquireLockFile } = await import('../../src/core/lock.js');
+    const dir = await tmp();
+    const p = join(dir, 'x.lock');
+    const releaseA = await acquireLockFile(p);
+    await releaseA();
+    const releaseB = await acquireLockFile(p);
+    await releaseA(); // a late or repeated release from the earlier holder
+    expect(await exists(p)).toBe(true);
+    expect((await acquireLockFile(p).catch((e) => e))).toBeInstanceOf(AlreadyRunning);
+    await releaseB();
+    expect(await exists(p)).toBe(false);
+  });
+
+  it('takes over a dead holder (with or without a nonce) and a corrupt file', async () => {
+    const { acquireLockFile } = await import('../../src/core/lock.js');
+    const dir = await tmp();
+    const p = join(dir, 'x.lock');
+    for (const body of [
+      JSON.stringify({ pid: 999999, nonce: '999999.old', startedAt: 'x' }), // dead, current format
+      JSON.stringify({ pid: 999999, startedAt: 'x' }), // dead, older format without a nonce
+      '{"pid": 12', // corrupt
+      '',
+    ]) {
+      await writeFile(p, body);
+      const release = await acquireLockFile(p);
+      expect(JSON.parse(await readFile(p, 'utf8')).pid).toBe(process.pid);
+      await release();
+      expect(await exists(p)).toBe(false);
+    }
+  });
+
+  it('a live lock from an older version (pid, no nonce) is respected and survives our release', async () => {
+    const { acquireLockFile } = await import('../../src/core/lock.js');
+    const dir = await tmp();
+    const p = join(dir, 'x.lock');
+    await writeFile(p, JSON.stringify({ pid: process.pid, startedAt: 'x' }));
+    const err = await acquireLockFile(p).catch((e) => e);
+    expect(err).toBeInstanceOf(AlreadyRunning);
+    expect(err.pid).toBe(process.pid);
+    expect(await exists(p)).toBe(true);
+  });
+
+  it('the hand-off case reads clearly instead of "pid 0"', () => {
+    expect(new AlreadyRunning(0).message).toMatch(/taking this lock right now; try again/);
+    expect(new AlreadyRunning(42).message).toMatch(/pid 42/);
+  });
+
+  it('stress: many in-process waiters never overlap, including through takeovers of dead locks', async () => {
     const { waitForLockFile } = await import('../../src/core/lock.js');
-    const dir = await (await import('node:fs/promises')).mkdtemp(join((await import('node:os')).tmpdir(), 'anton-lock-race-'));
+    const dir = await tmp();
+    const p = join(dir, 'x.lock');
+    const counter = join(dir, 'counter');
+    await writeFile(counter, '0');
     let inside = 0;
     let most = 0;
-    await Promise.all(Array.from({ length: 30 }, async () => {
-      const release = await waitForLockFile(join(dir, 'x.lock'));
-      inside++;
-      most = Math.max(most, inside);
-      await new Promise((r) => setTimeout(r, 1));
-      inside--;
-      await release();
-    }));
+    for (let round = 0; round < 3; round++) {
+      // Each round starts from a dead holder's lock, so the first waiters race through takeover.
+      await writeFile(p, JSON.stringify({ pid: 999999, startedAt: 'x' }));
+      await Promise.all(Array.from({ length: 40 }, async () => {
+        const release = await waitForLockFile(p, 30_000);
+        inside++;
+        most = Math.max(most, inside);
+        const n = Number(await readFile(counter, 'utf8'));
+        // Vary the hold time so releases land at every point of the other waiters' acquire steps.
+        if (Math.random() < 0.5) await new Promise((r) => setTimeout(r, Math.random() * 3));
+        await writeFile(counter, String(n + 1));
+        inside--;
+        await release();
+      }));
+    }
     expect(most).toBe(1);
-  });
+    expect(Number(await readFile(counter, 'utf8'))).toBe(120);
+  }, 30_000);
 });
