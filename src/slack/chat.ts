@@ -60,7 +60,12 @@ export interface ChatDeps {
   settings?: { monthlyUsd: number; perAnswerUsd: number };
   /** Verified prices; a model missing here gets no paid calls. */
   prices?: Record<string, ModelPrice>;
+  /** Service log (never given the key or the question). */
+  log?: (line: string) => void;
 }
+
+/** Statuses where the API answered and rejected the request before any work: nothing was billed. */
+const UNBILLED_STATUSES = new Set([400, 401, 403, 404, 422]);
 
 type ModelPlan = {
   model: string;
@@ -276,10 +281,16 @@ export async function answerQuestion(input: AuthorizedQuestion, deps: ChatDeps =
   try {
     response = await (deps.client ?? anthropicChatClient)(key).send(params);
   } catch (e) {
-    // The outcome is unknown: the reservation stays counted and the call is never repeated.
-    await settleChatSpend(reservation, undefined, { home }).catch(() => undefined);
     // reasonOf masks the key; scrub hides any other secret the error text echoes.
     const why = sanitizeSlackText(scrub(reasonOf(e, key), secrets), 120);
+    if (e instanceof Anthropic.APIError && typeof e.status === 'number' && UNBILLED_STATUSES.has(e.status)) {
+      // A definite rejection (a response arrived, nothing ran): book $0 and say why in the service log.
+      await settleChatSpend(reservation, 0, { home }).catch(() => undefined);
+      (deps.log ?? ((l: string) => console.error(l)))(`Slack answer rejected by the API (status ${e.status}); booked $0: ${why}`);
+      return status(`The answer was rejected (${why}). Nothing was charged. Here is the status.`);
+    }
+    // The outcome is unknown (timeout, connection, 429, 5xx): the reservation stays counted and the call is never repeated.
+    await settleChatSpend(reservation, undefined, { home }).catch(() => undefined);
     return status(`The answer did not complete (${why}). It was not retried, and its reserved cost stays counted. Here is the status.`);
   }
   const usage = validUsage(response?.usage) ? response.usage : undefined;

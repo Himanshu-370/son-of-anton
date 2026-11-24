@@ -212,6 +212,30 @@ describe('answerQuestion', () => {
     expect(await chatSpentUsd('T0FAKE', Date.UTC(2026, 10, 20), { home })).toBeGreaterThan(0);
   });
 
+  it('settles a definite 4xx rejection at $0 and logs why; connection errors, 429 and 5xx keep the bound', async () => {
+    const Anthropic = (await import('@anthropic-ai/sdk')).default;
+    const logs: string[] = [];
+    const spent = () => chatSpentUsd('T0FAKE', Date.UTC(2026, 10, 20), { home });
+    for (const status of [400, 401, 403, 404, 422]) {
+      replies.push(new Anthropic.APIError(status, { type: 'error' }, `rejected ${status}`, new Headers()));
+      const a = await answerQuestion(ask('How does the streak counter work?'), chatDeps({ log: (l) => logs.push(l) }));
+      expect(a.status).toBe('status-only');
+      expect(await spent()).toBe(0);
+    }
+    expect(logs).toHaveLength(5);
+    expect(logs[0]).toMatch(/400/);
+    expect(logs.join('\n')).not.toContain(FAKE_KEY);
+    replies.push(new Anthropic.APIConnectionError({ message: 'socket hang up' }));
+    await answerQuestion(ask('How does the streak counter work?'), chatDeps({ log: (l) => logs.push(l) }));
+    const afterConnection = await spent();
+    expect(afterConnection).toBeGreaterThan(0);
+    for (const status of [429, 500, 529]) {
+      replies.push(new Anthropic.APIError(status, { type: 'error' }, `busy ${status}`, new Headers()));
+      await answerQuestion(ask('How does the streak counter work?'), chatDeps());
+    }
+    expect(await spent()).toBeGreaterThan(afterConnection * 3.5);
+  });
+
   it('answers a redelivered question once', async () => {
     const q = ask('How does the streak counter work?', { requestKey: 'event:T0FAKE:EvSAME' });
     expect((await answerQuestion(q, chatDeps())).status).toBe('answered');
