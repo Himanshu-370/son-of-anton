@@ -219,7 +219,14 @@ export async function composeSlackMessage(event: Milestone, deps: ComposeDeps): 
   if (event.scope === 'job' && event.kind === 'spec-ready') {
     const job = await loadJob(event.project);
     const raw = await readCheckedFile(job.jobDir, ['spec.json'], 64 * 1024);
-    const spec = raw ? SpecTitle.safeParse(JSON.parse(raw.toString('utf8'))) : undefined;
+    let spec: ReturnType<typeof SpecTitle.safeParse> | undefined;
+    try {
+      spec = raw ? SpecTitle.safeParse(JSON.parse(raw.toString('utf8'))) : undefined;
+    } catch {
+      spec = undefined;
+    }
+    // A corrupt spec.json gets the plain-text milestone (no card), so it never holds up the channel.
+    if (raw && !spec?.success) return undefined;
     const target = { project: event.project, jobId: event.jobId, stage: 'awaiting_spec_approval' as const, revision: event.occurrence };
     const buttons = [
       await card({ kind: 'approve', role: 'pm', target }, 'Approve spec', 'primary'),

@@ -433,6 +433,13 @@ describe('review cards', () => {
     expect((await loadState(job.jobDir)).stage).toBe('plan');
   });
 
+  it('a corrupt spec.json falls back to the plain-text message instead of blocking the channel', async () => {
+    const job = await project('p', { stage: 'awaiting_spec_approval' });
+    await writeFile(join(job.jobDir, 'spec.json'), '{"title": "Broken');
+    const event = { scope: 'job', source: 'factory', kind: 'spec-ready', project: 'p', jobId: '1-init', occurrence: 'a'.repeat(64) } as Milestone;
+    await expect(composeSlackMessage(event, { config, home, channelId: PROJECT_CHANNEL })).resolves.toBeUndefined();
+  });
+
   it('final reject needs notes, goes back to build; resume of a paused job takes a budget from its modal', async () => {
     const job = await project('p', { stage: 'awaiting_final_review' });
     const target = { project: 'p', jobId: '1-init', stage: 'awaiting_final_review', revision: 'delivered-1' };
