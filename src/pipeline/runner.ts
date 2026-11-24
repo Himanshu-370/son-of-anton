@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { publishJobMilestone } from '../slack/job-milestones.js';
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
@@ -280,7 +279,7 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
         await saveState(jobDir, paused);
         if (reason === 'budget_cap' || reason === 'allowance') {
           await publishJobMilestone(paused, {
-            kind: 'budget-paused', occurrence: randomUUID(),
+            kind: 'budget-paused', occurrence: `paused-${paused.pauses ?? 0}`,
           }, deps.publishMilestone);
         }
         if (!bench) final = e instanceof AllowanceExceeded ? allowanceHint(project, e.group, e.spentUsd, e.limitUsd) : pauseMessage(project, reason);

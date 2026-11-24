@@ -77,7 +77,7 @@ const MAX_RECORDS = 5000;
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const ts = z.string().regex(/^\d{1,16}\.\d{1,6}$/);
-const revision = z.string().regex(/^(?:[a-f0-9]{64}|delivered-[1-9]\d{0,14})$/);
+const revision = z.string().regex(/^(?:[a-f0-9]{64}|delivered-[1-9]\d{0,14}|paused-\d{1,15})$/);
 const targetSchema = z.strictObject({ project: projectIdSchema, jobId: jobIdSchema, stage: z.enum(STAGES), revision: revision.optional() });
 const proposalRef = z.strictObject({ id: z.string().min(1).max(200), revision: digest });
 const cardSchema = z.strictObject({
@@ -90,6 +90,8 @@ const cardSchema = z.strictObject({
   findingId: z.string().regex(/^SEC-[A-Za-z0-9-]{1,40}$/).optional(),
   proposal: proposalRef.optional(),
   createdAt: z.number(),
+  /** Set once an action from this card is done: a card acts at most once. */
+  usedAt: z.number().optional(),
 });
 const resultSchema = z.strictObject({
   status: z.enum(['done', 'duplicate', 'in-progress', 'denied', 'ignored', 'stale', 'refused', 'unsupported', 'failed']),
@@ -199,6 +201,7 @@ export type ModalDecision =
 
 const result = (status: ActionResultStatus, ...lines: string[]): ActionResult => ({ status, lines });
 const DENIED = result('denied', 'Only the Anton owner can do that here.');
+const USED = result('stale', 'That card was already used. Nothing was changed.');
 
 function authorized(a: SlackAction, config: SlackConfig): boolean {
   if (!KEY.test(a.key) || a.actor.isBot) return false;
@@ -251,6 +254,7 @@ export async function prepareCardModal(a: Extract<SlackAction, { via: 'card' }>,
   const home = deps.home ?? antonHome();
   const card = await boundCard(a, home);
   if (!card || !a.source.messageTs) return { kind: 'denied', result: DENIED };
+  if (card.usedAt !== undefined) return { kind: 'refused', result: USED };
   if (!MODAL_KINDS.includes(card.kind) || a.input) return { kind: 'direct' };
   let initial: string | undefined;
   if (card.kind === 'lesson-edit') {
@@ -449,6 +453,8 @@ async function claimAndRun(
   const gate = await withStore<{ go: true; op: typeof op } | { go: false; result: ActionResult }>(home, async (store) => {
     const rec = store.records[input.key];
     if (!rec) {
+      // A redelivery of the same click still gets its stored answer (below); a new click on a used card does nothing.
+      if (input.via === 'card' && store.cards[input.token]?.usedAt !== undefined) return { value: { go: false, result: USED }, write: false };
       store.records[input.key] = fresh();
       return { value: { go: true, op }, write: true };
     }
@@ -480,6 +486,8 @@ async function claimAndRun(
     const rec = store.records[input.key];
     if (rec?.claim !== claim) return { value: undefined, write: false };
     store.records[input.key] = { ...rec, status: 'finished', at: Date.now(), result: final };
+    const card = input.via === 'card' ? store.cards[input.token] : undefined;
+    if (card && final.status === 'done') card.usedAt = Date.now();
     return { value: undefined, write: true };
   });
   return final;

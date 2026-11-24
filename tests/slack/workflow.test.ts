@@ -508,3 +508,38 @@ describe('posting cards and opening modals', () => {
     expect(notes).toEqual(['ok']);
   });
 });
+
+describe('pause-bound and used-up cards', () => {
+  it('a Resume or Abandon card from an earlier pause is stale at a later pause; a used card never acts again', async () => {
+    const { pause } = await import('../../src/core/state.js');
+    const job = await project('p', { stage: 'build' });
+    await saveState(job.jobDir, pause(await loadState(job.jobDir), 'budget_cap'));
+    const first = await loadState(job.jobDir);
+    expect(first.pauses).toBe(1);
+    const target1 = { project: 'p', jobId: '1-init', stage: 'paused', revision: 'paused-1' };
+    const oldResume = await postedCard('resume', 'pm', { target: target1 }, '1700000000.000201');
+    const oldAbandon = await postedCard('abandon', 'pm', { target: target1 }, '1700000000.000202');
+
+    // Resumed elsewhere, then paused again for another reason.
+    await saveState(job.jobDir, pause({ ...first, stage: 'build', pausedFrom: undefined, pauseReason: undefined }, 'no_progress'));
+    expect((await loadState(job.jobDir)).pauses).toBe(2);
+    expect((await dispatchSlackAction(press(oldResume, 'pm', 'card:T0FAKE:or1', { budgetUsd: 30 }), deps())).status).toBe('stale');
+    expect((await dispatchSlackAction(press(oldAbandon, 'pm', 'card:T0FAKE:oa1'), deps())).status).toBe('stale');
+    expect((await loadState(job.jobDir)).stage).toBe('paused');
+    expect(spawned).toEqual([]);
+
+    const resume = await postedCard('resume', 'pm', { target: { ...target1, revision: 'paused-2' } }, '1700000000.000203');
+    expect((await dispatchSlackAction(press(resume, 'pm', 'card:T0FAKE:nr1'), deps())).status).toBe('done');
+    expect(spawned).toEqual(['p']);
+    // Even with the job looking exactly as it did, the used card does nothing, and opens no form.
+    await rm(join(job.repoPath, '.anton', 'spawn-claim.json'), { force: true });
+    await saveState(job.jobDir, { ...(await loadState(job.jobDir)), stage: 'paused', pausedFrom: 'build', pauseReason: 'no_progress', pauses: 2 });
+    const again = await dispatchSlackAction(press(resume, 'pm', 'card:T0FAKE:nr2'), deps());
+    expect(again.status).toBe('stale');
+    expect(again.lines.join(' ')).toMatch(/already used/);
+    expect((await prepareCardModal(press(resume, 'pm', 'card:T0FAKE:nr3') as Extract<SlackAction, { via: 'card' }>, deps())).kind).toBe('refused');
+    expect(spawned).toEqual(['p']);
+    // A redelivery of the click that acted still gets its stored answer.
+    expect((await dispatchSlackAction(press(resume, 'pm', 'card:T0FAKE:nr1'), deps())).status).toBe('duplicate');
+  });
+});

@@ -86,6 +86,8 @@ export async function checkpointRevision(
       return undefined;
     }
   }
+  // Every pause has its own number, whatever its reason, so a card for an earlier pause is stale.
+  if (job.state.stage === 'paused') return `paused-${job.state.pauses ?? 0}`;
   if (job.state.stage === 'awaiting_final_review') {
     const prefix = `anton/${job.jobId}/`;
     return (await listTags(job.repo, `${prefix}delivered-*`))

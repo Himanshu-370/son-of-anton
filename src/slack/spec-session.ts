@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { commitAll } from '../core/git.js';
 import { createChangeJob, createNewProject } from '../core/job.js';
-import { loadJob, preflightOr2, reopenSpec, type ActionTarget } from '../core/job-actions.js';
+import { checkpointRevision, loadJob, preflightOr2, reopenSpec, type ActionTarget } from '../core/job-actions.js';
 import { antonHome, jobDir as jobDirOf } from '../core/paths.js';
 import { getProject } from '../core/registry.js';
 import { loadSecrets } from '../core/secrets.js';
@@ -238,7 +238,9 @@ export async function composeSlackMessage(event: Milestone, deps: ComposeDeps): 
     return { ...view, cards: tokens };
   }
   if (event.scope === 'job' && event.kind === 'budget-paused') {
-    const target = { project: event.project, jobId: event.jobId, stage: 'paused' as const };
+    // Bound to this pause: a card from an earlier pause is stale at a later one.
+    const revision = /^paused-\d{1,15}$/.test(event.occurrence) ? event.occurrence : (await checkpointRevision(await loadJob(event.project))) ?? 'paused-0';
+    const target = { project: event.project, jobId: event.jobId, stage: 'paused' as const, revision };
     const buttons = [
       await card({ kind: 'resume', role: 'pm', target }, 'Resume…', 'primary'),
       await card({ kind: 'abandon', role: 'pm', target }, 'Abandon', 'danger', 'This abandons the job. It cannot be resumed.'),
