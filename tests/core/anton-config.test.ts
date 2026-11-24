@@ -85,3 +85,14 @@ describe('budget config', () => {
     expect(budgetSettings(cfg)).toEqual({ defaultUsd: 3, allowances: DEFAULT_ALLOWANCES, taskBudgets: false });
   });
 });
+
+describe('chat settings', () => {
+  it('defaults to $5 a month and $0.10 an answer, reads overrides and rejects unknown keys', async () => {
+    const { chatSettings } = await import('../../src/core/anton-config.js');
+    expect(chatSettings(await loadAntonConfig(await homeWith()))).toEqual({ monthlyUsd: 5, perAnswerUsd: 0.1 });
+    expect(chatSettings(await loadAntonConfig(await homeWith('chat:\n  monthlyUsd: 2\n  perAnswerUsd: 0.05\n'))))
+      .toEqual({ monthlyUsd: 2, perAnswerUsd: 0.05 });
+    await expect(loadAntonConfig(await homeWith('chat:\n  model: x\n'))).rejects.toThrow(/Invalid ~\/anton\/config\.yaml/);
+    await expect(loadAntonConfig(await homeWith('chat:\n  perAnswerUsd: 0\n'))).rejects.toThrow(/Invalid ~\/anton\/config\.yaml/);
+  });
+});

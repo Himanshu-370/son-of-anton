@@ -239,6 +239,12 @@ export async function projectForChannel(queue: QueueLocation, channel: string): 
   return lanes.length === 1 ? lanes[0]![0].slice('proj:'.length) : undefined;
 }
 
+/** The channel recorded for a project, only if it maps back to that project alone. */
+export async function channelForProject(queue: QueueLocation, project: string): Promise<string | undefined> {
+  const id = (await inspectOutbox(queue)).channels[`proj:${project}`];
+  return id && (await projectForChannel(queue, id)) === project ? id : undefined;
+}
+
 /** The job whose thread Anton posted as `threadTs` in that project's recorded channel. */
 export async function jobForThread(queue: QueueLocation, channel: string, threadTs: string): Promise<{ project: string; jobId: string } | undefined> {
   if (!channelId.safeParse(channel).success || !ts.safeParse(threadTs).success) return undefined;

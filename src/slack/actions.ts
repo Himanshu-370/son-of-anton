@@ -2,11 +2,12 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import {
-  abandonJob, acceptJobRisk, approveJob, checkpointRevision, jobStatusRows, loadJob, rejectJob, resumeJob, STATUS_HEADER, targetOf,
+  abandonJob, acceptJobRisk, approveJob, checkpointRevision, loadJob, rejectJob, resumeJob, targetOf,
   type ActionOutcome, type ActionTarget, type JobActionDeps,
 } from '../core/job-actions.js';
 import { waitForLockFile } from '../core/lock.js';
 import { antonHome } from '../core/paths.js';
+import { listProjects } from '../core/registry.js';
 import { STAGES } from '../core/state.js';
 import { decideProposal, readProposals, proposalRevision } from '../lessons/proposals.js';
 import {
@@ -16,6 +17,7 @@ import { jobId as jobIdSchema, projectId as projectIdSchema } from './events.js'
 import { sanitizeSlackText } from './inbound.js';
 import type { SpecRoundDeps } from '../core/spec-continuation.js';
 import { cardModal, type ModalKind, type ModalView } from './views.js';
+import { answerQuestion, statusLines, type ChatDeps } from './chat.js';
 
 /*
  * The Slack side of the shared job actions. Every input is a typed, allowlisted operation. Mutations need
@@ -34,9 +36,14 @@ export type SlackAction =
   | { via: 'card'; key: string; actor: SlackActor; source: SlackSource; token: string; input?: CardInput; triggerId?: string }
   /**
    * Plain messages are never orders, with two explicit exceptions for the owner: answers to waiting spec
-   * questions in the job thread, and `new …` / `change <project> …` in a DM to the PM. Role Q&A is Task 6.
+   * questions in the job thread, and `new …` / `change <project> …` in a DM to the PM. Mentions of a role
+   * bot, and DMs to one, are questions (role Q&A): answered from the records, never acted on.
    */
-  | { via: 'message'; key: string; actor: SlackActor; source: SlackSource; text: string; eventType?: 'message' | 'app_mention' };
+  | {
+    via: 'message'; key: string; actor: SlackActor; source: SlackSource; text: string; eventType?: 'message' | 'app_mention';
+    /** User and bot IDs mentioned in the raw text, in order. */
+    mentions?: string[];
+  };
 
 export type ActionResultStatus =
   | 'done' | 'duplicate' | 'in-progress' | 'denied' | 'ignored' | 'stale' | 'refused' | 'unsupported' | 'failed';
@@ -190,6 +197,21 @@ export interface DispatchDeps {
   jobForThread?: (channelId: string, threadTs: string) => Promise<{ project: string; jobId: string } | undefined>;
   /** Spec session effects (Docker, the PM agent). Without them, starting work and spec answers are unsupported. */
   spec?: SlackSpecDeps;
+  /** The channel recorded for a project. Defaults to the outbox's channel map. */
+  channelForProject?: (project: string) => Promise<string | undefined>;
+  /**
+   * Live Slack reads (the PM's token) that verify a channel and its members by user ID. Without them,
+   * only the owner's own commands work: nobody gets project data from a question or a member status.
+   */
+  access?: SlackAccess;
+  /** Role Q&A effects (the model client and the chat budget). */
+  chat?: ChatDeps;
+}
+
+export type ChannelFacts = { isPrivate: boolean; isShared: boolean; isArchived: boolean; teamId?: string };
+export interface SlackAccess {
+  channel(channelId: string): Promise<ChannelFacts | undefined>;
+  members(channelId: string): Promise<string[]>;
 }
 
 export type SlackSpecDeps = Omit<SpecRoundDeps, 'surface'> & { preflight: () => Promise<void> };
@@ -218,6 +240,8 @@ export async function dispatchSlackAction(input: SlackAction, deps: DispatchDeps
   try {
     const home = deps.home ?? antonHome();
     if (input.via === 'message') {
+      const asked = await questionRoute(input, deps, home);
+      if (asked) return asked;
       // Anyone else's message is discussion, never an answer or an order.
       if (!authorized(input, deps.config)) return result('ignored');
       const resolved = await messageOperation(input, deps, home);
@@ -225,7 +249,11 @@ export async function dispatchSlackAction(input: SlackAction, deps: DispatchDeps
       if (resolved.op.kind === 'status') return result('ignored');
       return await claimAndRun(input, resolved.op, deps, home);
     }
-    if (!authorized(input, deps.config)) return DENIED;
+    if (!authorized(input, deps.config)) {
+      // A verified member of a project channel may read that project's status. Nothing else.
+      if (input.via === 'command') return (await memberStatus(input, deps)) ?? DENIED;
+      return DENIED;
+    }
     const resolved = input.via === 'card' ? await cardOperation(input, home) : await commandOperation(input, deps);
     if ('status' in resolved) return resolved;
     const { op } = resolved;
@@ -404,11 +432,112 @@ async function messageOperation(
 }
 
 async function status(project?: string): Promise<ActionResult> {
-  const rows = await jobStatusRows(project);
-  if (!rows.length) return result('done', 'No projects yet.');
-  const all = [STATUS_HEADER, ...rows];
-  const widths = all[0]!.map((_, i) => Math.max(...all.map((r) => r[i]!.length)));
-  return result('done', ...all.map((r) => r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(widths[i]!))).join('  ')));
+  return result('done', ...(await statusLines(project)));
+}
+
+const NOT_MEMBER = result('denied', 'Anton answers project questions only for verified members of that project\'s channel.');
+const POINTER = 'Ask in your project\'s channel. Anton answers project questions only there, to its members.';
+
+/**
+ * Whether the channel is a private, workspace-local, unarchived channel and the user is in it now, by user
+ * ID. Read live every time, so a removed member loses access at once. Any doubt means no.
+ */
+async function verifiedMember(channelId: string, userId: string, deps: DispatchDeps): Promise<boolean> {
+  if (!deps.access) return false;
+  try {
+    const info = await deps.access.channel(channelId);
+    if (!info || !info.isPrivate || info.isShared || info.isArchived) return false;
+    if (info.teamId !== undefined && info.teamId !== deps.config.teamId) return false;
+    return (await deps.access.members(channelId)).includes(userId);
+  } catch {
+    return false;
+  }
+}
+
+/** Registered projects named as whole words in the text. */
+async function namedProjects(text: string): Promise<string[]> {
+  const lower = text.toLowerCase();
+  const names = (await listProjects().catch(() => [])).map((p) => p.name);
+  return names.filter((name) => new RegExp(`(?:^|[^a-z0-9-])${name.replace(/[^a-z0-9-]/g, '')}(?:$|[^a-z0-9-])`).test(lower));
+}
+
+const lookupProject = (deps: DispatchDeps) => deps.projectForChannel ?? (async (channel: string) => {
+  const { projectForChannel } = await import('./outbox.js');
+  return projectForChannel({ config: deps.config, home: deps.home }, channel);
+});
+
+/** `/anton status` from a verified member, in that project's channel only. */
+async function memberStatus(a: Extract<SlackAction, { via: 'command' }>, deps: DispatchDeps): Promise<ActionResult | undefined> {
+  const { config } = deps;
+  if (!KEY.test(a.key) || a.actor.isBot || a.actor.teamId !== config.teamId) return undefined;
+  if (a.source.role !== 'pm' || config.roles.pm.appId !== a.source.appId || a.source.channelId === config.channelId) return undefined;
+  const verb = sanitizeSlackText(a.text, COMMAND_LIMIT).toLowerCase();
+  if (verb !== '' && verb !== 'status') return undefined;
+  const project = await lookupProject(deps)(a.source.channelId);
+  if (!project || !(await verifiedMember(a.source.channelId, a.actor.userId, deps))) return undefined;
+  return status(project);
+}
+
+/**
+ * Role Q&A: a mention of a role bot, or a DM to one. Undefined when the input is not a question (the owner's
+ * orders and thread answers go on to the action router). A project question is answered only in that
+ * project's channel, to a verified member; elsewhere the answer is a pointer, never project data.
+ */
+async function questionRoute(a: Extract<SlackAction, { via: 'message' }>, deps: DispatchDeps, home: string): Promise<ActionResult | undefined> {
+  const { config } = deps;
+  const dm = /^D[A-Z0-9]+$/.test(a.source.channelId);
+  const isOwner = a.actor.userId === config.ownerId;
+  if (a.eventType !== 'app_mention' && !(dm && !a.source.threadTs)) return undefined;
+  // The owner's DM orders to the PM stay orders.
+  if (dm && isOwner && a.source.role === 'pm' && /^(?:new|change)\s/i.test(sanitizeSlackText(a.text, 100))) return undefined;
+  const bots = new Set(Object.values(config.roles).map((r) => r.botUserId));
+  if (!KEY.test(a.key) || a.actor.isBot || bots.has(a.actor.userId) || a.actor.teamId !== config.teamId) return result('ignored');
+  if (config.roles[a.source.role]?.appId !== a.source.appId) return result('ignored');
+  // A message naming several role bots reaches each of them; only the first one named answers.
+  const first = a.mentions?.find((id) => bots.has(id));
+  if (first !== undefined && first !== config.roles[a.source.role].botUserId) return result('ignored');
+  // The owner's mention reply to waiting spec questions is an answer, which the message event carries.
+  if (isOwner && a.source.threadTs) {
+    const lookup = deps.jobForThread ?? (async (channel: string, thread: string) => {
+      const { jobForThread } = await import('./outbox.js');
+      return jobForThread({ config, home: deps.home }, channel, thread);
+    });
+    const job = await lookup(a.source.channelId, a.source.threadTs);
+    if (job) {
+      const { readSpecContinuation, specStatus } = await import('../core/spec-continuation.js');
+      const c = await readSpecContinuation(job.project, job.jobId, home).catch(() => undefined);
+      if (c && specStatus(c) === 'awaiting') return result('ignored');
+    }
+  }
+  const question = sanitizeSlackText(a.text, 1000).replace(/^(?:\s*\[mention\]\s*)+/, '').trim();
+  const project = dm || a.source.channelId === config.channelId ? undefined : await lookupProject(deps)(a.source.channelId);
+  if (!project) {
+    // Outside a project channel: an access-checked pointer, and nothing for an ambiguous reference.
+    const named = await namedProjects(question);
+    // DM chatter that names no project stays quiet (a mention elsewhere was addressed to the bot: it gets the pointer).
+    if (dm && !named.length) return result('ignored');
+    if (named.length === 1) {
+      const lookupChannel = deps.channelForProject ?? (async (p: string) => {
+        const { channelForProject } = await import('./outbox.js');
+        return channelForProject({ config, home: deps.home }, p);
+      });
+      const channel = await lookupChannel(named[0]!);
+      if (channel && await verifiedMember(channel, a.actor.userId, deps)) {
+        return result('refused', `Ask in the project channel for ${named[0]}. Anton answers project questions only there.`);
+      }
+    }
+    return result('refused', POINTER);
+  }
+  if (!(await verifiedMember(a.source.channelId, a.actor.userId, deps))) return NOT_MEMBER;
+  if ((await namedProjects(question)).some((p) => p !== project)) {
+    return result('refused', 'This channel answers questions about its own project only. Ask about another project in its channel.');
+  }
+  if (!question) return result('refused', 'Ask a question after the mention, for example: what is the status?');
+  const answer = await answerQuestion({
+    teamId: a.actor.teamId, userId: a.actor.userId, role: a.source.role, project, question, requestKey: a.key,
+  }, { home, ...deps.chat });
+  if (answer.status === 'duplicate') return result('ignored');
+  return result('done', ...answer.text.split('\n').flatMap((l) => l.match(/[\s\S]{1,480}/g) ?? []).slice(0, 20));
 }
 
 /** Whether the job (or proposal) still looks exactly as it did when the op was bound: the earlier attempt did not land. */

@@ -8,6 +8,7 @@ import { collectRetros } from '../../retro/run.js';
 import { createInboundHandler } from '../../slack/inbound.js';
 import { startSlackService } from '../../slack/service.js';
 import { createSlackRuntime } from '../../slack/transport.js';
+import { slackSetupApi } from '../../slack/setup-api.js';
 import { guard, resolveDeps, type CliDeps } from '../deps.js';
 
 /**
@@ -55,6 +56,13 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
         home, preflight: d.preflight, ensureImage: d.ensureImage, startContainer: d.startContainer, stopContainer: d.stopContainer,
         runAgent: d.runAgent, ensureRepoMap: d.ensureRepoMap, listFiles: d.listFiles, readHistory: d.readHistory,
       },
+      // Membership is read live with the PM's token (groups:read), by user ID. The token stays in this closure:
+      // role Q&A and its model call never see a Slack credential.
+      access: {
+        channel: (channelId) => slackSetupApi.channelInfo(credentials.pm.botToken, channelId),
+        members: (channelId) => slackSetupApi.channelMembers(credentials.pm.botToken, channelId),
+      },
+      chat: { home },
     };
     const inbound = createInboundHandler({
       log: d.out,

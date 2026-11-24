@@ -81,7 +81,7 @@ const writeRetro = (jobDir: string, r: RetroFile) => writeFileAtomic(retroPath(j
 const withKey = (secrets: Record<string, string>, key: string | undefined) => (key ? { ...secrets, ANTHROPIC_API_KEY: key } : secrets);
 
 /** The key must never reach a file, a log or an error text. */
-function reasonOf(e: unknown, key: string | undefined): string {
+export function reasonOf(e: unknown, key: string | undefined): string {
   const m = (e instanceof Error ? e.message : String(e)).replace(/\s+/g, ' ').trim().slice(0, 300);
   return key ? m.split(key).join('[REDACTED]') : m;
 }

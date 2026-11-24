@@ -159,10 +159,12 @@ export function normalizeEvent(body: unknown, role: SlackRole): Normalized {
   if (e.attachments?.some((a) => a.is_share === true || a.is_msg_unfurl === true || a.original_url !== undefined)) return ignored('forward');
   if (!e.user) return ignored('no user');
   if (e.user_team !== undefined && e.user_team !== d.team_id) return ignored('foreign user');
+  // The users and bots mentioned, in order, from Slack's own mention syntax (the text itself is cleaned).
+  const mentions = [...(e.text ?? '').matchAll(/<@([UW][A-Z0-9]{1,31})(?:\|[^>]*)?>/g)].map((m) => m[1]!).slice(0, 20);
   return {
     kind: 'action',
     action: {
-      via: 'message', key: `event:${d.team_id}:${d.event_id}`, eventType: e.type,
+      via: 'message', key: `event:${d.team_id}:${d.event_id}`, eventType: e.type, mentions,
       actor: { teamId: d.team_id, userId: e.user, isBot: false },
       source: { appId: d.api_app_id, role, channelId: e.channel, messageTs: e.ts, ...(e.thread_ts ? { threadTs: e.thread_ts } : {}) },
       text: sanitizeSlackText(e.text, 4000),
@@ -187,7 +189,7 @@ export interface InboundHandler {
   idle(): Promise<void>;
 }
 
-/** Plain, mention-free reply text. A denial says nothing about projects. */
+/** Plain, mention-free reply text. Denials carry only Anton's fixed lines, which say nothing about projects. */
 export function renderResult(r: ActionResult): string {
   const lines = r.lines.map((l) => sanitizeSlackText(l, 500)).filter(Boolean).slice(0, 20);
   const fallback: Record<ActionResult['status'], string> = {
@@ -195,7 +197,7 @@ export function renderResult(r: ActionResult): string {
     denied: 'Only the Anton owner can do that here.', ignored: 'Nothing to do.', stale: 'That is out of date. Nothing was changed.',
     refused: 'Nothing was changed.', unsupported: 'Anton cannot do that from Slack yet.', failed: 'That did not work. Check the CLI.',
   };
-  const text = r.status === 'denied' ? fallback.denied : (lines.length ? lines.join('\n') : fallback[r.status]);
+  const text = lines.length ? lines.join('\n') : fallback[r.status];
   return text.slice(0, 3000);
 }
 
