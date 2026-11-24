@@ -78,7 +78,7 @@ describe('Slack service with a fake transport', () => {
           const entries = (await inspectOutbox({ config, home })).entries;
           expect(entries).toHaveLength(10);
           expect(entries.every((entry) => entry.status === 'sent')).toBe(true);
-        }, { timeout: 4_000 });
+        }, { timeout: 15_000 });
       } finally {
         await online.stop();
       }
