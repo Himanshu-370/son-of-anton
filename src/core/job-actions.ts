@@ -4,13 +4,13 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { readRegularFile, writeFileAtomic } from './atomic.js';
 import { budgetSettings, loadAntonConfig } from './anton-config.js';
-import { allowanceUsage, cacheHitRate, parseUsage, stageGroup, totalUsage, usd } from './budget.js';
+import { allowanceUsage, stageGroup, usd } from './budget.js';
 import { AREA_ORDER } from './config.js';
 import { commitAll, currentBranch, isClean, listTags as defaultListTags, switchBranch, tagHead } from './git.js';
 import { assertOnJobBranch, currentJobId } from './job.js';
 import { AlreadyRunning, isRunning, waitForLockFile } from './lock.js';
 import { jobDir as jobDirOf } from './paths.js';
-import { getProject, listProjects, type ProjectEntry } from './registry.js';
+import { getProject } from './registry.js';
 import { loadSecrets } from './secrets.js';
 import { loadState, saveState, transition, unpause, type JobState, type Stage } from './state.js';
 import { PreflightError } from '../docker/container.js';
@@ -21,7 +21,7 @@ import { acceptRisk } from '../security/risks.js';
 import { PlanSchema, type Plan } from '../stages/plan.js';
 import { failuresPath, type FailureItem } from '../stages/qa.js';
 import { readApprovedSpec } from '../stages/spec.js';
-import { assertJobDir, failureReportPath } from '../stages/verify.js';
+import { failureReportPath } from '../stages/verify.js';
 
 /**
  * The job decisions shared by the CLI and Slack. Each one rechecks its target under the repo's decision
@@ -506,36 +506,4 @@ export async function acceptJobRisk(target: ActionTarget, findingId: string, rea
     d.out('Note: REPORT.md was written before this acceptance; it will show it after the next delivery.');
   }
   return done;
-}
-
-export type StatusRow = [string, string, string, string, string, string];
-export const STATUS_HEADER: StatusRow = ['PROJECT', 'STAGE', 'ROUND', 'SPENT / BUDGET', 'PAUSE REASON', 'CACHE'];
-
-/** The job's cache hit rate as `cache 62%`, or `-` when there is no data or usage.json can't be read safely. */
-async function cacheCell(repo: string, jobDir: string): Promise<string> {
-  try {
-    await assertJobDir(repo, jobDir);
-    const rate = cacheHitRate(totalUsage(parseUsage(await readRegularFile(join(jobDir, 'usage.json')))));
-    return rate === undefined ? '-' : `cache ${Math.round(rate * 100)}%`;
-  } catch {
-    return '-';
-  }
-}
-
-async function statusRow(p: ProjectEntry): Promise<StatusRow> {
-  try {
-    const dir = jobDirOf(p.repoPath, await currentJobId(p.repoPath));
-    const s = await loadState(dir);
-    let stage: string = s.stage;
-    if (ACTIVE_STAGES.includes(s.stage) && !(await isRunning(p.repoPath)).running) stage = `interrupted (${s.stage})`;
-    return [p.name, stage, String(s.round), `${usd(s.spentUsd)} / ${usd(s.budgetUsd)}`, s.pauseReason ?? '-', await cacheCell(p.repoPath, dir)];
-  } catch (e) {
-    return [p.name, `unreadable (${e instanceof Error ? e.message : String(e)})`, '-', '-', '-', '-'];
-  }
-}
-
-/** One row per project (or the named one): read-only, no model calls. */
-export async function jobStatusRows(project?: string): Promise<StatusRow[]> {
-  const projects = project ? [await getProject(project)] : await listProjects();
-  return Promise.all(projects.map(statusRow));
 }
