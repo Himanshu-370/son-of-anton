@@ -48,11 +48,11 @@ Decisions made while building Phase 6b (Slack job controls, spec threads and rol
   - Status replies are not deduped.
   - README wording on the reservation for API errors.
 - **Locks:**
-  - `removeLockIfHeldBy` (`anton stop`) removes a dead lock without the takeover mutex.
+  - `removeLockIfHeldBy` (`anton stop`) removes a dead lock without the takeover mutex. Still open (belongs to a Holder refactor). Since the Owner actions refactor, `stop` does pause the job under the decision lock.
   - The `takeMutex` stale check can double-remove after a crash mid-takeover.
   - Claimed records can carry a reused pid.
 - **Code health:**
-  - `pidAlive`, the interactive roles, the status table and the ts regex are duplicated.
+  - `pidAlive`, the interactive roles and the ts regex are duplicated. (The status table is resolved: one formatter in `src/core/job-status.ts`.)
   - The job-ID check is duplicated.
 - **Test gaps:**
   - spec revision stale;
