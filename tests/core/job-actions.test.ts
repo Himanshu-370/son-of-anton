@@ -166,6 +166,9 @@ describe('Owner actions', () => {
       const f = fake();
       expect(await interruptJob(target('build'), f.d)).toEqual({ code: 1, status: 'stale' });
       expect(await readFile(join(dir2, 'state.json'), 'utf8')).toBe(before);
+      const line = f.err.find((l) => l.includes('is no longer the current job'));
+      expect(line).toContain("The run was stopped, but the job's state was not changed.");
+      expect(line).not.toContain('Nothing was changed.');
     });
 
     it('on a finished job only reports', async () => {

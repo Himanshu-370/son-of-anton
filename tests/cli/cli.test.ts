@@ -20,6 +20,7 @@ import { stopCommand } from '../../src/cli/commands/stop.js';
 import { changeCommand } from '../../src/cli/commands/change.js';
 import { adoptCommand } from '../../src/cli/commands/adopt.js';
 import { secretsEditCommand } from '../../src/cli/commands/secrets.js';
+import { waitForLockFile } from '../../src/core/lock.js';
 import { secretsPath } from '../../src/core/secrets.js';
 import { runSpecSession } from '../../src/cli/spec-session.js';
 import { defaultOpenEditor, resolveDeps } from '../../src/cli/deps.js';
@@ -375,6 +376,23 @@ describe('anton stop', () => {
     expect(slept).toBeGreaterThanOrEqual(10_000);
     expect(stopped).toEqual(['anton-p']);
     expect(await loadState(dir)).toMatchObject({ stage: 'paused', pausedFrom: 'build', pauseReason: 'interrupted' });
+  });
+});
+
+describe('anton stop (decision lock held)', () => {
+  it('says the run was stopped but the pause was not recorded, and leaves the state alone', async () => {
+    const { repo, dir } = await project('p', { stage: 'build', round: 1 });
+    const release = await waitForLockFile(join(repo, '.anton', 'decision.lock'));
+    try {
+      const h = harness({ lockWaitMs: 50 });
+      expect(await stopCommand('p', h.deps)).toBe(1);
+      expect(h.errText()).toContain(
+        'p: the run was stopped, but the pause was not recorded (Another decision on p is in progress. Try again in a moment.). Run anton stop p again to record it.',
+      );
+      expect(await loadState(dir)).toMatchObject({ stage: 'build' });
+    } finally {
+      await release();
+    }
   });
 });
 

@@ -25,11 +25,11 @@ import { readApprovedSpec } from '../stages/spec.js';
 import { failureReportPath } from '../stages/verify.js';
 
 /**
- * The job decisions shared by the CLI and Slack. Each one rechecks its target under the repo's decision
+ * The Owner actions shared by the CLI and Slack. Each one rechecks its target under the repo's decision
  * lock, makes only the local transition (or durable claim) there, and does long work after release.
  */
 
-/** What a decision acts on. `revision` binds a review decision to the exact spec or delivery the owner saw. */
+/** What an Owner action acts on. `revision` binds a review action to the exact spec or delivery the owner saw. */
 export type ActionTarget = { project: string; jobId: string; stage: Stage; revision?: string };
 
 export type ActionStatus = 'done' | 'stale' | 'refused';
@@ -146,9 +146,11 @@ export async function withDecisionLock<T>(project: string, body: (fresh: LoadedJ
   return underDecisionLock(project, {}, body, lockWaitMs);
 }
 
-function staleMessage(fresh: LoadedJob, target: ActionTarget, why: 'job' | 'stage' | 'revision', nothing: string): string {
-  if (why === 'job') return `${target.project}: job ${target.jobId} is no longer the current job (now ${fresh.jobId}). Nothing was changed.`;
-  if (why === 'revision') return `${target.project}: this review is out of date; a newer version is waiting. Nothing was changed.`;
+function staleMessage(
+  fresh: LoadedJob, target: ActionTarget, why: 'job' | 'stage' | 'revision', nothing: string, note = 'Nothing was changed.',
+): string {
+  if (why === 'job') return `${target.project}: job ${target.jobId} is no longer the current job (now ${fresh.jobId}). ${note}`;
+  if (why === 'revision') return `${target.project}: this review is out of date; a newer version is waiting. ${note}`;
   return `${nothing} (stage: ${fresh.state.stage})`;
 }
 
@@ -224,6 +226,8 @@ export async function spawnClaimed(job: LoadedJob, now = Date.now()): Promise<bo
 type OwnerAction<R> = {
   /** Prefix for "<nothing> (stage: x)" refusals and stale messages, e.g. 'Nothing to approve'. */
   nothing: string;
+  /** Replaces the closing "Nothing was changed." in the job and revision stale messages (e.g. when work already happened). */
+  staleNote?: string;
   allowBench?: boolean;
   /** Compare stage with the target (default true). */
   matchStage?: boolean;
@@ -249,7 +253,7 @@ async function decide<R>(target: ActionTarget, action: OwnerAction<R>, d: Decide
   const opts = { allowBench: action.allowBench };
   const isStale = async (job: LoadedJob) => {
     const why = await mismatch(job, target, d.listTags, action.matchStage ?? true);
-    if (why) d.err(staleMessage(job, target, why, action.nothing));
+    if (why) d.err(staleMessage(job, target, why, action.nothing, action.staleNote));
     return why !== undefined;
   };
   const passes = async (job: LoadedJob) => !action.check || (await action.check(job));
@@ -506,6 +510,7 @@ export async function interruptJob(target: ActionTarget, d: Pick<JobActionDeps, 
   const p = target.project;
   return decide<{ paused: JobState | undefined; stage: Stage }>(target, {
     nothing: `${p} changed before the stop`,
+    staleNote: "The run was stopped, but the job's state was not changed.",
     matchStage: false,
     apply: async (job) => {
       if (!ACTIVE_STAGES.includes(job.state.stage)) return { result: { paused: undefined, stage: job.state.stage } };
