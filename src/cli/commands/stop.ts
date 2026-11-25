@@ -1,7 +1,6 @@
-import { publishJobMilestone } from '../../slack/job-milestones.js';
+import { interruptJob } from '../../core/job-actions.js';
 import { lockHolder, removeLockIfHeldBy } from '../../core/lock.js';
-import { loadState, pause, saveState } from '../../core/state.js';
-import { ACTIVE_STAGES, containerName } from '../../pipeline/runner.js';
+import { containerName } from '../../pipeline/runner.js';
 import { guard, resolveDeps, resolveManualJob, type CliDeps, type Resolved } from '../deps.js';
 
 const GRACE_MS = 10_000;
@@ -54,15 +53,13 @@ export async function stopCommand(project: string, deps: CliDeps = {}): Promise<
       else await removeLockIfHeldBy(job.repo, pid);
     }
     await d.stopContainer(containerName(project));
-    const state = await loadState(job.jobDir);
-    if (ACTIVE_STAGES.includes(state.stage)) {
-      const paused = pause(state, 'interrupted');
-      await saveState(job.jobDir, paused);
-      await publishJobMilestone(paused, { kind: 'paused', occurrence: `paused-${paused.pauses ?? 0}`, reason: 'interrupted' });
-      d.out(`${project}: paused (interrupted) at ${state.stage}. Continue with: anton resume ${project}`);
-    } else {
-      d.out(`${project}: stopped (stage: ${state.stage}).`);
+    try {
+      return (await interruptJob({ project, jobId: job.jobId, stage: job.state.stage }, { ...d, lockWaitMs: deps.lockWaitMs })).code;
+    } catch (e) {
+      // The run is already dead, so say what is and is not recorded.
+      const why = e instanceof Error ? e.message : String(e);
+      d.err(`${project}: the run was stopped, but the pause was not recorded (${why}). Run anton stop ${project} again to record it.`);
+      return 1;
     }
-    return 0;
   });
 }

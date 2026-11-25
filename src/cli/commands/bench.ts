@@ -6,7 +6,7 @@ import { initBench, loadSamples, type BenchSample } from '../../bench/samples.js
 import { writeFileAtomic } from '../../core/atomic.js';
 import { antonHome } from '../../core/paths.js';
 import { guard, resolveDeps, usd, type CliDeps } from '../deps.js';
-import { preflightOr2 } from './shared.js';
+import { preflightOr2 } from '../../core/job-actions.js';
 
 export type BenchOpts = { init?: boolean; only?: string; label?: string; compare?: string; yes?: boolean };
 

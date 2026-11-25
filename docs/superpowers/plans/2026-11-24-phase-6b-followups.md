@@ -34,6 +34,7 @@ Decisions made while building Phase 6b (Slack job controls, spec threads and rol
   - Pruning cards at 90 days gives a misleading DENIED. Exempt current targets, or say "card expired".
   - A card for risk without a revision is not bound to its stage.
   - Card tokens are orphaned while a role is offline.
+  - At spec approval the busy refusal reuses "already running… Stop it first", where "still finishing" would read better.
   - The modal closes before validation.
   - The lesson Edit modal strips links from the initial value.
 - **Spec turns:**
@@ -48,12 +49,14 @@ Decisions made while building Phase 6b (Slack job controls, spec threads and rol
   - Status replies are not deduped.
   - README wording on the reservation for API errors.
 - **Locks:**
-  - `removeLockIfHeldBy` (`anton stop`) removes a dead lock without the takeover mutex.
+  - `removeLockIfHeldBy` (`anton stop`) removes a dead lock without the takeover mutex. Still open (belongs to a Holder refactor). Since the Owner actions refactor, `stop` does pause the job under the decision lock.
   - The `takeMutex` stale check can double-remove after a crash mid-takeover.
   - Claimed records can carry a reused pid.
+  - `stop` vs a concurrent resume: between `stop` clearing the run lock and taking the decision lock, a resume can spawn a new runner that `stop` then marks paused. Fix: under the lock, skip the pause when another pid holds the run lock or a newer spawn claim exists.
 - **Code health:**
-  - `pidAlive`, the interactive roles, the status table and the ts regex are duplicated.
+  - `pidAlive`, the interactive roles and the ts regex are duplicated. (The status table is resolved: one formatter in `src/core/job-status.ts`.)
   - The job-ID check is duplicated.
+  - `decide()` checks at runtime that an action which starts a run has `preflight`; make it a type-level requirement.
 - **Test gaps:**
   - spec revision stale;
   - Retro retry;

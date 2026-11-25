@@ -7,7 +7,8 @@ import type { Message, MessageCreateParamsNonStreaming, ThinkingConfigParam } fr
 import { estimateUsd, PRICES, type ModelPrice } from '../agent/pricing.js';
 import { chatSettings, loadAntonConfig } from '../core/anton-config.js';
 import { usd } from '../core/budget.js';
-import { jobStatusRows, loadJob, STATUS_HEADER } from '../core/job-actions.js';
+import { loadJob } from '../core/job-actions.js';
+import { formatStatusTable, jobStatusRows } from '../core/job-status.js';
 import { antonHome } from '../core/paths.js';
 import { loadSecrets, redact } from '../core/secrets.js';
 import { reasonOf } from '../retro/run.js';
@@ -113,9 +114,7 @@ export function classifyQuestion(text: string): QuestionKind {
 export async function statusLines(project?: string): Promise<string[]> {
   const rows = await jobStatusRows(project);
   if (!rows.length) return ['No projects yet.'];
-  const all = [STATUS_HEADER, ...rows];
-  const widths = all[0]!.map((_, i) => Math.max(...all.map((r) => r[i]!.length)));
-  return all.map((r) => r.map((c, i) => (i === r.length - 1 ? c : c.padEnd(widths[i]!))).join('  '));
+  return formatStatusTable(rows);
 }
 
 /** The real client: one attempt, no SDK retries, so a call with an unknown outcome is never repeated. */

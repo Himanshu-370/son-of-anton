@@ -24,6 +24,8 @@ import type { RetroDeps } from '../retro/run.js';
 
 /** Every external effect a command has, injectable for tests. */
 export type CliDeps = {
+  /** How long a decision waits for another one on the same repo (default 10 s). */
+  lockWaitMs?: number;
   out?: (line: string) => void;
   err?: (line: string) => void;
   /** Used by the default preflight / image / container functions. */
@@ -62,7 +64,7 @@ export type CliDeps = {
   retro?: Omit<RetroDeps, 'out'>;
 };
 
-export type Resolved = Required<Omit<CliDeps, 'exec'>>;
+export type Resolved = Required<Omit<CliDeps, 'exec' | 'lockWaitMs'>>;
 
 /** The built CLI entry; resolves from both src/cli and dist/cli. */
 export const cliPath = (): string => fileURLToPath(new URL('../../dist/cli/index.js', import.meta.url));

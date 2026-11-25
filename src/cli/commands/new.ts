@@ -2,7 +2,7 @@ import { commitAll } from '../../core/git.js';
 import { createNewProject } from '../../core/job.js';
 import { guard, parseBudget, resolveDeps, type CliDeps } from '../deps.js';
 import { runSpecSession } from '../spec-session.js';
-import { preflightOr2 } from './shared.js';
+import { preflightOr2 } from '../../core/job-actions.js';
 
 /** `anton new "<desc>" [--budget <usd>]`: create the project and run the spec loop in the foreground. */
 export async function newCommand(description: string, opts: { budget?: string }, deps: CliDeps = {}): Promise<number> {

@@ -2,7 +2,7 @@ import { loadSecrets } from '../../core/secrets.js';
 import { createChangeJob } from '../../core/job.js';
 import { guard, parseBudget, resolveDeps, type CliDeps } from '../deps.js';
 import { runSpecSession } from '../spec-session.js';
-import { preflightOr2 } from './shared.js';
+import { preflightOr2 } from '../../core/job-actions.js';
 
 /** `anton change <project> "<desc>" [--budget <usd>]`: branch the project and run the spec loop for a change. */
 export async function changeCommand(project: string, description: string, opts: { budget?: string }, deps: CliDeps = {}): Promise<number> {
