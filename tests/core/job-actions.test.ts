@@ -8,7 +8,7 @@ import { registerProject } from '../../src/core/registry.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
 import { acquireLock, waitForLockFile } from '../../src/core/lock.js';
 import {
-  abandonJob, acceptJobRisk, approveJob, isCurrent, resumeJob, type ActionTarget, type JobActionDeps,
+  abandonJob, acceptJobRisk, approveJob, interruptJob, isCurrent, resumeJob, type ActionTarget, type JobActionDeps,
 } from '../../src/core/job-actions.js';
 
 let home: string;
@@ -140,5 +140,53 @@ describe('Owner actions', () => {
     expect(await isCurrent(target('paused', { revision: 'paused-3' }))).toBe(false);
     await saveState(dir, { ...(await loadState(dir)), stage: 'build' });
     expect(await isCurrent(target('paused'))).toBe(false);
+  });
+
+  describe('interruptJob', () => {
+    it('pauses an active job', async () => {
+      const { dir } = await project({ stage: 'build', pauses: 1 });
+      const f = fake();
+      expect(await interruptJob(target('build'), f.d)).toEqual({ code: 0, status: 'done' });
+      const s = await loadState(dir);
+      expect(s.stage).toBe('paused');
+      expect(s.pauseReason).toBe('interrupted');
+      expect(s.pauses).toBe(2);
+      expect(f.out.join('\n')).toContain('p: paused (interrupted) at build. Continue with: anton resume p');
+    });
+
+    it('leaves a replaced job alone', async () => {
+      await project({ stage: 'build' });
+      const dir2 = jobDirOf(join(home, 'projects', 'p'), '2-next');
+      await mkdir(dir2, { recursive: true });
+      await saveState(dir2, {
+        jobId: '2-next', project: 'p', stage: 'build', round: 0, maxRounds: 3, budgetUsd: 10, spentUsd: 0,
+        warned80: false, completedTasks: [], updatedAt: '',
+      });
+      const before = await readFile(join(dir2, 'state.json'), 'utf8');
+      const f = fake();
+      expect(await interruptJob(target('build'), f.d)).toEqual({ code: 1, status: 'stale' });
+      expect(await readFile(join(dir2, 'state.json'), 'utf8')).toBe(before);
+    });
+
+    it('on a finished job only reports', async () => {
+      const { dir } = await project({ stage: 'done' });
+      const before = await readFile(join(dir, 'state.json'), 'utf8');
+      const f = fake();
+      expect(await interruptJob(target('build'), f.d)).toEqual({ code: 0, status: 'done' });
+      expect(f.out.join('\n')).toContain('p: stopped (stage: done).');
+      expect(await readFile(join(dir, 'state.json'), 'utf8')).toBe(before);
+    });
+
+    it('with the decision lock held fails with the in-progress message', async () => {
+      const { repo, dir } = await project({ stage: 'build' });
+      const release = await waitForLockFile(join(repo, '.anton', 'decision.lock'));
+      try {
+        const f = fake({ lockWaitMs: 50 });
+        await expect(interruptJob(target('build'), f.d)).rejects.toThrow('Another decision on p is in progress. Try again in a moment.');
+        expect((await loadState(dir)).stage).toBe('build');
+      } finally {
+        await release();
+      }
+    });
   });
 });

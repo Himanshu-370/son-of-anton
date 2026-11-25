@@ -12,11 +12,12 @@ import { AlreadyRunning, isRunning, waitForLockFile } from './lock.js';
 import { jobDir as jobDirOf } from './paths.js';
 import { getProject } from './registry.js';
 import { loadSecrets } from './secrets.js';
-import { loadState, saveState, transition, unpause, type JobState, type Stage } from './state.js';
+import { loadState, pause, saveState, transition, unpause, type JobState, type Stage } from './state.js';
 import { PreflightError } from '../docker/container.js';
 import { ACTIVE_STAGES, allowanceHint, containerName, seededState } from '../pipeline/runner.js';
 import { submitRetro, type RetroDeps } from '../retro/run.js';
 import type { SecurityFinding } from '../security/review.js';
+import { publishJobMilestone } from '../slack/job-milestones.js';
 import { acceptRisk } from '../security/risks.js';
 import { PlanSchema, type Plan } from '../stages/plan.js';
 import { failuresPath, type FailureItem } from '../stages/qa.js';
@@ -492,6 +493,32 @@ export async function abandonJob(target: ActionTarget, d: JobActionDeps): Promis
       } finally {
         await submitRetro(job, 'abandoned', { ...d.retro, out: d.out });
       }
+    },
+  }, d);
+}
+
+/**
+ * Pause the job `anton stop` just killed. The caller has already stopped the run and its container; under the lock
+ * this pauses the job as `interrupted` only if it is still the same job and in an active stage (a stage that moved on
+ * to a Checkpoint or an end is only reported). A replaced job is left alone.
+ */
+export async function interruptJob(target: ActionTarget, d: Pick<JobActionDeps, 'out' | 'err' | 'lockWaitMs'>): Promise<ActionOutcome> {
+  const p = target.project;
+  return decide<{ paused: JobState | undefined; stage: Stage }>(target, {
+    nothing: `${p} changed before the stop`,
+    matchStage: false,
+    apply: async (job) => {
+      if (!ACTIVE_STAGES.includes(job.state.stage)) return { result: { paused: undefined, stage: job.state.stage } };
+      const paused = pause(job.state, 'interrupted');
+      return { state: paused, result: { paused, stage: job.state.stage } };
+    },
+    after: async (_job, { paused, stage }) => {
+      if (!paused) {
+        d.out(`${p}: stopped (stage: ${stage}).`);
+        return;
+      }
+      await publishJobMilestone(paused, { kind: 'paused', occurrence: `paused-${paused.pauses ?? 0}`, reason: 'interrupted' });
+      d.out(`${p}: paused (interrupted) at ${stage}. Continue with: anton resume ${p}`);
     },
   }, d);
 }
