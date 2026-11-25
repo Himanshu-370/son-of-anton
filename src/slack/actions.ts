@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import {
-  abandonJob, acceptJobRisk, approveJob, checkpointRevision, loadJob, rejectJob, resumeJob, targetOf,
+  abandonJob, acceptJobRisk, approveJob, isCurrent, loadJob, rejectJob, resumeJob, targetOf,
   type ActionOutcome, type ActionTarget, type JobActionDeps,
 } from '../core/job-actions.js';
 import { waitForLockFile } from '../core/lock.js';
@@ -563,9 +563,7 @@ async function stillPending(op: Exclude<Operation, { kind: 'status' }>, deps: Di
       const c = await readSpecContinuation(op.target.project, op.target.jobId, home);
       return c !== undefined && specStatus(c) === 'awaiting' && c.round === op.round;
     }
-    const job = await loadJob(op.target.project);
-    if (job.jobId !== op.target.jobId || job.state.stage !== op.target.stage) return false;
-    return op.target.revision === undefined || (await checkpointRevision(job, deps.jobs.listTags)) === op.target.revision;
+    return await isCurrent(op.target, deps.jobs.listTags);
   } catch {
     return op.kind !== 'start' && op.kind !== 'spec-retry' && op.kind !== 'spec-answer' && op.kind !== 'spec-revise';
   }
