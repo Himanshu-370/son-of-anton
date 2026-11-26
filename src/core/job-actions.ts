@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { readRegularFile, writeFileAtomic } from './atomic.js';
 import { budgetSettings, loadAntonConfig } from './anton-config.js';
@@ -8,7 +9,7 @@ import { allowanceUsage, stageGroup, usd } from './budget.js';
 import { AREA_ORDER } from './config.js';
 import { commitAll, currentBranch, isClean, listTags as defaultListTags, switchBranch, tagHead } from './git.js';
 import { assertOnJobBranch, currentJobId } from './job.js';
-import { AlreadyRunning, isRunning, waitForLockFile } from './lock.js';
+import { AlreadyRunning, isRunning, lockHolder, removeLockIfHeldBy, waitForLockFile } from './lock.js';
 import { jobDir as jobDirOf } from './paths.js';
 import { getProject } from './registry.js';
 import { loadSecrets } from './secrets.js';
@@ -501,17 +502,93 @@ export async function abandonJob(target: ActionTarget, d: JobActionDeps): Promis
   }, d);
 }
 
+export type StopProcessDeps = {
+  kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
+  sleep?: (ms: number) => Promise<void>;
+};
+
+type StopDeps = Pick<JobActionDeps, 'out' | 'err' | 'stopContainer' | 'lockWaitMs' | 'listTags'> & StopProcessDeps;
+
+/** Stop the local runner for a captured job target and record its interruption. */
+export async function stopJob(target: ActionTarget, d: StopDeps): Promise<ActionOutcome> {
+  const { project } = target;
+  const job = await loadJob(project);
+  const pid = await lockHolder(job.repo);
+  const fresh = await loadJob(project);
+  const why = await mismatch(fresh, target, d.listTags, true);
+  if (why || fresh.repo !== job.repo) {
+    d.err(staleMessage(fresh, target, why ?? 'stage', `${project} changed before the stop`));
+    return stale;
+  }
+
+  const kill = d.kill ?? ((pid, signal) => { process.kill(pid, signal); });
+  const sleep = d.sleep ?? delay;
+  const GRACE_MS = 10_000;
+  const POLL_MS = 250;
+  const KILL_WAIT_MS = 2_000;
+  const alive = (pid: number): boolean => {
+    try {
+      kill(pid, 0);
+      return true;
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  };
+
+  if (pid !== undefined && alive(pid)) {
+    d.out(`Stopping ${project} (pid ${pid})…`);
+    kill(pid, 'SIGTERM');
+    let waited = 0;
+    while (waited < GRACE_MS && alive(pid)) {
+      await sleep(POLL_MS);
+      waited += POLL_MS;
+    }
+    if (alive(pid) && (await lockHolder(job.repo)) === pid) {
+      d.out('Still running after 10s; sending SIGKILL.');
+      try {
+        kill(pid, 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+      let killWait = 0;
+      while (killWait < KILL_WAIT_MS && alive(pid)) {
+        await sleep(POLL_MS);
+        killWait += POLL_MS;
+      }
+    }
+  } else {
+    d.out(`${project} has no running process.`);
+  }
+  // The runner dies without its finally, so clear its lock once the pid is confirmed dead.
+  if (pid !== undefined) {
+    if (alive(pid)) d.err(`pid ${pid} is still alive; leaving the run lock in place.`);
+    else await removeLockIfHeldBy(job.repo, pid);
+  }
+  await d.stopContainer(containerName(project));
+  try {
+    return await interruptJob(target, d, { matchStage: true });
+  } catch (e) {
+    const why = e instanceof Error ? e.message : String(e);
+    d.err(`${project}: the run was stopped, but the pause was not recorded (${why}). Run anton stop ${project} again to record it.`);
+    return refused();
+  }
+}
+
 /**
  * Pause the job `anton stop` just killed. The caller has already stopped the run and its container; under the lock
  * this pauses the job as `interrupted` only if it is still the same job and in an active stage (a stage that moved on
  * to a Checkpoint or an end is only reported). A replaced job is left alone.
  */
-export async function interruptJob(target: ActionTarget, d: Pick<JobActionDeps, 'out' | 'err' | 'lockWaitMs'>): Promise<ActionOutcome> {
+export async function interruptJob(
+  target: ActionTarget,
+  d: Pick<JobActionDeps, 'out' | 'err' | 'lockWaitMs' | 'listTags'>,
+  opts: { matchStage?: boolean } = {},
+): Promise<ActionOutcome> {
   const p = target.project;
   return decide<{ paused: JobState | undefined; stage: Stage }>(target, {
     nothing: `${p} changed before the stop`,
     staleNote: "The run was stopped, but the job's state was not changed.",
-    matchStage: false,
+    matchStage: opts.matchStage ?? false,
     apply: async (job) => {
       if (!ACTIVE_STAGES.includes(job.state.stage)) return { result: { paused: undefined, stage: job.state.stage } };
       const paused = pause(job.state, 'interrupted');
@@ -528,6 +605,14 @@ export async function interruptJob(target: ActionTarget, d: Pick<JobActionDeps, 
   }, d);
 }
 
+export async function readJobFinding(jobDir: string, findingId: string): Promise<SecurityFinding | undefined> {
+  if (!findingId.startsWith('SEC-')) return undefined;
+  const raw = await readRegularFile(join(jobDir, 'evidence', 'results.json'));
+  if (raw === undefined) return undefined;
+  const evidence = JSON.parse(raw) as { security?: { findings?: SecurityFinding[] } };
+  return evidence.security?.findings?.find((finding) => finding.id === findingId);
+}
+
 /** Record an accepted security risk. Allowed while paused or awaiting final review. */
 export async function acceptJobRisk(target: ActionTarget, findingId: string, reason: string, d: JobActionDeps): Promise<ActionOutcome> {
   return decide(target, {
@@ -542,16 +627,7 @@ export async function acceptJobRisk(target: ActionTarget, findingId: string, rea
       return false;
     },
     apply: async (job) => {
-      let findings: SecurityFinding[] = [];
-      try {
-        const raw = JSON.parse(await fsp.readFile(join(job.jobDir, 'evidence', 'results.json'), 'utf8')) as {
-          security?: { findings?: SecurityFinding[] };
-        };
-        findings = raw.security?.findings ?? [];
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-      }
-      const finding = findingId.startsWith('SEC-') ? findings.find((f) => f.id === findingId) : undefined;
+      const finding = await readJobFinding(job.jobDir, findingId);
       if (!finding) {
         d.err(`Unknown security finding ${findingId}`);
         return undefined;

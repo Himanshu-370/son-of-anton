@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -8,7 +8,7 @@ import { registerProject } from '../../src/core/registry.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
 import { acquireLock, waitForLockFile } from '../../src/core/lock.js';
 import {
-  abandonJob, acceptJobRisk, approveJob, interruptJob, isCurrent, resumeJob, type ActionTarget, type JobActionDeps,
+  abandonJob, acceptJobRisk, approveJob, interruptJob, isCurrent, resumeJob, stopJob, type ActionTarget, type JobActionDeps,
 } from '../../src/core/job-actions.js';
 
 let home: string;
@@ -140,6 +140,26 @@ describe('Owner actions', () => {
     expect(await isCurrent(target('paused', { revision: 'paused-3' }))).toBe(false);
     await saveState(dir, { ...(await loadState(dir)), stage: 'build' });
     expect(await isCurrent(target('paused'))).toBe(false);
+  });
+
+  it('does not signal a runner or stop its container when the stop target is stale', async () => {
+    const { repo } = await project({ stage: 'verify' });
+    await writeFile(join(repo, '.anton', 'run.lock'), JSON.stringify({ pid: 4242 }));
+    const kill = vi.fn();
+    const stopContainer = vi.fn(async () => undefined);
+    const { d } = fake({ stopContainer });
+    expect(await stopJob(target('build'), { ...d, kill })).toEqual({ code: 1, status: 'stale' });
+    expect(kill).not.toHaveBeenCalled();
+    expect(stopContainer).not.toHaveBeenCalled();
+  });
+
+  it('leaves a newer stage intact when the runner moved after the stop began', async () => {
+    const { dir } = await project({ stage: 'build' });
+    const { d } = fake({
+      stopContainer: async () => saveState(dir, { ...(await loadState(dir)), stage: 'verify' }),
+    });
+    expect(await stopJob(target('build'), d)).toEqual({ code: 1, status: 'stale' });
+    expect((await loadState(dir)).stage).toBe('verify');
   });
 
   describe('interruptJob', () => {

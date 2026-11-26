@@ -2,8 +2,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import {
-  abandonJob, acceptJobRisk, approveJob, isCurrent, loadJob, rejectJob, resumeJob, targetOf,
-  type ActionOutcome, type ActionTarget, type JobActionDeps,
+  abandonJob, acceptJobRisk, approveJob, isCurrent, loadJob, rejectJob, resumeJob, stopJob, targetOf,
+  type ActionOutcome, type ActionTarget, type JobActionDeps, type StopProcessDeps,
 } from '../core/job-actions.js';
 import { waitForLockFile } from '../core/lock.js';
 import { antonHome } from '../core/paths.js';
@@ -65,6 +65,7 @@ export type Operation =
   | { kind: 'reject'; target: ActionTarget; notes: string }
   | { kind: 'resume'; target: ActionTarget; budget?: number; acceptAsIs?: boolean }
   | { kind: 'abandon'; target: ActionTarget }
+  | { kind: 'stop'; target: ActionTarget }
   | { kind: 'accept-risk'; target: ActionTarget; findingId: string; reason: string }
   | { kind: 'lesson'; decision: 'accept' | 'reject'; proposal: { id: string; revision: string }; text?: string }
   | { kind: 'start'; mode: 'new' | 'change'; project?: string; description: string }
@@ -190,7 +191,7 @@ export interface DispatchDeps {
   config: SlackConfig;
   home?: string;
   /** The job action effects (spawn, Docker, Retro); output is collected per action. */
-  jobs: Omit<JobActionDeps, 'out' | 'err'>;
+  jobs: Omit<JobActionDeps, 'out' | 'err'> & StopProcessDeps;
   /** The project whose recorded channel ID this is. Defaults to the outbox's channel map. */
   projectForChannel?: (channelId: string) => Promise<string | undefined>;
   /** The job whose thread this is. Defaults to the outbox's thread map. */
@@ -662,6 +663,7 @@ async function run(op: Exclude<Operation, { kind: 'status' }>, deps: DispatchDep
     case 'approve': outcome = await approveJob(op.target, d); break;
     case 'reject': outcome = await rejectJob(op.target, op.notes, d); break;
     case 'resume': outcome = await resumeJob(op.target, { budget: op.budget, acceptAsIs: op.acceptAsIs }, d); break;
+    case 'stop': outcome = await stopJob(op.target, { ...d, kill: deps.jobs.kill, sleep: deps.jobs.sleep }); break;
     case 'abandon': outcome = await abandonJob(op.target, d); break;
     case 'accept-risk': outcome = await acceptJobRisk(op.target, op.findingId, op.reason, d); break;
   }
