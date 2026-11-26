@@ -64,6 +64,21 @@ describe('classifyIntent', () => {
     expect(send.mock.calls[0]?.[0].messages[0]?.content).not.toContain(value);
   });
 
+  it('uses fixed fence delimiters and checks the escaped UTF-8 byte length', async () => {
+    const { deps, send } = await fixture();
+    const tick = String.fromCharCode(96);
+    const fence = tick.repeat(3);
+    const text = tick.repeat(1000);
+    await classifyIntent({ ...input, text }, deps);
+    const lines = String(send.mock.calls[0]?.[0].messages[0]?.content).split('\n');
+    expect(lines.filter((line) => line === fence)).toHaveLength(4);
+    expect(lines[2]).toBe('\\u0060'.repeat(1000));
+    expect(Buffer.byteLength(lines[2]!)).toBe(6000);
+    expect(await classifyIntent({ ...input, requestKey: 'event:larger', text: text + tick }, deps))
+      .toEqual({ kind: 'unavailable', reason: 'input_too_large' });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   it('sends bounded allowlisted facts and redacts fenced message text', async () => {
     const { deps, send } = await fixture();
     const projects = Array.from({ length: 300 }, (_, i) => ({

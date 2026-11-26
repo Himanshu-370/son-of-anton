@@ -358,7 +358,7 @@ describe('anton status: allowance', () => {
 describe('anton stop', () => {
   it('SIGTERM, then SIGKILL after 10s, removes the container, pauses interrupted', async () => {
     const { repo, dir } = await project('p', { stage: 'build', round: 1 });
-    await writeFile(join(repo, '.anton', 'run.lock'), JSON.stringify({ pid: 4242 }));
+    await writeFile(join(repo, '.anton', 'run.lock'), JSON.stringify({ pid: 4242, nonce: '4242.00000000-0000-4000-8000-000000000001' }));
     const signals: (string | number)[] = [];
     let slept = 0;
     const stopped: string[] = [];
@@ -374,7 +374,7 @@ describe('anton stop', () => {
     expect(await stopCommand('p', h.deps)).toBe(0);
     expect(signals.filter((s) => s !== 0)).toEqual(['SIGTERM', 'SIGKILL']);
     expect(slept).toBeGreaterThanOrEqual(10_000);
-    expect(stopped).toEqual(['anton-p']);
+    expect(stopped).toEqual([]);
     expect(await loadState(dir)).toMatchObject({ stage: 'paused', pausedFrom: 'build', pauseReason: 'interrupted' });
   });
 });
@@ -387,7 +387,7 @@ describe('anton stop (decision lock held)', () => {
       const h = harness({ lockWaitMs: 50 });
       expect(await stopCommand('p', h.deps)).toBe(1);
       expect(h.errText()).toContain(
-        'p: the run was stopped, but the pause was not recorded (Another decision on p is in progress. Try again in a moment.). Run anton stop p again to record it.',
+        'p: the pause was not recorded (Another decision on p is in progress. Try again in a moment.). Check its status before retrying.',
       );
       expect(await loadState(dir)).toMatchObject({ stage: 'build' });
     } finally {
@@ -427,7 +427,7 @@ describe('anton stop (lock cleanup)', () => {
 
   it('removes the dead run lock after stopping', async () => {
     const { repo } = await project('p', { stage: 'build', round: 1 });
-    await writeFile(lockFile(repo), JSON.stringify({ pid: 4242 }));
+    await writeFile(lockFile(repo), JSON.stringify({ pid: 4242, nonce: '4242.00000000-0000-4000-8000-000000000001' }));
     const h = harness({ kill: killer(), sleep: async () => undefined });
     expect(await stopCommand('p', h.deps)).toBe(0);
     await expect(access(lockFile(repo))).rejects.toThrow();
@@ -435,12 +435,12 @@ describe('anton stop (lock cleanup)', () => {
 
   it('leaves the lock alone if it now holds a different pid', async () => {
     const { repo } = await project('p', { stage: 'build', round: 1 });
-    await writeFile(lockFile(repo), JSON.stringify({ pid: 4242 }));
+    await writeFile(lockFile(repo), JSON.stringify({ pid: 4242, nonce: '4242.00000000-0000-4000-8000-000000000001' }));
     const h = harness({
       kill: killer(() => writeFileSync(lockFile(repo), JSON.stringify({ pid: 5555 }))),
       sleep: async () => undefined,
     });
-    expect(await stopCommand('p', h.deps)).toBe(0);
+    expect(await stopCommand('p', h.deps)).toBe(1);
     expect(JSON.parse(await readFile(lockFile(repo), 'utf8')).pid).toBe(5555);
   });
 });
@@ -448,7 +448,7 @@ describe('anton stop (lock cleanup)', () => {
 describe('anton stop (graceful)', () => {
   it('no SIGKILL when the run exits after SIGTERM', async () => {
     const { repo } = await project('p', { stage: 'verify', round: 1 });
-    await writeFile(join(repo, '.anton', 'run.lock'), JSON.stringify({ pid: 4242 }));
+    await writeFile(join(repo, '.anton', 'run.lock'), JSON.stringify({ pid: 4242, nonce: '4242.00000000-0000-4000-8000-000000000001' }));
     const signals: (string | number)[] = [];
     const h = harness({
       kill: (_pid, sig) => {

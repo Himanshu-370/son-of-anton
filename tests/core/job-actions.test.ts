@@ -6,9 +6,9 @@ import { execa } from 'execa';
 import { jobDir as jobDirOf } from '../../src/core/paths.js';
 import { registerProject } from '../../src/core/registry.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
-import { acquireLock, waitForLockFile } from '../../src/core/lock.js';
+import { acquireLock, acquireStoppedRun, readRunLock, waitForLockFile } from '../../src/core/lock.js';
 import {
-  abandonJob, acceptJobRisk, approveJob, interruptJob, isCurrent, resumeJob, stopJob, type ActionTarget, type JobActionDeps,
+  abandonJob, acceptJobRisk, approveJob, interruptJob, isCurrent, resumeJob, stopJob, stopTarget, type ActionTarget, type JobActionDeps,
 } from '../../src/core/job-actions.js';
 
 let home: string;
@@ -46,6 +46,10 @@ function fake(extra: Partial<JobActionDeps> = {}) {
 }
 
 const target = (stage: JobState['stage'], over: Partial<ActionTarget> = {}): ActionTarget => ({ project: 'p', jobId: '1-init', stage, ...over });
+const nonce = '4242.00000000-0000-4000-8000-000000000001';
+const nextNonce = '4242.00000000-0000-4000-8000-000000000002';
+const writeRunLock = (repo: string, nonce: string) =>
+  writeFile(join(repo, '.anton', 'run.lock'), JSON.stringify({ pid: 4242, nonce }));
 const writeClaim = (repo: string) =>
   writeFile(join(repo, '.anton', 'spawn-claim.json'), JSON.stringify({ jobId: '1-init', pid: process.pid, at: Date.now() }));
 const paused = { stage: 'paused', pausedFrom: 'verify', pauseReason: 'round_cap', round: 1 } as const;
@@ -142,24 +146,79 @@ describe('Owner actions', () => {
     expect(await isCurrent(target('paused'))).toBe(false);
   });
 
-  it('does not signal a runner or stop its container when the stop target is stale', async () => {
-    const { repo } = await project({ stage: 'verify' });
-    await writeFile(join(repo, '.anton', 'run.lock'), JSON.stringify({ pid: 4242 }));
+  it.each([
+    ['verify', nonce, nonce],
+    ['build', nextNonce, nonce],
+    ['build', nonce, undefined],
+  ] as const)('does not signal a stale or unbound stop (%s, %s, %s)', async (stage, holder, runNonce) => {
+    const { repo } = await project({ stage });
+    await writeRunLock(repo, holder);
+    const kill = vi.fn();
+    const { d } = fake();
+    expect(await stopJob(target('build', { runNonce }), { ...d, kill })).toEqual({ code: 1, status: 'stale' });
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it('does not kill, pause, or clean up a same-PID replacement during the grace period', async () => {
+    const { repo, dir } = await project({ stage: 'build' });
+    await writeRunLock(repo, nonce);
     const kill = vi.fn();
     const stopContainer = vi.fn(async () => undefined);
     const { d } = fake({ stopContainer });
-    expect(await stopJob(target('build'), { ...d, kill })).toEqual({ code: 1, status: 'stale' });
-    expect(kill).not.toHaveBeenCalled();
+    expect(await stopJob(target('build', { runNonce: nonce }), {
+      ...d, kill, sleep: async () => writeRunLock(repo, nextNonce),
+    })).toEqual({ code: 1, status: 'stale' });
+    expect(kill.mock.calls.filter(([, signal]) => signal !== 0)).toEqual([[4242, 'SIGTERM']]);
     expect(stopContainer).not.toHaveBeenCalled();
+    expect(await readFile(join(repo, '.anton', 'run.lock'), 'utf8')).toContain(nextNonce);
+    expect((await loadState(dir)).stage).toBe('build');
   });
 
-  it('leaves a newer stage intact when the runner moved after the stop began', async () => {
-    const { dir } = await project({ stage: 'build' });
-    const { d } = fake({
-      stopContainer: async () => saveState(dir, { ...(await loadState(dir)), stage: 'verify' }),
-    });
-    expect(await stopJob(target('build'), d)).toEqual({ code: 1, status: 'stale' });
-    expect((await loadState(dir)).stage).toBe('verify');
+  it('does not pause a same-stage replacement even after the original has exited', async () => {
+    const { repo, dir } = await project({ stage: 'build' });
+    await writeRunLock(repo, nonce);
+    let exited = false;
+    const stopContainer = vi.fn(async () => undefined);
+    const { d } = fake({ stopContainer });
+    expect(await stopJob(target('build', { runNonce: nonce }), {
+      ...d,
+      kill: () => {
+        if (exited) throw Object.assign(new Error('exited'), { code: 'ESRCH' });
+      },
+      sleep: async () => { await writeRunLock(repo, nextNonce); exited = true; },
+    })).toEqual({ code: 1, status: 'stale' });
+    expect(stopContainer).not.toHaveBeenCalled();
+    expect((await loadState(dir)).stage).toBe('build');
+  });
+
+  it('pauses a matching stopped acquisition without a name-based container cleanup', async () => {
+    const { repo, dir } = await project({ stage: 'build' });
+    await writeRunLock(repo, nonce);
+    const stopContainer = vi.fn(async () => undefined);
+    const { d } = fake({ stopContainer });
+    expect(await stopJob(target('build', { runNonce: nonce }), {
+      ...d, kill: () => { throw Object.assign(new Error('exited'), { code: 'ESRCH' }); },
+    })).toEqual({ code: 0, status: 'done' });
+    expect(stopContainer).not.toHaveBeenCalled();
+    expect((await loadState(dir)).stage).toBe('paused');
+  });
+
+  it('prevents an acquisition during stop bookkeeping and never targets the guard process', async () => {
+    const { repo } = await project({ stage: 'build' });
+    const release = await acquireStoppedRun(repo, undefined);
+    try {
+      const holding = await readRunLock(repo);
+      expect(holding).toMatchObject({ pid: process.pid, stopping: true });
+      await expect(acquireLock(repo)).rejects.toThrow('already running');
+      const job = { name: 'p', repo, jobId: '1-init', jobDir: jobDirOf(repo, '1-init'), state: await loadState(jobDirOf(repo, '1-init')) };
+      expect(await stopTarget(job)).toBeUndefined();
+      const { d } = fake();
+      const kill = vi.fn();
+      expect(await stopJob(target('build', { runNonce: holding?.nonce }), { ...d, kill })).toEqual({ code: 1, status: 'stale' });
+      expect(kill).not.toHaveBeenCalled();
+    } finally {
+      await release();
+    }
   });
 
   describe('interruptJob', () => {

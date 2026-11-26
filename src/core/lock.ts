@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, link, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, link, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export class AlreadyRunning extends Error {
@@ -30,8 +30,8 @@ function pidAlive(pid: number): boolean {
  */
 type LockRead =
   | { kind: 'absent' }
-  | { kind: 'live'; pid: number; nonce?: string }
-  | { kind: 'dead'; pid: number; nonce?: string }
+  | { kind: 'live'; pid: number; nonce?: string; stopping?: true }
+  | { kind: 'dead'; pid: number; nonce?: string; stopping?: true }
   | { kind: 'corrupt' }
   /** A read error other than ENOENT (EACCES, EIO, EMFILE, ...): the holder is unknown, so it is never taken over. */
   | { kind: 'unreadable'; code: string };
@@ -53,7 +53,7 @@ async function readLock(path: string): Promise<LockRead> {
     if (code === 'ENOENT') return { kind: 'absent' };
     return { kind: 'unreadable', code: code ?? 'unknown error' };
   }
-  let body: { pid?: unknown; nonce?: unknown };
+  let body: { pid?: unknown; nonce?: unknown; stopping?: unknown };
   try {
     body = JSON.parse(text);
   } catch {
@@ -62,7 +62,8 @@ async function readLock(path: string): Promise<LockRead> {
   const pid = body?.pid;
   if (!Number.isInteger(pid) || (pid as number) <= 0) return { kind: 'corrupt' };
   const nonce = typeof body.nonce === 'string' ? { nonce: body.nonce } : {};
-  return { kind: pidAlive(pid as number) ? 'live' : 'dead', pid: pid as number, ...nonce };
+  const stopping = body.stopping === true ? { stopping: true as const } : {};
+  return { kind: pidAlive(pid as number) ? 'live' : 'dead', pid: pid as number, ...nonce, ...stopping };
 }
 
 async function readHolder(path: string): Promise<number | undefined> {
@@ -70,14 +71,27 @@ async function readHolder(path: string): Promise<number | undefined> {
   return r.kind === 'live' || r.kind === 'dead' ? r.pid : undefined;
 }
 
-/** The pid recorded in the repo's run lock, alive or not. */
-export async function lockHolder(repo: string): Promise<number | undefined> {
-  return readHolder(lockPath(repo));
+export type RunLockHolder = { pid: number; nonce?: string; stopping?: true };
+export const RUN_NONCE = /^[1-9]\d*\.[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+
+export class RunLockChanged extends Error {
+  constructor() {
+    super('The runner acquisition changed.');
+  }
 }
 
-/** Remove the run lock only if it still records `pid` (e.g. after that process was killed). */
-export async function removeLockIfHeldBy(repo: string, pid: number): Promise<void> {
-  if ((await readHolder(lockPath(repo))) === pid) await rm(lockPath(repo), { force: true });
+export async function readRunLock(repo: string): Promise<RunLockHolder | undefined> {
+  const path = lockPath(repo);
+  const r = await readLock(path);
+  if (r.kind === 'unreadable') throw new LockUnreadable(path, r.code);
+  if (r.kind === 'corrupt') throw new RunLockChanged();
+  if (r.kind !== 'absent') return { pid: r.pid, nonce: r.nonce, stopping: r.stopping };
+  return undefined;
+}
+
+/** Reserve the stopped acquisition (or an empty slot) without ever taking over a different holder. */
+export function acquireStoppedRun(repo: string, holder: RunLockHolder | undefined): Promise<() => Promise<void>> {
+  return acquire(join(repo, '.anton', 'run.lock'), { holder });
 }
 
 export async function isRunning(repo: string): Promise<{ running: boolean; pid?: number }> {
@@ -127,24 +141,32 @@ const pause = () => new Promise((r) => setTimeout(r, 2 + Math.random() * 8));
  * AlreadyRunning with its pid. Each acquisition writes its own nonce, and the release removes the file only
  * while it still holds that nonce, so a release never removes another holder's lock, even in this process.
  */
-export async function acquireLockFile(path: string): Promise<() => Promise<void>> {
+export function acquireLockFile(path: string): Promise<() => Promise<void>> {
+  return acquire(path);
+}
+
+async function acquire(path: string, stopped?: { holder: RunLockHolder | undefined }): Promise<() => Promise<void>> {
   const mutex = `${path}.takeover`;
   const uniq = `${process.pid}.${randomUUID()}`;
   const tmp = `${path}.${uniq}`;
   const mtmp = `${path}.mtx.${uniq}`;
-  const body = JSON.stringify({ pid: process.pid, nonce: uniq, startedAt: new Date().toISOString() });
+  const body = JSON.stringify({ pid: process.pid, nonce: uniq, startedAt: new Date().toISOString(), ...(stopped ? { stopping: true } : {}) });
   try {
     await writeFile(tmp, body);
     let unreadable = 0;
     for (let attempt = 0; attempt < HANDOFF_ATTEMPTS; attempt++) {
-      try {
-        // link() fails with EEXIST if the lock exists, and the lock appears with full content.
-        await link(tmp, path);
-        return release(path, uniq);
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      if (!stopped?.holder) {
+        try {
+          // link() fails with EEXIST if the lock exists, and the lock appears with full content.
+          await link(tmp, path);
+          return release(path, uniq);
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+          if (stopped) throw new RunLockChanged();
+        }
       }
       const seen = await readLock(path);
+      if (stopped?.holder && seen.kind !== 'dead' && seen.kind !== 'unreadable') throw new RunLockChanged();
       if (seen.kind === 'live') throw new AlreadyRunning(seen.pid);
       if (seen.kind === 'absent') continue; // released in between: link again
       if (seen.kind === 'unreadable') {
@@ -163,6 +185,12 @@ export async function acquireLockFile(path: string): Promise<() => Promise<void>
         // The last check before removing. A dead or corrupt file cannot change now: its holder is gone, a plain
         // link fails while it exists, and every other takeover needs the mutex we hold.
         const now = await readLock(path);
+        if (stopped?.holder) {
+          if (now.kind !== 'dead' || now.pid !== stopped.holder.pid || now.nonce !== stopped.holder.nonce) throw new RunLockChanged();
+          // The dead lock stays in place until replaced, so a plain acquisition cannot slip in.
+          await rename(tmp, path);
+          return release(path, uniq);
+        }
         if (now.kind === 'live') throw new AlreadyRunning(now.pid);
         if (now.kind === 'dead' || now.kind === 'corrupt') await rm(path, { force: true });
       } finally {

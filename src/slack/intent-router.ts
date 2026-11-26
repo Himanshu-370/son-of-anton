@@ -10,7 +10,7 @@ import { loadSecrets } from '../core/secrets.js';
 import { PAUSE_REASONS, STAGES } from '../core/state.js';
 import { loadPrompt } from '../stages/prompts.js';
 import { chatRequestKnown, reserveChatSpend, settleChatSpend } from './chat-budget.js';
-import { anthropicChatClient, chatUpperBoundUsd, fenceFor, scrub, UNBILLED_STATUSES, validUsage, type ChatDeps } from './chat.js';
+import { anthropicChatClient, chatUpperBoundUsd, scrub, UNBILLED_STATUSES, validUsage, type ChatDeps } from './chat.js';
 import { jobId, projectId } from './events.js';
 import { sanitizeSlackText } from './inbound.js';
 import { intentDescriptions, intentSchema, type Intent } from './intents.js';
@@ -46,13 +46,15 @@ export type IntentClassification =
 const unavailable = (reason: IntentUnavailableReason): IntentClassification => ({ kind: 'unavailable', reason });
 const clarification = (text = ASK): IntentClassification => ({ kind: 'clarification', text });
 
+const escapeFence = (text: string) => text.replaceAll('`', '\\u0060');
+
 function projectFacts(facts: readonly IntentProjectFact[], secrets: Record<string, string>): string {
   const rows: string[] = [];
   let bytes = 2; // JSON array brackets
   for (const fact of facts) {
     const parsed = factSchema.safeParse(fact);
     if (!parsed.success) continue;
-    const row = scrub(JSON.stringify(parsed.data), secrets);
+    const row = escapeFence(scrub(JSON.stringify(parsed.data), secrets));
     const size = Buffer.byteLength(row) + (rows.length ? 1 : 0);
     if (bytes + size > FACT_BYTES) break;
     rows.push(row);
@@ -95,10 +97,10 @@ export async function classifyIntent(input: IntentRouterInput, deps: IntentRoute
         secrets[`${project}/${name}`] = value;
       }
     }
-    const message = scrub(input.text, secrets);
+    const message = escapeFence(scrub(input.text, secrets));
     if (Buffer.byteLength(message) > MESSAGE_BYTES) return unavailable('input_too_large');
     const facts = projectFacts(input.projects, secrets);
-    const fence = fenceFor([message, facts]);
+    const fence = '`'.repeat(3);
     const user = ['Slack message:', fence, message, fence, 'Project facts:', fence, facts, fence].join('\n');
     const system = `${await loadPrompt('slack-intent.md')}\n\nAvailable intents:\n${intentDescriptions}`;
     const schema = zodOutputFormat(intentSchema).schema;

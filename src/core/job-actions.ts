@@ -9,7 +9,7 @@ import { allowanceUsage, stageGroup, usd } from './budget.js';
 import { AREA_ORDER } from './config.js';
 import { commitAll, currentBranch, isClean, listTags as defaultListTags, switchBranch, tagHead } from './git.js';
 import { assertOnJobBranch, currentJobId } from './job.js';
-import { AlreadyRunning, isRunning, lockHolder, removeLockIfHeldBy, waitForLockFile } from './lock.js';
+import { acquireStoppedRun, AlreadyRunning, isRunning, readRunLock, RUN_NONCE, RunLockChanged, waitForLockFile } from './lock.js';
 import { jobDir as jobDirOf } from './paths.js';
 import { getProject } from './registry.js';
 import { loadSecrets } from './secrets.js';
@@ -31,7 +31,7 @@ import { failureReportPath } from '../stages/verify.js';
  */
 
 /** What an Owner action acts on. `revision` binds a review action to the exact spec or delivery the owner saw. */
-export type ActionTarget = { project: string; jobId: string; stage: Stage; revision?: string };
+export type ActionTarget = { project: string; jobId: string; stage: Stage; revision?: string; runNonce?: string };
 
 export type ActionStatus = 'done' | 'stale' | 'refused';
 /** `code` is the CLI exit code: 0 done, 1 refused or stale, 2 Docker preflight failed. */
@@ -135,10 +135,11 @@ async function mismatch(
   target: ActionTarget,
   listTags: ((repo: string, pattern: string) => Promise<string[]>) | undefined,
   matchStage: boolean,
-): Promise<'job' | 'stage' | 'revision' | undefined> {
+): Promise<'job' | 'stage' | 'revision' | 'runner' | undefined> {
   if (fresh.jobId !== target.jobId) return 'job';
   if (matchStage && fresh.state.stage !== target.stage) return 'stage';
   if (target.revision !== undefined && (await checkpointRevision(fresh, listTags)) !== target.revision) return 'revision';
+  if (target.runNonce !== undefined && (await readRunLock(fresh.repo))?.nonce !== target.runNonce) return 'runner';
   return undefined;
 }
 
@@ -148,9 +149,10 @@ export async function withDecisionLock<T>(project: string, body: (fresh: LoadedJ
 }
 
 function staleMessage(
-  fresh: LoadedJob, target: ActionTarget, why: 'job' | 'stage' | 'revision', nothing: string, note = 'Nothing was changed.',
+  fresh: LoadedJob, target: ActionTarget, why: 'job' | 'stage' | 'revision' | 'runner', nothing: string, note = 'Nothing was changed.',
 ): string {
   if (why === 'job') return `${target.project}: job ${target.jobId} is no longer the current job (now ${fresh.jobId}). ${note}`;
+  if (why === 'runner') return `${target.project}: the runner changed after this stop was requested. ${note}`;
   if (why === 'revision') return `${target.project}: this review is out of date; a newer version is waiting. ${note}`;
   return `${nothing} (stage: ${fresh.state.stage})`;
 }
@@ -466,6 +468,11 @@ async function planResume(job: LoadedJob, opts: ResumeOptions, d: Pick<JobAction
   return state;
 }
 
+/** A preview can reject a resume that has no available runner slot. Execution checks again. */
+export async function resumeRunnerAvailable(job: LoadedJob): Promise<boolean> {
+  return !(await isRunning(job.repo)).running && !(ACTIVE_STAGES.includes(job.state.stage) && await spawnClaimed(job));
+}
+
 /** Continue a paused job, or an interrupted one (active stage, no live run). `budget` sets a new total cap. */
 export async function resumeJob(target: ActionTarget, opts: ResumeOptions, d: JobActionDeps): Promise<ActionOutcome> {
   return decide(target, {
@@ -507,25 +514,39 @@ export type StopProcessDeps = {
   sleep?: (ms: number) => Promise<void>;
 };
 
-type StopDeps = Pick<JobActionDeps, 'out' | 'err' | 'stopContainer' | 'lockWaitMs' | 'listTags'> & StopProcessDeps;
+type StopDeps = Pick<JobActionDeps, 'out' | 'err' | 'lockWaitMs' | 'listTags'> & StopProcessDeps;
 
-/** Stop the local runner for a captured job target and record its interruption. */
-export async function stopJob(target: ActionTarget, d: StopDeps): Promise<ActionOutcome> {
+/** Bind a stop preview to a single, nonce-bearing acquisition of the project's run lock. */
+export async function stopTarget(job: LoadedJob): Promise<(ActionTarget & { runNonce: string }) | undefined> {
+  const holder = await readRunLock(job.repo);
+  if (!holder?.nonce || holder.stopping || !RUN_NONCE.test(holder.nonce) || !holder.nonce.startsWith(`${holder.pid}.`)) return undefined;
+  return { ...targetOf(job), runNonce: holder.nonce };
+}
+
+/** Stop only the bound runner. Docker's reusable project name does not identify its container. */
+export async function stopJob(target: ActionTarget, d: StopDeps, opts: { allowIdle?: boolean } = {}): Promise<ActionOutcome> {
   const { project } = target;
-  const job = await loadJob(project);
-  const pid = await lockHolder(job.repo);
-  const fresh = await loadJob(project);
-  const why = await mismatch(fresh, target, d.listTags, true);
-  if (why || fresh.repo !== job.repo) {
-    d.err(staleMessage(fresh, target, why ?? 'stage', `${project} changed before the stop`));
+  const changed = () => {
+    d.err(`${project}: the runner or job changed after this stop was requested.`);
     return stale;
-  }
-
+  };
+  if (target.runNonce === undefined && !opts.allowIdle) return changed();
+  if (target.runNonce !== undefined && !RUN_NONCE.test(target.runNonce)) return changed();
+  const job = await loadJob(project);
+  const { runNonce, ...jobTarget } = target;
+  const currentJob = async () => {
+    const fresh = await loadJob(project);
+    return fresh.repo === job.repo && (await mismatch(fresh, jobTarget, d.listTags, true)) === undefined;
+  };
+  const currentHolder = async () => {
+    const holder = await readRunLock(job.repo);
+    if (runNonce === undefined ? holder !== undefined : holder?.nonce !== runNonce || holder.stopping || !runNonce.startsWith(`${holder.pid}.`)) {
+      throw new RunLockChanged();
+    }
+    return holder;
+  };
   const kill = d.kill ?? ((pid, signal) => { process.kill(pid, signal); });
   const sleep = d.sleep ?? delay;
-  const GRACE_MS = 10_000;
-  const POLL_MS = 250;
-  const KILL_WAIT_MS = 2_000;
   const alive = (pid: number): boolean => {
     try {
       kill(pid, 0);
@@ -535,60 +556,72 @@ export async function stopJob(target: ActionTarget, d: StopDeps): Promise<Action
     }
   };
 
-  if (pid !== undefined && alive(pid)) {
-    d.out(`Stopping ${project} (pid ${pid})…`);
-    kill(pid, 'SIGTERM');
-    let waited = 0;
-    while (waited < GRACE_MS && alive(pid)) {
-      await sleep(POLL_MS);
-      waited += POLL_MS;
-    }
-    if (alive(pid) && (await lockHolder(job.repo)) === pid) {
-      d.out('Still running after 10s; sending SIGKILL.');
-      try {
-        kill(pid, 'SIGKILL');
-      } catch {
-        /* already gone */
-      }
-      let killWait = 0;
-      while (killWait < KILL_WAIT_MS && alive(pid)) {
-        await sleep(POLL_MS);
-        killWait += POLL_MS;
-      }
-    }
-  } else {
-    d.out(`${project} has no running process.`);
-  }
-  // The runner dies without its finally, so clear its lock once the pid is confirmed dead.
-  if (pid !== undefined) {
-    if (alive(pid)) d.err(`pid ${pid} is still alive; leaving the run lock in place.`);
-    else await removeLockIfHeldBy(job.repo, pid);
-  }
-  await d.stopContainer(containerName(project));
   try {
-    return await interruptJob(target, d, { matchStage: true });
+    if (!(await currentJob())) return changed();
+    const holder = await currentHolder();
+    if (holder && alive(holder.pid)) {
+      const { pid } = holder;
+      d.out(`Stopping ${project} (pid ${pid})…`);
+      await currentHolder();
+      try {
+        kill(pid, 'SIGTERM');
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e;
+      }
+      for (let waited = 0; waited < 10_000 && alive(pid); waited += 250) await sleep(250);
+      if (alive(pid)) {
+        if (!(await currentJob())) return changed();
+        d.out('Still running after 10s; sending SIGKILL.');
+        await currentHolder();
+        try {
+          kill(pid, 'SIGKILL');
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e;
+        }
+        for (let waited = 0; waited < 2_000 && alive(pid); waited += 250) await sleep(250);
+      }
+      if (alive(pid)) {
+        d.err(`pid ${pid} is still alive. The pause was not recorded.`);
+        return refused();
+      }
+    } else {
+      d.out(`${project} has no running process.`);
+    }
+
+    if (holder) d.out('Container cleanup was skipped because the container could not be identified for this runner.');
+    const release = await acquireStoppedRun(job.repo, holder);
+    try {
+      return await interruptJob(jobTarget, d, { matchStage: true, expectedRepo: job.repo });
+    } finally {
+      await release();
+    }
   } catch (e) {
+    if (e instanceof RunLockChanged) return changed();
     const why = e instanceof Error ? e.message : String(e);
-    d.err(`${project}: the run was stopped, but the pause was not recorded (${why}). Run anton stop ${project} again to record it.`);
+    d.err(`${project}: the pause was not recorded (${why}). Check its status before retrying.`);
     return refused();
   }
 }
 
 /**
- * Pause the job `anton stop` just killed. The caller has already stopped the run and its container; under the lock
- * this pauses the job as `interrupted` only if it is still the same job and in an active stage (a stage that moved on
- * to a Checkpoint or an end is only reported). A replaced job is left alone.
+ * Record a runner interruption under the decision lock. The same job is paused only if it is in an active stage.
+ * A stop request can additionally require the captured stage and repository.
  */
 export async function interruptJob(
   target: ActionTarget,
   d: Pick<JobActionDeps, 'out' | 'err' | 'lockWaitMs' | 'listTags'>,
-  opts: { matchStage?: boolean } = {},
+  opts: { matchStage?: boolean; expectedRepo?: string } = {},
 ): Promise<ActionOutcome> {
   const p = target.project;
   return decide<{ paused: JobState | undefined; stage: Stage }>(target, {
     nothing: `${p} changed before the stop`,
     staleNote: "The run was stopped, but the job's state was not changed.",
     matchStage: opts.matchStage ?? false,
+    check: async (job) => {
+      if (opts.expectedRepo === undefined || job.repo === opts.expectedRepo) return true;
+      d.err(`${p}: the project location changed. The pause was not recorded.`);
+      return false;
+    },
     apply: async (job) => {
       if (!ACTIVE_STAGES.includes(job.state.stage)) return { result: { paused: undefined, stage: job.state.stage } };
       const paused = pause(job.state, 'interrupted');

@@ -1,6 +1,7 @@
 import { z } from 'zod';
+import { stageGroup } from '../core/budget.js';
 import { NoJobs } from '../core/job.js';
-import { checkpointRevision, loadJob, readJobFinding, targetOf, type ActionTarget, type LoadedJob } from '../core/job-actions.js';
+import { checkpointRevision, loadJob, readJobFinding, resumeRunnerAvailable, stopTarget, targetOf, type ActionTarget, type LoadedJob } from '../core/job-actions.js';
 import { readSpecContinuation, specStatus } from '../core/spec-continuation.js';
 import type { Stage } from '../core/state.js';
 import { ACTIVE_STAGES } from '../pipeline/runner.js';
@@ -214,6 +215,20 @@ export async function resolveIntent(value: Intent, context: IntentContext): Prom
   if (!entry.stages.includes(job.state.stage)) return refuse(`${project}: this action is unavailable at stage ${job.state.stage}.`);
   const reason = entry.check?.(job, args);
   if (reason) return refuse(reason);
+  if (intent === 'resume') {
+    if (!(await resumeRunnerAvailable(job))) return refuse('A runner is already active or starting for this project.');
+    const { stage, pauseReason, pausedFrom } = job.state;
+    if (stage === 'paused' && args.budgetUsd === undefined && !args.acceptAsIs
+      && (pauseReason === 'budget_cap' || (pauseReason === 'allowance' && stageGroup(pausedFrom ?? '')))) {
+      return clarify('What total budget in USD should the job resume with?');
+    }
+  }
+  if (intent === 'stop') {
+    const target = await stopTarget(job);
+    return target
+      ? { kind: 'operation', operation: entry.toOperation(target, args) }
+      : refuse('There is no identifiable runner to stop.');
+  }
   if (intent === 'accept_risk' && !(await readJobFinding(job.jobDir, args.riskId!))) {
     return refuse(`No finding named ${args.riskId} is recorded for this job.`);
   }
