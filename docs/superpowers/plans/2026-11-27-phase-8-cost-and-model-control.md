@@ -16,4 +16,10 @@
 4. Build insights from the ledger and job records. Test forecasts, rework, sample thresholds, recommendations, and trial expiry. Keep the numeric calculations in code.
 5. After Phase 7 lands, wire the Slack intents, confirmation cards and PM Home tab. Confirm that the Owner can raise a cap when paid routing is disabled. Check setup and the Home tab in a dedicated workspace.
 
+## Spend reservation handoff
+
+The host ledger now exposes `reserveSpend`, `settleSpend`, and `readMonthlySpend`. A capped reservation reads settled costs and open holds under the same host lock. Settlements retain the month of the original reservation. Settle with zero only when the provider confirms the request was unbilled. Leave unknown outcomes reserved for that month. A corrupt ledger blocks capped reservations, and skipped lines remain visible in reporting.
+
+The overall cap stays disabled until every paid path is wired and prior month-to-date charges are reconciled. The cap check must read the current locked snapshot because jobs can run in processes separate from the Slack service.
+
 Phase 9 consumes the spend and reservation APIs for calls. The design spec is on `feat/slack-hub-specs` until that documentation lands.

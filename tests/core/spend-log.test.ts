@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { readSpendLog, recordSpend, type SpendEntry } from '../../src/core/spend-log.js';
+import { readSpendLog, recordSpend, reserveSpend, settleSpend, readMonthlySpend, type SpendEntry } from '../../src/core/spend-log.js';
 
 const entry: SpendEntry = {
   id: 'build-1', at: '2026-11-27T10:00:00.000Z', source: 'build',
@@ -37,5 +37,44 @@ describe('host spend log', () => {
     await expect(recordSpend({ ...entry, usd: -1 }, home)).rejects.toThrow();
     await expect(recordSpend({ ...entry, role: 'invented' } as unknown as SpendEntry, home)).rejects.toThrow();
     expect(await readSpendLog(home)).toEqual({ entries: [], skipped: 0 });
+  });
+
+  it('reserves against settled spend and lets only one concurrent request fit', async () => {
+    await recordSpend({ ...entry, usd: 0.4 }, home);
+    const ids = ['request-1', 'request-2'];
+    const results = await Promise.all(ids.map((id) => reserveSpend({ ...entry, id, usd: 0.6 }, 1, home)));
+    expect(results.sort()).toEqual(['cap', 'reserved']);
+    expect(await readMonthlySpend('2026-11', home)).toEqual({ settledUsd: 0.4, reservedUsd: 0.6 });
+  });
+
+  it('settles the original UTC month once and keeps unknown outcomes reserved', async () => {
+    const request = { ...entry, id: 'request-1', at: '2026-11-30T23:59:59.900Z', usd: 0.5 };
+    expect(await reserveSpend(request, 0, home)).toBe('cap');
+    expect(await reserveSpend(request, 1, home)).toBe('reserved');
+    expect(await reserveSpend(request, 1, home)).toBe('duplicate');
+    expect(await reserveSpend({ ...request, id: 'unknown' }, 1, home)).toBe('reserved');
+    expect(await settleSpend('request-1', { usd: 0.2, tokens: entry.tokens }, home)).toBe(true);
+    expect(await settleSpend('request-1', { usd: 0.3 }, home)).toBe(false);
+    expect(await reserveSpend(request, 1, home)).toBe('duplicate');
+    expect(await readMonthlySpend('2026-11', home)).toEqual({ settledUsd: 0.2, reservedUsd: 0.5 });
+    expect(await readMonthlySpend('2026-12', home)).toEqual({ settledUsd: 0, reservedUsd: 0 });
+    expect(await readSpendLog(home)).toEqual({ entries: [{ ...request, usd: 0.2 }], skipped: 0 });
+  });
+
+  it('releases a known unbilled reservation and counts actual cost above the bound', async () => {
+    const request = { ...entry, id: 'request-1', usd: 0.6 };
+    expect(await reserveSpend(request, 1, home)).toBe('reserved');
+    expect(await settleSpend(request.id, { usd: 0 }, home)).toBe(true);
+    const next = { ...request, id: 'request-2' };
+    expect(await reserveSpend(next, 1, home)).toBe('reserved');
+    expect(await settleSpend(next.id, { usd: 1.05 }, home)).toBe(true);
+    expect(await reserveSpend({ ...next, id: 'request-3' }, 1, home)).toBe('cap');
+    expect(await readMonthlySpend('2026-11', home)).toEqual({ settledUsd: 1.05, reservedUsd: 0 });
+  });
+
+  it('reports corrupt records and refuses capped reservations against incomplete data', async () => {
+    await writeFile(join(home, 'spend.jsonl'), 'incomplete row');
+    expect(await reserveSpend(entry, 1, home)).toBe('unavailable');
+    expect(await readSpendLog(home)).toEqual({ entries: [], skipped: 1 });
   });
 });

@@ -26,44 +26,116 @@ const spendEntry = z.strictObject({
 
 export type SpendEntry = z.infer<typeof spendEntry>;
 
-function parseLog(raw: string): { entries: SpendEntry[]; skipped: number } {
-  const entries: SpendEntry[] = [];
-  const seen = new Set<string>();
+const reservationRow = z.strictObject({ reserve: spendEntry });
+const ledgerRow = z.union([spendEntry, reservationRow]);
+
+function parseLog(raw: string) {
+  const settled = new Map<string, SpendEntry>();
+  const reserved = new Map<string, SpendEntry>();
   let skipped = 0;
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
     try {
-      const entry = spendEntry.parse(JSON.parse(line));
-      if (seen.has(entry.id)) {
+      const row = ledgerRow.parse(JSON.parse(line));
+      if ('reserve' in row) {
+        const entry = row.reserve;
+        if (settled.has(entry.id) || reserved.has(entry.id)) {
+          skipped++;
+          continue;
+        }
+        reserved.set(entry.id, entry);
+        continue;
+      }
+      if (settled.has(row.id)) {
         skipped++;
         continue;
       }
-      seen.add(entry.id);
-      entries.push(entry);
+      reserved.delete(row.id);
+      settled.set(row.id, row);
     } catch {
       skipped++;
     }
   }
-  return { entries, skipped };
+  return { settled, reserved, skipped };
 }
 
-export async function readSpendLog(home = antonHome()): Promise<ReturnType<typeof parseLog>> {
-  return parseLog((await readRegularFile(join(home, 'spend.jsonl'))) ?? '');
+async function readRaw(home: string): Promise<string> {
+  return (await readRegularFile(join(home, 'spend.jsonl'))) ?? '';
 }
 
-/** Serialize writers across host processes and publish the complete log with one atomic rename. */
-export async function recordSpend(entry: SpendEntry, home = antonHome()): Promise<boolean> {
-  const validated = spendEntry.parse(entry);
+export async function readSpendLog(home = antonHome()): Promise<{ entries: SpendEntry[]; skipped: number }> {
+  const { settled, skipped } = parseLog(await readRaw(home));
+  return { entries: [...settled.values()], skipped };
+}
+
+function monthlyTotals(log: ReturnType<typeof parseLog>, month: string) {
+  const sum = (rows: Iterable<SpendEntry>) => {
+    let total = 0;
+    for (const row of rows) {
+      if (row.at.slice(0, 7) === month) total += row.usd;
+    }
+    return total;
+  };
+  return { settledUsd: sum(log.settled.values()), reservedUsd: sum(log.reserved.values()) };
+}
+
+export async function readMonthlySpend(month: string, home = antonHome()) {
+  return monthlyTotals(parseLog(await readRaw(home)), month);
+}
+
+/** Read and update the same snapshot under the host lock shared by every writer. */
+async function updateLog<T>(
+  home: string,
+  update: (log: ReturnType<typeof parseLog>) => { result: T; row?: z.infer<typeof ledgerRow> },
+): Promise<T> {
   await mkdir(home, { recursive: true, mode: 0o700 });
   const release = await waitForLockFile(join(home, 'spend.lock'));
   try {
-    const path = join(home, 'spend.jsonl');
-    const raw = (await readRegularFile(path)) ?? '';
-    if (parseLog(raw).entries.some(({ id }) => id === validated.id)) return false;
-    const separator = raw && !raw.endsWith('\n') ? '\n' : '';
-    await writeFileAtomic(path, raw + separator + JSON.stringify(validated) + '\n');
-    return true;
+    const raw = await readRaw(home);
+    const { result, row } = update(parseLog(raw));
+    if (row) {
+      const separator = raw && !raw.endsWith('\n') ? '\n' : '';
+      await writeFileAtomic(join(home, 'spend.jsonl'), raw + separator + JSON.stringify(row) + '\n');
+    }
+    return result;
   } finally {
     await release();
   }
+}
+
+export async function recordSpend(entry: SpendEntry, home = antonHome()): Promise<boolean> {
+  const row = spendEntry.parse(entry);
+  return updateLog(home, (log) => log.settled.has(row.id) || log.reserved.has(row.id)
+    ? { result: false } : { result: true, row });
+}
+
+export type SpendReservationResult = 'reserved' | 'cap' | 'duplicate' | 'unavailable';
+
+/** Hold a maximum before dispatch. A request with unknown usage keeps its hold for its UTC month. */
+export async function reserveSpend(
+  entry: SpendEntry, limitUsd: number | undefined, home = antonHome(),
+): Promise<SpendReservationResult> {
+  const row = spendEntry.extend({ usd: z.number().finite().positive() }).parse(entry);
+  const limit = z.number().finite().nonnegative().optional().parse(limitUsd);
+  return updateLog<SpendReservationResult>(home, (log) => {
+    if (log.settled.has(row.id) || log.reserved.has(row.id)) return { result: 'duplicate' };
+    if (limit !== undefined) {
+      if (log.skipped) return { result: 'unavailable' };
+      const { settledUsd, reservedUsd } = monthlyTotals(log, row.at.slice(0, 7));
+      if (limit === 0 || settledUsd + reservedUsd + row.usd > limit + 1e-9) return { result: 'cap' };
+    }
+    return { result: 'reserved', row: { reserve: row } };
+  });
+}
+
+/** Replace the hold with actual cost atomically, including zero for a request known to be unbilled. */
+export async function settleSpend(
+  id: string, actual: Pick<SpendEntry, 'usd' | 'tokens'>, home = antonHome(),
+): Promise<boolean> {
+  return updateLog(home, (log) => {
+    const held = log.reserved.get(id);
+    if (!held) return { result: false };
+    const row = spendEntry.parse({ ...held, usd: actual.usd, tokens: actual.tokens });
+    return { result: true, row };
+  });
 }
