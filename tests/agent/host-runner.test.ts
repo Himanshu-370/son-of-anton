@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { z } from 'zod';
-import { runAgent, BudgetExceeded, AgentError, AllowanceExceeded, type StageCtx, type ChildLike } from '../../src/agent/host-runner.js';
-import { readMonthlySpend, readSpendLog } from '../../src/core/spend-log.js';
+import { runAgent, BudgetExceeded, AgentError, AllowanceExceeded, MonthlyCapReached, type StageCtx, type ChildLike } from '../../src/agent/host-runner.js';
+import { markSpendReconciled, readMonthlySpend, readSpendLog, recordSpend } from '../../src/core/spend-log.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
 import { appendStageUsage, cacheHitRate } from '../../src/core/budget.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
@@ -345,6 +345,43 @@ describe('runAgent redaction', () => {
     const reqText = await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8');
     expect(reqText).not.toContain('FAKE_SECRET_VALUE_123');
     expect(JSON.parse(reqText).prompt).toBe('use [REDACTED:API_KEY]');
+  });
+
+  describe('overall monthly cap', () => {
+    const reqFile = async () => JSON.parse(await readFile(join(ctx.jobDir, 'requests', 'build-1.json'), 'utf8'));
+    const capAt = async (monthlyUsd: number, spentUsd: number, reconciled = true) => {
+      const home = process.env.ANTON_HOME!;
+      await writeFile(join(home, 'config.yaml'), `budget:\n  monthlyUsd: ${monthlyUsd}\n`);
+      if (reconciled) await markSpendReconciled(new Date(), home);
+      if (spentUsd > 0) await recordSpend({ id: 'earlier', at: new Date().toISOString(), source: 'chat', usd: spentUsd }, home);
+    };
+
+    it('shrinks the session budget to what is left of the month', async () => {
+      await capAt(3, 2.5);
+      await runAgent(ctx, req, { spawn: () => fake([result(0.1)]).child, notify: vi.fn() });
+      expect((await reqFile()).budgetUsd).toBeCloseTo(0.5);
+    });
+
+    it('pauses before spawning when less than the minimum session is left', async () => {
+      await capAt(3, 2.9);
+      const spawn = vi.fn(() => fake([result(0)]).child);
+      const p = runAgent(ctx, req, { spawn, notify: vi.fn() });
+      await expect(p).rejects.toBeInstanceOf(MonthlyCapReached);
+      expect(spawn).not.toHaveBeenCalled();
+      expect((await readMonthlySpend(new Date().toISOString().slice(0, 7))).reservedUsd).toBe(0);
+    });
+
+    it('is not enforced until month-to-date spend has been reconciled', async () => {
+      await capAt(3, 2.9, false);
+      await runAgent(ctx, req, { spawn: () => fake([result(0.1)]).child, notify: vi.fn() });
+      expect((await reqFile()).budgetUsd).toBe(5);
+    });
+
+    it("the SDK's budget stop on a cap-bound session pauses for the monthly cap", async () => {
+      await capAt(3, 2.5);
+      const f = fake([L({ type: 'error', message: 'error_max_budget_usd', code: 'budget', totalUsd: 0.5, protocolVersion: 4 })]);
+      await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toBeInstanceOf(MonthlyCapReached);
+    });
   });
 
   describe('stage allowances', () => {

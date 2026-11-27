@@ -17,7 +17,7 @@ export const STAGES = [
 ] as const;
 export type Stage = (typeof STAGES)[number];
 
-export const PAUSE_REASONS = ['round_cap', 'budget_cap', 'no_progress', 'error', 'interrupted', 'allowance'] as const;
+export const PAUSE_REASONS = ['round_cap', 'budget_cap', 'no_progress', 'error', 'interrupted', 'allowance', 'monthly_cap'] as const;
 export type PauseReason = (typeof PAUSE_REASONS)[number];
 
 export const JobStateSchema = z.object({

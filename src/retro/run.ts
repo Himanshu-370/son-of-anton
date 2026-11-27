@@ -1,4 +1,4 @@
-import { recordSpend, reserveSpend, settleSpend } from '../core/spend-log.js';
+import { activeMonthlyCap, recordSpend, reserveSpend, settleSpend } from '../core/spend-log.js';
 import { lessonOccurrence, publishMilestone } from '../slack/events.js';
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, readdir } from 'node:fs/promises';
@@ -167,7 +167,9 @@ export async function submitRetro(job: Job, outcome: 'approved' | 'abandoned', d
     }) * (batch ? 0.5 : 1);
     const hold = await reserveSpend({
       ...retroSpendIdentity(job), at: submittedAt, model: params.model, usd: maxUsd,
-    }, undefined, home);
+    }, await activeMonthlyCap(budgetSettings(cfg).monthlyUsd, home), home);
+    if (hold === 'cap') return await skip('the overall monthly spending cap is reached');
+    if (hold === 'unavailable') return await skip('the spend log has unreadable lines, so the monthly cap could not be checked');
     if (hold !== 'reserved') return;
 
     const client = (deps.client ?? anthropicRetroClient)(key);

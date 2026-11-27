@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
+import { budgetSettings, loadAntonConfig } from './anton-config.js';
 import { readRegularFile, writeFileAtomic } from './atomic.js';
+import { usd } from './budget.js';
 import { ROLE_MODELS, type Role } from './config.js';
 import { waitForLockFile } from './lock.js';
 import { antonHome } from './paths.js';
@@ -140,17 +142,61 @@ export type SpendReservationResult = 'reserved' | 'cap' | 'duplicate' | 'unavail
 export async function reserveSpend(
   entry: SpendEntry, limitUsd: number | undefined, home = antonHome(),
 ): Promise<SpendReservationResult> {
+  const usd = z.number().finite().positive().parse(entry.usd);
+  return (await reserveSpendUpTo(entry, limitUsd, usd, home)).result;
+}
+
+/**
+ * Like reserveSpend, but under a cap it holds what is left of the month when that is less than asked,
+ * as long as it is at least `minUsd`. Returns the amount actually held (0 unless reserved).
+ */
+export async function reserveSpendUpTo(
+  entry: SpendEntry, limitUsd: number | undefined, minUsd: number, home = antonHome(),
+): Promise<{ result: SpendReservationResult; usd: number }> {
   const row = spendEntry.extend({ usd: z.number().finite().positive() }).parse(entry);
   const limit = z.number().finite().nonnegative().optional().parse(limitUsd);
-  return updateLog<SpendReservationResult>(home, (log) => {
-    if (log.used(row.id)) return { result: 'duplicate' };
+  const floor = z.number().finite().positive().parse(minUsd);
+  return updateLog<{ result: SpendReservationResult; usd: number }>(home, (log) => {
+    if (log.used(row.id)) return { result: { result: 'duplicate' as const, usd: 0 } };
+    let usd = row.usd;
     if (limit !== undefined) {
-      if (log.skipped) return { result: 'unavailable' };
+      if (log.skipped) return { result: { result: 'unavailable' as const, usd: 0 } };
       const { settledUsd, reservedUsd } = monthlyTotals(log, row.at.slice(0, 7));
-      if (limit === 0 || settledUsd + reservedUsd + row.usd > limit + 1e-9) return { result: 'cap' };
+      usd = Math.min(usd, limit - settledUsd - reservedUsd);
+      if (usd < Math.min(floor, row.usd) - 1e-9) return { result: { result: 'cap' as const, usd: 0 } };
     }
-    return { result: 'reserved', row: { reserve: row } };
+    return { result: { result: 'reserved' as const, usd }, row: { reserve: { ...row, usd } } };
   });
+}
+
+/** True when this UTC month's settled and held spend has reached the cap. */
+export async function monthlyCapReached(capUsd: number | undefined, now: Date, home = antonHome()): Promise<boolean> {
+  if (capUsd === undefined) return false;
+  const { settledUsd, reservedUsd } = await readMonthlySpend(now.toISOString().slice(0, 7), home);
+  return settledUsd + reservedUsd >= capUsd - 1e-9;
+}
+
+const RECONCILED = 'spend-reconciled.json';
+
+/** The overall cap applies only once month-to-date spend from before the spend log was reconciled. */
+export async function activeMonthlyCap(monthlyUsd: number | undefined, home = antonHome()): Promise<number | undefined> {
+  if (monthlyUsd === undefined) return undefined;
+  return (await readRegularFile(join(home, RECONCILED))) === undefined ? undefined : monthlyUsd;
+}
+
+/** Why a paid run may not start now, or undefined when it may. */
+export async function monthlyCapRefusal(now = new Date(), home = antonHome()): Promise<string | undefined> {
+  const cap = await activeMonthlyCap(budgetSettings(await loadAntonConfig(home)).monthlyUsd, home);
+  if (!(await monthlyCapReached(cap, now, home))) return undefined;
+  return `The overall monthly spending cap (${usd(cap!)}) is reached. Raise budget.monthlyUsd in ~/anton/config.yaml first.`;
+}
+
+export async function markSpendReconciled(at: Date, home = antonHome()): Promise<void> {
+  await writeFileAtomic(join(home, RECONCILED), JSON.stringify({ at: at.toISOString() }) + '\n');
+}
+
+export async function spendReconciled(home = antonHome()): Promise<boolean> {
+  return (await readRegularFile(join(home, RECONCILED))) !== undefined;
 }
 
 /** Replace the hold with actual cost atomically, including zero for a request known to be unbilled. */

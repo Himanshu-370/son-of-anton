@@ -5,7 +5,7 @@ import { basename, join } from 'node:path';
 import { budgetSettings, loadAntonConfig, type AntonConfig } from '../core/anton-config.js';
 import { allowanceShareText, allowanceUsage, appendStageCost, appendStageUsage, recordCost, remainingUsd, stageGroup, usd } from '../core/budget.js';
 import { ROLE_MODELS, type Role } from '../core/config.js';
-import { debitSpendReservation, releaseSpendReservation, reserveSpend } from '../core/spend-log.js';
+import { activeMonthlyCap, debitSpendReservation, releaseSpendReservation, reserveSpendUpTo } from '../core/spend-log.js';
 import { execIn } from '../docker/container.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { redact } from '../core/secrets.js';
@@ -61,6 +61,17 @@ export class BudgetExceeded extends Error {
     this.name = 'BudgetExceeded';
   }
 }
+
+/** The overall monthly cap (budget.monthlyUsd) has too little left for another session. */
+export class MonthlyCapReached extends BudgetExceeded {
+  constructor(message = 'the overall monthly spending cap is reached') {
+    super(message);
+    this.name = 'MonthlyCapReached';
+  }
+}
+
+/** The least a session is worth starting with when the monthly cap has only a little left. */
+const MIN_SESSION_USD = 0.25;
 
 /** A stage group used up its allowance (the job cap may still have room). */
 export class AllowanceExceeded extends BudgetExceeded {
@@ -137,9 +148,7 @@ export async function runAgent(
     allowanceBound = left < budgetUsd;
     budgetUsd = Math.min(budgetUsd, left);
   }
-  req = { ...req, budgetUsd };
-  const tokens = taskBudgetTokens(req.model, budgetUsd);
-  if (settings.taskBudgets && tokens >= TASK_BUDGET_MIN) req = { ...req, taskBudgetTokens: tokens };
+  if (budgetUsd <= 0) throw new BudgetExceeded('no session budget remaining');
   const spawn = deps.spawn ?? ((c, a) => execIn(c, a) as unknown as ChildLike);
   const notify = deps.notify ?? defaultNotify;
   if (req.tools) {
@@ -168,23 +177,51 @@ export async function runAgent(
     req = { ...req, outputSchema: schema };
   }
 
-  const file = await nextRequestFile(ctx.jobDir, ctx.stage);
-  await fsp.writeFile(
-    join(ctx.jobDir, 'requests', file),
-    redact(JSON.stringify({ ...req, protocolVersion: PROTOCOL_VERSION }, null, 2) + '\n', ctx.secrets),
-  );
+  // Hold the session budget in the host ledger before dispatch; near the monthly cap it shrinks to what is left.
+  const spendSession = `build:${randomUUID()}`;
+  const spendRole = Object.hasOwn(ROLE_MODELS, req.role) ? req.role as Role : undefined;
+  const hold = await reserveSpendUpTo({
+    id: spendSession, at: new Date().toISOString(), source: 'build', project: ctx.project,
+    jobId: ctx.state.jobId, stage: ctx.stage, role: spendRole, model: req.model, effort: req.effort,
+    vendor: 'anthropic', usd: budgetUsd,
+  }, await activeMonthlyCap(settings.monthlyUsd), MIN_SESSION_USD);
+  if (hold.result === 'cap') throw new MonthlyCapReached();
+  if (hold.result === 'unavailable') {
+    throw new AgentError('The spend log (~/anton/spend.jsonl) has unreadable lines, so the monthly cap cannot be checked. Fix or remove them, then resume.');
+  }
+  if (hold.result !== 'reserved') throw new AgentError('build spend reservation unavailable');
+  /** The monthly cap set this session's budget, so the SDK's own budget stop means the month ran out. */
+  const capBound = hold.usd < budgetUsd - 1e-9;
+  if (capBound) {
+    allowanceBound = false;
+    budgetUsd = hold.usd;
+  }
+  req = { ...req, budgetUsd };
+  const tokens = taskBudgetTokens(req.model, budgetUsd);
+  if (settings.taskBudgets && tokens >= TASK_BUDGET_MIN) req = { ...req, taskBudgetTokens: tokens };
+
+  let file: string;
+  try {
+    file = await nextRequestFile(ctx.jobDir, ctx.stage);
+    await fsp.writeFile(
+      join(ctx.jobDir, 'requests', file),
+      redact(JSON.stringify({ ...req, protocolVersion: PROTOCOL_VERSION }, null, 2) + '\n', ctx.secrets),
+    );
+    await fsp.mkdir(join(ctx.jobDir, 'logs'), { recursive: true });
+  } catch (e) {
+    // Nothing was dispatched: give the hold back.
+    await releaseSpendReservation(spendSession).catch(() => undefined);
+    throw e;
+  }
   const containerPath = `/workspace/.anton/jobs/${basename(ctx.jobDir)}/requests/${file}`;
-  await fsp.mkdir(join(ctx.jobDir, 'logs'), { recursive: true });
   const logPath = join(ctx.jobDir, 'logs', `${ctx.stage}.log`);
 
   let state = ctx.state;
   /** Last seen cumulative total. A resumed session's SDK total starts from the transcript's (baseUsd). */
   let lastTotal = req.baseUsd ?? 0;
   let killed = false;
-  const spendSession = `build:${randomUUID()}`;
   let debitFailed = false;
   let spendSequence = 0;
-  const spendRole = Object.hasOwn(ROLE_MODELS, req.role) ? req.role as Role : undefined;
   /** A failed report-only write (cost.json, usage.json) must not drop a paid-for result or mask a pause. */
   const bestEffort = async (name: string, write: () => Promise<void>): Promise<void> => {
     try {
@@ -248,14 +285,6 @@ export async function runAgent(
     }
   };
 
-  if (budgetUsd <= 0) throw new BudgetExceeded('no session budget remaining');
-  const reservation = await reserveSpend({
-    id: spendSession, at: new Date().toISOString(), source: 'build', project: ctx.project,
-    jobId: state.jobId, stage: ctx.stage, role: spendRole, model: req.model, effort: req.effort,
-    vendor: 'anthropic', usd: budgetUsd,
-  }, undefined);
-  if (reservation !== 'reserved') throw new AgentError('build spend reservation unavailable');
-
   const child = spawn(ctx.container, ['node', '/opt/anton/entry.js', containerPath]);
 
   const handleLine = async (line: string): Promise<{ output: unknown; sessionId: string } | undefined> => {
@@ -289,7 +318,9 @@ export async function runAgent(
         checkProtocol(ev.protocolVersion);
         await recordUsage(ev.usage);
         // The SDK's own budget stop pauses the job like the host-side kill: allowance when the allowance set the session budget, else budget_cap.
-        if (ev.code === 'budget') throw allowanceBound ? overAllowance(state) : new BudgetExceeded(ev.message);
+        if (ev.code === 'budget') {
+          throw capBound ? new MonthlyCapReached() : allowanceBound ? overAllowance(state) : new BudgetExceeded(ev.message);
+        }
         throw new AgentError(ev.message);
     }
   };

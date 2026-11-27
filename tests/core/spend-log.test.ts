@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { importLegacyJobSpend, debitSpendReservation, releaseSpendReservation, readSpendLog, recordSpend, reserveSpend, settleSpend, readMonthlySpend, type SpendEntry } from '../../src/core/spend-log.js';
+import { activeMonthlyCap, markSpendReconciled, monthlyCapRefusal, reserveSpendUpTo, importLegacyJobSpend, debitSpendReservation, releaseSpendReservation, readSpendLog, recordSpend, reserveSpend, settleSpend, readMonthlySpend, type SpendEntry } from '../../src/core/spend-log.js';
 
 const entry: SpendEntry = {
   id: 'build-1', at: '2026-11-27T10:00:00.000Z', source: 'build',
@@ -15,6 +15,30 @@ describe('host spend log', () => {
   let home: string;
   beforeEach(async () => { home = await mkdtemp(join(tmpdir(), 'anton-spend-')); });
   afterEach(async () => { await rm(home, { recursive: true, force: true }); });
+
+  it('reserves up to what is left under the cap, and refuses below the minimum', async () => {
+    await recordSpend({ ...entry, id: 'spent', usd: 2.5 }, home);
+    const ask = { ...entry, id: 'next', usd: 5 };
+    expect(await reserveSpendUpTo(ask, 3, 0.25, home)).toEqual({ result: 'reserved', usd: 0.5 });
+    expect(await reserveSpendUpTo({ ...ask, id: 'after' }, 3, 0.25, home)).toEqual({ result: 'cap', usd: 0 });
+    expect(await reserveSpendUpTo({ ...ask, id: 'free' }, undefined, 0.25, home)).toEqual({ result: 'reserved', usd: 5 });
+  });
+
+  it('applies the overall cap only after month-to-date spend is reconciled', async () => {
+    expect(await activeMonthlyCap(150, home)).toBeUndefined();
+    await markSpendReconciled(new Date('2026-11-27T10:00:00.000Z'), home);
+    expect(await activeMonthlyCap(150, home)).toBe(150);
+    expect(await activeMonthlyCap(undefined, home)).toBeUndefined();
+  });
+
+  it('refuses a paid run while the reconciled cap is reached', async () => {
+    const now = new Date('2026-11-27T12:00:00.000Z');
+    await writeFile(join(home, 'config.yaml'), 'budget:\n  monthlyUsd: 3\n');
+    await recordSpend({ ...entry, id: 'spent', usd: 3 }, home);
+    expect(await monthlyCapRefusal(now, home)).toBeUndefined();
+    await markSpendReconciled(now, home);
+    expect(await monthlyCapRefusal(now, home)).toBe('The overall monthly spending cap ($3.00) is reached. Raise budget.monthlyUsd in ~/anton/config.yaml first.');
+  });
 
   it('starts empty and retains each concurrent charge exactly once', async () => {
     expect(await readSpendLog(home)).toEqual({ entries: [], skipped: 0 });

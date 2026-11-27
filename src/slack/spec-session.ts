@@ -279,7 +279,9 @@ export async function composeSlackMessage(event: Milestone, deps: ComposeDeps): 
     ];
     const view = renderReview({ kind: 'paused', project: event.project, jobId: event.jobId }, {
       mention, title: PAUSE_TEXT[reason],
-      lines: [budget ? 'Resume with a higher budget, or abandon the job.' : 'Check the job on the Mac (anton status), then resume or abandon it.'],
+      lines: [reason === 'monthly_cap'
+        ? 'Raise the overall monthly cap (budget.monthlyUsd), then resume, or abandon the job.'
+        : budget ? 'Resume with a higher budget, or abandon the job.' : 'Check the job on the Mac (anton status), then resume or abandon it.'],
       buttons,
     });
     return { ...view, cards: tokens };

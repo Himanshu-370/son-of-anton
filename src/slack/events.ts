@@ -77,6 +77,7 @@ export const PAUSE_TEXT: Record<PauseReason, string> = {
   no_progress: 'Job paused: no progress between verify rounds',
   round_cap: 'Job paused: verify round limit reached',
   interrupted: 'Job paused: the run was stopped',
+  monthly_cap: 'Job paused at the overall monthly spending cap',
 };
 
 export function eventText(event: Milestone): string {

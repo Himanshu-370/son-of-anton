@@ -9,7 +9,7 @@ import { saveState, type JobState } from '../../src/core/state.js';
 import { SLACK_ROLES, type SlackConfig } from '../../src/slack/config.js';
 import { dispatchSlackAction, type DispatchDeps, type SlackAction } from '../../src/slack/actions.js';
 import { answerQuestion, classifyQuestion, CHAT_MODELS, type ChatClient, type ChatDeps } from '../../src/slack/chat.js';
-import { readMonthlySpend, readSpendLog } from '../../src/core/spend-log.js';
+import { markSpendReconciled, readMonthlySpend, readSpendLog } from '../../src/core/spend-log.js';
 import { chatSpentUsd } from '../../src/slack/chat-budget.js';
 import { normalizeEvent } from '../../src/slack/inbound.js';
 import { PRICES } from '../../src/agent/pricing.js';
@@ -199,6 +199,16 @@ describe('answerQuestion', () => {
     expect(a.text).toMatch(/budget/i);
     expect(a.text).toMatch(/build/);
     expect(sent).toHaveLength(0);
+  });
+
+  it('replies status-only once the reconciled overall monthly cap is reached', async () => {
+    await writeFile(join(home, 'config.yaml'), 'budget:\n  monthlyUsd: 0\n');
+    await markSpendReconciled(new Date(Date.UTC(2026, 10, 20)), home);
+    const a = await answerQuestion(ask('How does the streak counter work?'), chatDeps());
+    expect(a.status).toBe('status-only');
+    expect(a.text).toContain('The overall monthly spending cap is reached');
+    expect(sent).toHaveLength(0);
+    expect(await chatSpentUsd('T0FAKE', Date.UTC(2026, 10, 20), { home })).toBe(0);
   });
 
   it('disables paid chat for a model without a known price, and without an API key', async () => {

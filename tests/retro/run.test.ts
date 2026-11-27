@@ -1,4 +1,4 @@
-import { readMonthlySpend, readSpendLog } from '../../src/core/spend-log.js';
+import { markSpendReconciled, readMonthlySpend, readSpendLog, recordSpend } from '../../src/core/spend-log.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -202,6 +202,16 @@ describe('submitRetro', () => {
     await submitRetro(await job(), 'approved', deps(f.client));
     expect(f.batches).toHaveLength(0);
     expect(out[0]).toMatch(/^retro skipped: job budget/);
+  });
+
+  it('overall monthly cap reached: skipped without sending', async () => {
+    await writeFile(join(home, 'config.yaml'), 'budget:\n  monthlyUsd: 1\n');
+    await markSpendReconciled(new Date(), home);
+    await recordSpend({ id: 'spent', at: new Date().toISOString(), source: 'chat', usd: 1 }, home);
+    const f = fake();
+    await submitRetro(await job(), 'approved', deps(f.client));
+    expect(f.batches).toHaveLength(0);
+    expect(out[0]).toBe('retro skipped: the overall monthly spending cap is reached');
   });
 
   it('the API key in a job file never reaches the request', async () => {

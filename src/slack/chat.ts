@@ -5,13 +5,13 @@ import { join } from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
 import type { Message, MessageCreateParamsNonStreaming, ThinkingConfigParam } from '@anthropic-ai/sdk/resources/messages';
 import { estimateUsd, PRICES, type ModelPrice } from '../agent/pricing.js';
-import { chatSettings, loadAntonConfig } from '../core/anton-config.js';
+import { budgetSettings, chatSettings, loadAntonConfig } from '../core/anton-config.js';
 import { usd } from '../core/budget.js';
 import { loadJob } from '../core/job-actions.js';
 import { formatStatusTable, jobStatusRows } from '../core/job-status.js';
 import { antonHome } from '../core/paths.js';
 import { loadSecrets, redact } from '../core/secrets.js';
-import { reserveSpend, settleSpend } from '../core/spend-log.js';
+import { activeMonthlyCap, reserveSpend, settleSpend } from '../core/spend-log.js';
 import { reasonOf } from '../retro/run.js';
 import { loadPrompt } from '../stages/prompts.js';
 import { assertJobDir } from '../stages/verify.js';
@@ -278,13 +278,18 @@ export async function answerQuestion(input: AuthorizedQuestion, deps: ChatDeps =
   }
 
   const spendId = slackSpendId(input.teamId, requestId);
+  const overallCap = await loadAntonConfig(home)
+    .then((cfg) => activeMonthlyCap(budgetSettings(cfg).monthlyUsd, home))
+    .catch(() => 0); // An unreadable config or marker: answer from status rather than spend past a cap.
   const hold = await reserveSpend({
     id: spendId, at: new Date(now).toISOString(), source: 'chat', project: input.project,
     role: input.role, model: plan.model, effort: plan.effort, vendor: 'anthropic', usd: bound,
-  }, undefined, home).catch(() => 'unavailable' as const);
+  }, overallCap, home).catch(() => 'unavailable' as const);
   if (hold !== 'reserved') {
     await settleChatSpend(reservation, 0, { home }).catch(() => undefined);
-    return status('Anton could not reserve spend for this answer, so here is the status.');
+    return status(hold === 'cap'
+      ? 'The overall monthly spending cap is reached, so here is the status.'
+      : 'Anton could not reserve spend for this answer, so here is the status.');
   }
   const settleOverall = async (actual: Parameters<typeof settleSpend>[1]) => {
     try {

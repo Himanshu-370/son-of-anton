@@ -49,7 +49,13 @@ export const AntonConfigSchema = z
     kits: z.object({ fallback: entries.optional(), web: entries.optional() }).strict().optional(),
     roles: z.object(Object.fromEntries(ROLES.map((r) => [r, entries.optional()]))).strict().optional(),
     budget: z
-      .object({ defaultUsd: z.number().positive().optional(), allowances: allowances.optional(), taskBudgets: z.boolean().optional() })
+      .object({
+        defaultUsd: z.number().positive().optional(),
+        allowances: allowances.optional(),
+        taskBudgets: z.boolean().optional(),
+        /** Overall cap per UTC month across builds, Retro and Slack answers. Unset: no overall cap. */
+        monthlyUsd: z.number().min(0).max(5000).optional(),
+      })
       .strict()
       .optional(),
     models: models.optional(),
@@ -79,11 +85,14 @@ export async function loadAntonConfig(home = antonHome()): Promise<AntonConfig> 
   }
 }
 
-export function budgetSettings(cfg: AntonConfig): { defaultUsd: number; allowances: typeof DEFAULT_ALLOWANCES; taskBudgets: boolean } {
+export function budgetSettings(cfg: AntonConfig): {
+  defaultUsd: number; allowances: typeof DEFAULT_ALLOWANCES; taskBudgets: boolean; monthlyUsd?: number;
+} {
   return {
     defaultUsd: cfg.budget?.defaultUsd ?? DEFAULTS.budgetUsd,
     allowances: cfg.budget?.allowances ?? DEFAULT_ALLOWANCES,
     taskBudgets: cfg.budget?.taskBudgets ?? true,
+    ...(cfg.budget?.monthlyUsd === undefined ? {} : { monthlyUsd: cfg.budget.monthlyUsd }),
   };
 }
 

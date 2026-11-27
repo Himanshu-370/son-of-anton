@@ -1,3 +1,4 @@
+import { markSpendReconciled, recordSpend } from '../../src/core/spend-log.js';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { access, chmod, mkdir, mkdtemp, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import { writeFileSync } from 'node:fs';
@@ -204,6 +205,17 @@ describe('anton resume', () => {
     const h = harness();
     expect(await resumeCommand('p', {}, h.deps)).toBe(1);
     expect(h.errText()).toContain('p: paused, build share used: $7.02 of $7.00 (spec through build). Resume with: anton resume p --budget <usd>');
+    expect(h.spawned).toEqual([]);
+  });
+
+  it('resume refuses while the reconciled overall monthly cap is reached', async () => {
+    await project('p', { stage: 'paused', pausedFrom: 'verify', pauseReason: 'monthly_cap', round: 1 });
+    await writeFile(join(home, 'config.yaml'), 'budget:\n  monthlyUsd: 1\n');
+    await markSpendReconciled(new Date(), home);
+    await recordSpend({ id: 'spent', at: new Date().toISOString(), source: 'chat', usd: 1 }, home);
+    const h = harness();
+    expect(await resumeCommand('p', {}, h.deps)).toBe(1);
+    expect(h.errText()).toContain('The overall monthly spending cap ($1.00) is reached. Raise budget.monthlyUsd in ~/anton/config.yaml first.');
     expect(h.spawned).toEqual([]);
   });
 

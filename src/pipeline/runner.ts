@@ -2,7 +2,7 @@ import { loadAntonConfig } from '../core/anton-config.js';
 import { publishJobMilestone } from '../slack/job-milestones.js';
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
-import { AllowanceExceeded, BudgetExceeded, type StageCtx } from '../agent/host-runner.js';
+import { AllowanceExceeded, BudgetExceeded, MonthlyCapReached, type StageCtx } from '../agent/host-runner.js';
 import { readRegularFile, writeFileAtomic } from '../core/atomic.js';
 import { allowanceShareText, seedStageSpend } from '../core/budget.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
@@ -156,6 +156,8 @@ function pauseMessage(
   switch (reason) {
     case 'budget_cap':
       return `${project}: paused, budget cap reached. Resume with: anton resume ${project} --budget <usd>`;
+    case 'monthly_cap':
+      return `${project}: paused, the overall monthly spending cap is reached. Raise budget.monthlyUsd in ~/anton/config.yaml, then: anton resume ${project}`;
     case 'round_cap':
       return `${project}: paused, round cap reached. Run: anton resume ${project} --accept-as-is (or abandon).${risk}`;
     case 'no_progress':
@@ -269,8 +271,9 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
         }
       }
     } catch (e) {
-      // AllowanceExceeded subclasses BudgetExceeded, so it is tested first.
-      const reason: PauseReason = e instanceof AllowanceExceeded ? 'allowance' : e instanceof BudgetExceeded ? 'budget_cap' : 'error';
+      // AllowanceExceeded and MonthlyCapReached subclass BudgetExceeded, so they are tested first.
+      const reason: PauseReason = e instanceof MonthlyCapReached ? 'monthly_cap'
+        : e instanceof AllowanceExceeded ? 'allowance' : e instanceof BudgetExceeded ? 'budget_cap' : 'error';
       const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
       log(`${reason}: ${e instanceof Error ? e.message : String(e)}`);
       if (reason === 'error') {

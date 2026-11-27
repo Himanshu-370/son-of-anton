@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { z } from 'zod';
 import { readRegularFile, writeFileAtomic } from './atomic.js';
 import { budgetSettings, loadAntonConfig } from './anton-config.js';
+import { monthlyCapRefusal } from './spend-log.js';
 import { allowanceUsage, stageGroup, usd } from './budget.js';
 import { AREA_ORDER } from './config.js';
 import { commitAll, currentBranch, isClean, listTags as defaultListTags, switchBranch, tagHead } from './git.js';
@@ -441,6 +442,8 @@ async function planResume(job: LoadedJob, opts: ResumeOptions, d: Pick<JobAction
     return undefined;
   }
   const { budget } = opts;
+  const capRefusal = opts.acceptAsIs ? undefined : await monthlyCapRefusal();
+  if (capRefusal) return void d.err(capRefusal);
   // Delivering costs nothing, so accept-as-is needs no extra budget.
   if (paused && state.pauseReason === 'budget_cap' && budget === undefined && !opts.acceptAsIs) {
     d.err(`Budget cap reached (${usd(state.spentUsd)} of ${usd(state.budgetUsd)} spent). Resume with: anton resume ${project} --budget <usd>`);
