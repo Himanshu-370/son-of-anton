@@ -16,7 +16,7 @@ import { reasonOf } from '../retro/run.js';
 import { loadPrompt } from '../stages/prompts.js';
 import { assertJobDir } from '../stages/verify.js';
 import type { SlackRole } from './config.js';
-import { chatRequestKnown, reserveChatSpend, settleChatSpend } from './chat-budget.js';
+import { chatRequestKnown, reserveChatSpend, settleChatSpend, slackSpendId } from './chat-budget.js';
 import { sanitizeSlackText } from './inbound.js';
 
 /*
@@ -277,7 +277,7 @@ export async function answerQuestion(input: AuthorizedQuestion, deps: ChatDeps =
     return status(`This month's chat budget (${usd(settings.monthlyUsd)}) cannot cover another answer, so here is the status.`);
   }
 
-  const spendId = `chat:${input.teamId}:${requestId}`;
+  const spendId = slackSpendId(input.teamId, requestId);
   const hold = await reserveSpend({
     id: spendId, at: new Date(now).toISOString(), source: 'chat', project: input.project,
     role: input.role, model: plan.model, effort: plan.effort, vendor: 'anthropic', usd: bound,

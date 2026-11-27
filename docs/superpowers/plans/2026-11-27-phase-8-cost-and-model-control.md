@@ -29,3 +29,6 @@ Phase 9 consumes the spend and reservation APIs for calls. The design spec is on
 Build runs reserve their session budget before dispatch. Reported increments replace that amount of the hold atomically, and a successful terminal result releases the unused portion. Failed or interrupted sessions keep the remaining hold. Retro and Slack answers reserve before dispatch and settle known charges. Retro batches started before reservations were introduced are recorded when collected. Model presets and overrides feed the pipeline, and the pipeline keeps a snapshot for the run. The PM Home tab publishes a read-only spend view on open. The settings history core supports validated changes and undo.
 
 Remaining work includes historical import, reservations and monthly-cap enforcement for all paid paths, Slack confirmation for settings, automatic trial completion, weekly summaries and suggestions, and live App Home verification. The Phase 7 Slack intent layer lives on its own branch.
+
+
+Legacy Slack charges can now be reconciled by request ID. The import is scoped to the workspace and UTC month. Run it during migration with Slack workers stopped. Reported charges and unknown holds remain distinct, and requests already present in the host ledger are skipped. Build history import and the migration entry point are still pending.

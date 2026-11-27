@@ -1,3 +1,4 @@
+import { recordSpend, reserveSpend } from '../core/spend-log.js';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { waitForLockFile } from '../core/lock.js';
@@ -114,4 +115,33 @@ export async function chatRequestKnown(teamId: string, requestId: string, opts: 
 export async function chatSpentUsd(teamId: string, now: number, opts: { home?: string } = {}): Promise<number> {
   const ledger = await readSlackFile(opts.home ?? antonHome(), 'chat-budget.json', ledgerSchema);
   return ledger ? spent(ledger, teamId, chatMonth(now)) : 0;
+}
+
+
+/** The Phase 7 router uses the full SHA-256 digest. Role Q&A uses its first 32 characters. */
+export function slackSpendId(teamId: string, requestId: string): string {
+  return `${requestId.length === 64 ? 'router' : 'chat'}:${teamId}:${requestId}`;
+}
+
+/** Run before resuming Slack workers during migration, so a live request cannot race its own import. */
+export async function importMonthToDateSlackSpend(
+  teamId: string, now: number, opts: { home?: string } = {},
+): Promise<{ settled: number; held: number }> {
+  teamIdSchema.parse(teamId);
+  const home = opts.home ?? antonHome();
+  const month = chatMonth(now);
+  const ledger = await readSlackFile(home, 'chat-budget.json', ledgerSchema);
+  const imported = { settled: 0, held: 0 };
+  for (const [requestId, row] of Object.entries(ledger?.requests ?? {})) {
+    if (row.teamId !== teamId || row.month !== month || row.at > now) continue;
+    const usd = charged(row);
+    if (usd === 0) continue;
+    const entry = { id: slackSpendId(teamId, requestId), at: new Date(row.at).toISOString(), source: 'import', usd } as const;
+    if (row.status === 'settled' && row.actualUsd !== undefined) {
+      if (await recordSpend(entry, home)) imported.settled++;
+    } else if (await reserveSpend(entry, undefined, home) === 'reserved') {
+      imported.held++;
+    }
+  }
+  return imported;
 }

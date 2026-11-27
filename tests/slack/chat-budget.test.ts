@@ -1,9 +1,10 @@
+import { readMonthlySpend, readSpendLog, reserveSpend } from '../../src/core/spend-log.js';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mkdtemp, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  chatMonth, chatRequestKnown, chatSpentUsd, reserveChatSpend, settleChatSpend,
+  importMonthToDateSlackSpend, chatMonth, chatRequestKnown, chatSpentUsd, reserveChatSpend, settleChatSpend,
   DEFAULT_CHAT_ANSWER_USD, DEFAULT_CHAT_MONTHLY_USD,
 } from '../../src/slack/chat-budget.js';
 
@@ -19,6 +20,24 @@ beforeEach(async () => {
 });
 
 describe('chat budget ledger', () => {
+  it('imports only unmatched charges for the selected workspace and UTC month', async () => {
+    const legacy = (await reserveChatSpend(TEAM, rid(), 0.15, NOV, { home }))!;
+    await settleChatSpend(legacy, 0.08, { home });
+    const unknown = (await reserveChatSpend(TEAM, rid(), 0.12, NOV, { home }))!;
+    await settleChatSpend(unknown, undefined, { home });
+    const dualWritten = (await reserveChatSpend(TEAM, rid(), 0.15, NOV, { home }))!;
+    await reserveSpend({
+      id: `chat:${TEAM}:${dualWritten.requestId}`, source: 'chat', at: new Date(NOV).toISOString(), usd: 0.15,
+    }, undefined, home);
+    await reserveChatSpend('T0OTHER', rid(), 0.6, NOV, { home });
+    await reserveChatSpend(TEAM, rid(), 0.5, Date.UTC(2026, 9, 15), { home });
+
+    expect(await importMonthToDateSlackSpend(TEAM, NOV, { home })).toEqual({ settled: 1, held: 1 });
+    expect(await importMonthToDateSlackSpend(TEAM, NOV, { home })).toEqual({ settled: 0, held: 0 });
+    expect(await readMonthlySpend('2026-11', home)).toEqual({ settledUsd: 0.08, reservedUsd: 0.27 });
+    expect((await readSpendLog(home)).entries).toMatchObject([{ source: 'import', usd: 0.08 }]);
+  });
+
   it('defaults to $5 a month and $0.10 an answer', () => {
     expect(DEFAULT_CHAT_MONTHLY_USD).toBe(5);
     expect(DEFAULT_CHAT_ANSWER_USD).toBe(0.1);
