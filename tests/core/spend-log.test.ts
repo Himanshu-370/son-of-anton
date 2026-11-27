@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { debitSpendReservation, releaseSpendReservation, readSpendLog, recordSpend, reserveSpend, settleSpend, readMonthlySpend, type SpendEntry } from '../../src/core/spend-log.js';
+import { importLegacyJobSpend, debitSpendReservation, releaseSpendReservation, readSpendLog, recordSpend, reserveSpend, settleSpend, readMonthlySpend, type SpendEntry } from '../../src/core/spend-log.js';
 
 const entry: SpendEntry = {
   id: 'build-1', at: '2026-11-27T10:00:00.000Z', source: 'build',
@@ -88,5 +88,21 @@ describe('host spend log', () => {
     expect(await reserveSpend({ ...entry, id: 'hold', usd: 0.1 }, 1, home)).toBe('duplicate');
     expect(await reserveSpend({ ...entry, usd: 0.4 }, 1, home)).toBe('cap');
     expect((await readSpendLog(home)).skipped).toBe(0);
+  });
+
+  it('imports only the untracked lifetime cost of jobs touched this UTC month', async () => {
+    await recordSpend({ ...entry, id: 'prior', at: '2026-10-31T23:59:59.000Z', usd: 1 }, home);
+    await recordSpend({ ...entry, id: 'current', usd: 2 }, home);
+    await recordSpend({ ...entry, id: 'role-chat', source: 'chat', usd: 1 }, home);
+    const now = new Date('2026-11-27T12:00:00.000Z');
+    const job = { project: entry.project!, jobId: entry.jobId!, updatedAt: entry.at, spentUsd: 5 };
+    expect(await importLegacyJobSpend(job, now, home)).toBe(2);
+    expect(await importLegacyJobSpend(job, now, home)).toBe(0);
+    expect(await importLegacyJobSpend({ ...job, jobId: '2-fix', updatedAt: '2026-10-31T23:59:59.000Z' }, now, home)).toBe(0);
+    expect(await importLegacyJobSpend({ ...job, jobId: '3-fix', updatedAt: '2026-11-27T13:00:00.000Z' }, now, home)).toBe(0);
+    expect((await readSpendLog(home)).entries.filter((row) => row.source === 'import')).toMatchObject([
+      { project: job.project, jobId: job.jobId, at: job.updatedAt, usd: 2 },
+    ]);
+    expect(await readMonthlySpend('2026-11', home)).toEqual({ settledUsd: 5, reservedUsd: 0 });
   });
 });

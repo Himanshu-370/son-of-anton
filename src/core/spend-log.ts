@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -178,4 +179,31 @@ export async function debitSpendReservation(
 export async function releaseSpendReservation(id: string, home = antonHome()): Promise<boolean> {
   const row = releaseRow.parse({ release: id });
   return updateLog(home, (log) => log.reserved.has(id) ? { result: true, row } : { result: false });
+}
+
+
+/** Reconcile a quiescent job snapshot against all of its recorded lifetime build charges. */
+export async function importLegacyJobSpend(
+  job: { project: string; jobId: string; updatedAt: string; spentUsd: number },
+  now: Date,
+  home = antonHome(),
+): Promise<number> {
+  const touched = new Date(job.updatedAt);
+  if (!Number.isFinite(touched.getTime()) || touched > now) return 0;
+  const at = touched.toISOString();
+  if (at.slice(0, 7) !== now.toISOString().slice(0, 7)) return 0;
+  const { project, jobId, spentUsd } = job;
+  const id = 'import:job:' + createHash('sha256').update(JSON.stringify([project, jobId])).digest('hex');
+  return updateLog(home, (log) => {
+    if (log.skipped) throw new Error('Cannot reconcile build spend with an incomplete spend log.');
+    if (log.used(id)) return { result: 0 };
+    let recorded = 0;
+    for (const row of log.settled.values()) {
+      if (row.project === project && row.jobId === jobId && (row.source === 'build' || row.source === 'import')) recorded += row.usd;
+    }
+    const gap = spentUsd - recorded;
+    if (gap <= 1e-9) return { result: 0 };
+    const row = spendEntry.parse({ id, source: 'import', project, jobId, at, usd: gap });
+    return { result: gap, row };
+  });
 }
