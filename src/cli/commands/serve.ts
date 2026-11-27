@@ -9,6 +9,7 @@ import { collectRetros } from '../../retro/run.js';
 import { createInboundHandler } from '../../slack/inbound.js';
 import { startSlackService } from '../../slack/service.js';
 import { reconcileSpendOnce } from '../../slack/spend-migration.js';
+import { publishDueSpendNotices } from '../../slack/spend-notices.js';
 import { isRunning } from '../../core/lock.js';
 import { listProjects } from '../../core/registry.js';
 import { createSlackRuntime } from '../../slack/transport.js';
@@ -101,6 +102,7 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
         if (Date.now() >= reconcileAt) {
           await reconcileCheckpoints({ home, loadConfig: async () => config });
           await remindPendingSpecs({ home }).catch(() => undefined);
+          await publishDueSpendNotices(home).catch(() => undefined);
           reconcileAt = Date.now() + 60_000;
         }
         retros.tick();

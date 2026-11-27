@@ -31,9 +31,9 @@ export const MilestoneSchema = z.discriminatedUnion('kind', [
   z.strictObject({ ...job, kind: z.literal('paused'), occurrence: z.string().regex(/^paused-\d{1,15}$/), reason: z.enum(PAUSE_REASONS) }),
   z.strictObject({
     ...job, occurrence,
-    kind: z.enum(['plan-ready', 'checks-complete', 'code-review-complete', 'security-review-complete', 'budget-warning', 'budget-paused']),
+    kind: z.enum(['plan-ready', 'checks-complete', 'code-review-complete', 'security-review-complete', 'budget-warning', 'budget-paused', 'unusual-burn']),
   }),
-  z.strictObject({ ...workspace, kind: z.enum(['lesson-proposed', 'bench-summary', 'plugin-updated']) }),
+  z.strictObject({ ...workspace, kind: z.enum(['lesson-proposed', 'bench-summary', 'plugin-updated', 'spend-warning', 'spend-summary']) }),
 ]);
 
 export type Milestone = z.infer<typeof MilestoneSchema>;
@@ -62,6 +62,9 @@ const milestones = {
   paused: ['pm', 'Job paused'],
   'lesson-proposed': ['coach', 'Lesson proposed'],
   'bench-summary': ['pm', 'Benchmark summary'],
+  'spend-warning': ['pm', 'Spending warning'],
+  'spend-summary': ['pm', 'Weekly spend summary'],
+  'unusual-burn': ['pm', 'This job is spending faster than usual'],
   'plugin-updated': ['pm', 'Plugin configuration updated'],
 } as const satisfies Record<Milestone['kind'], readonly [SlackRole | null, string]>;
 

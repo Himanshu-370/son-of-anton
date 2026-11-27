@@ -21,6 +21,9 @@ import type { SlackConfig } from './config.js';
 import { registeredProjects } from './reconcile.js';
 import { lessonOccurrenceJob, PAUSE_TEXT, publishMilestone, type Milestone } from './events.js';
 import { renderReview, type ReviewButton, type SlackBlock } from './views.js';
+import { readMonthlySpend } from '../core/spend-log.js';
+import { loadSpendHomeData } from './spend-home.js';
+import { spendNoticeText } from './spend-notices.js';
 
 /*
  * The spec conversation from Slack: start work, ask the PM's questions in the job thread, take the owner's
@@ -305,6 +308,14 @@ export async function composeSlackMessage(event: Milestone, deps: ComposeDeps): 
       lines: ['Retro output is untrusted until you accept it.'], sections,
     });
     return { ...view, cards: tokens };
+  }
+  if (event.kind === 'spend-warning' || event.kind === 'spend-summary' || event.kind === 'unusual-burn') {
+    const now = new Date();
+    const { settledUsd, reservedUsd } = await readMonthlySpend(now.toISOString().slice(0, 7), home);
+    const notice = spendNoticeText(event, await loadSpendHomeData(home, now), settledUsd + reservedUsd);
+    if (!notice) return undefined;
+    const job = event.scope === 'job' ? { project: event.project, jobId: event.jobId } : {};
+    return renderReview({ kind: 'spend', ...job }, { mention, ...notice });
   }
   return undefined;
 }

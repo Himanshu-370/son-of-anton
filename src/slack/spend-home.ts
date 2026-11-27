@@ -3,8 +3,8 @@ import { readRegularFile } from '../core/atomic.js';
 import { listProjects } from '../core/registry.js';
 import { jobDir } from '../core/paths.js';
 import { JobStateSchema } from '../core/state.js';
-import { loadAntonConfig } from '../core/anton-config.js';
-import { readSpendLog } from '../core/spend-log.js';
+import { budgetSettings, loadAntonConfig } from '../core/anton-config.js';
+import { activeMonthlyCap, readSpendLog } from '../core/spend-log.js';
 import type { AntonConfig } from '../core/anton-config.js';
 import { ROLE_MODELS, type Role } from '../core/config.js';
 import { resolveModel } from '../core/model-settings.js';
@@ -199,5 +199,6 @@ export async function loadSpendHomeData(home: string, now = new Date()): Promise
       // The spend remains visible even when a project or job record is no longer present.
     }
   }
-  return { now, entries, skipped, config, jobs, readOnly: true };
+  const overallCapUsd = await activeMonthlyCap(budgetSettings(config).monthlyUsd, home);
+  return { now, entries, skipped, config, jobs, readOnly: true, ...(overallCapUsd === undefined ? {} : { overallCapUsd }) };
 }

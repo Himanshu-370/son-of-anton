@@ -8,7 +8,7 @@ import { sanitizeSlackText } from './inbound.js';
 
 export type SlackBlock = Record<string, unknown>;
 export type SlackView = { text: string; blocks: SlackBlock[] };
-export type ReviewTarget = { kind: 'spec' | 'delivery' | 'paused' | 'lessons' | 'questions' | 'reminder'; project?: string; jobId?: string };
+export type ReviewTarget = { kind: 'spec' | 'delivery' | 'paused' | 'lessons' | 'questions' | 'reminder' | 'spend'; project?: string; jobId?: string };
 export type ReviewButton = { label: string; token: string; style?: 'primary' | 'danger'; confirm?: string };
 export type ReviewSection = { text: string; buttons?: ReviewButton[] };
 export type ReviewData = {
