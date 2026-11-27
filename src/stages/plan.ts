@@ -6,7 +6,8 @@ import type { AgentRequest } from '../agent/protocol.js';
 import { writeFileAtomic } from '../core/atomic.js';
 import { redact } from '../core/secrets.js';
 import { remainingUsd } from '../core/budget.js';
-import { ROLE_MODELS } from '../core/config.js';
+import { loadAntonConfig } from '../core/anton-config.js';
+import { resolveModel } from '../core/model-settings.js';
 import type { JobState } from '../core/state.js';
 import type { Commands } from '../kits/types.js';
 import { loadPrompt } from './prompts.js';
@@ -80,7 +81,7 @@ export async function runPlan(
   deps: PlanDeps = {},
 ): Promise<{ plan: Plan; state: JobState }> {
   const run = deps.runAgent ?? defaultRunAgent;
-  const { model, effort } = ROLE_MODELS.tech_lead;
+  const { model, effort } = resolveModel(ctx.config ?? await loadAntonConfig(), 'tech_lead');
   const req: AgentRequest = {
     role: 'tech_lead',
     model,

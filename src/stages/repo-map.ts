@@ -6,7 +6,8 @@ import type { AgentRequest } from '../agent/protocol.js';
 import { writeFileAtomic } from '../core/atomic.js';
 import { redact } from '../core/secrets.js';
 import { remainingUsd } from '../core/budget.js';
-import { ROLE_MODELS } from '../core/config.js';
+import { loadAntonConfig } from '../core/anton-config.js';
+import { resolveModel } from '../core/model-settings.js';
 import { diffSince as defaultDiffSince, headSha as defaultHeadSha } from '../core/git.js';
 import type { JobState } from '../core/state.js';
 import { fenceDiff, fenceText } from '../review/shared.js';
@@ -55,7 +56,7 @@ export async function ensureRepoMap(ctx: StageCtx, deps: RepoMapDeps = {}): Prom
       }
     }
   }
-  const { model, effort } = ROLE_MODELS.mapper;
+  const { model, effort } = resolveModel(ctx.config ?? await loadAntonConfig(), 'mapper');
   const req: AgentRequest = {
     role: 'mapper',
     model,

@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { parse } from 'yaml';
 import { z } from 'zod';
+import { PRICES } from '../agent/pricing.js';
 import { DEFAULTS, type Role } from './config.js';
 import { antonHome } from './paths.js';
 
@@ -12,6 +13,23 @@ const ROLES = [
   'pm', 'tech_lead', 'frontend', 'backend', 'infra', 'qa',
   'code_reviewer', 'security_reviewer', 'coach', 'mapper', 'browser_tester', 'plugin_reviewer',
 ] as const satisfies readonly Role[];
+
+const pricedModel = z.string().refine((model) => Object.hasOwn(PRICES, model), {
+  message: 'model must have a verified price',
+});
+const modelSelection = z.object({ model: pricedModel, effort: z.enum(['low', 'medium', 'high']) }).strict();
+const roleModelOverride = modelSelection.partial().refine(({ model, effort }) => model !== undefined || effort !== undefined, {
+  message: 'role override must set a model or effort',
+});
+const models = z.object({
+  preset: z.enum(['economy', 'balanced', 'best']).optional(),
+  roles: z.partialRecord(z.enum(ROLES), roleModelOverride).optional(),
+  trial: modelSelection.extend({
+    role: z.enum(ROLES),
+    jobsLeft: z.number().int().positive(),
+    revertTo: modelSelection,
+  }).optional(),
+}).strict();
 
 export const ALLOWANCE_ORDER = ['spec', 'plan', 'build', 'verify', 'retro'] as const;
 export const DEFAULT_ALLOWANCES = { spec: 10, plan: 10, build: 50, verify: 25, retro: 5 };
@@ -34,6 +52,7 @@ export const AntonConfigSchema = z
       .object({ defaultUsd: z.number().positive().optional(), allowances: allowances.optional(), taskBudgets: z.boolean().optional() })
       .strict()
       .optional(),
+    models: models.optional(),
     retro: z.object({ batch: z.boolean().optional() }).strict().optional(),
     /** Paid Slack answers: a monthly pool (UTC month) and a cap per answer, separate from build budgets. */
     chat: z

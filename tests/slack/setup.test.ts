@@ -68,6 +68,8 @@ describe('Slack setup', () => {
       expect(manifest.settings.socket_mode_enabled).toBe(true);
       expect(manifest.settings.event_subscriptions.bot_events).toEqual(expect.arrayContaining(['app_mention', 'message.im']));
       expect(manifest.settings.event_subscriptions.bot_events.includes('message.groups')).toBe(role === 'pm');
+      expect(manifest.settings.event_subscriptions.bot_events.includes('app_home_opened')).toBe(role === 'pm');
+      expect(manifest.features.app_home.home_tab_enabled).toBe(role === 'pm');
       expect(manifest.features.slash_commands?.map((command) => command.command) ?? []).toEqual(role === 'pm' ? ['/anton'] : []);
       for (const scope of ['commands', 'groups:write', 'groups:read'] as const) expect(bot.includes(scope)).toBe(role === 'pm');
       expect(bot.includes('files:write')).toBe(role === 'pm' || role === 'qa');

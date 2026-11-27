@@ -2,7 +2,7 @@ import { publishJobMilestone } from '../slack/job-milestones.js';
 import { randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { budgetSettings, loadAntonConfig } from '../core/anton-config.js';
+import { budgetSettings, loadAntonConfig, type AntonConfig } from '../core/anton-config.js';
 import { allowanceShareText, allowanceUsage, appendStageCost, appendStageUsage, recordCost, remainingUsd, stageGroup, usd } from '../core/budget.js';
 import { ROLE_MODELS, type Role } from '../core/config.js';
 import { recordSpend } from '../core/spend-log.js';
@@ -23,6 +23,8 @@ export type StageCtx = {
   jobDir: string;
   state: JobState;
   stage: string;
+  /** The settings snapshot used for this pipeline run. */
+  config?: AntonConfig;
   /** The job's kit, for config.yaml `kits:` plugins. Unset means fallback (e.g. the spec session). */
   kit?: 'fallback' | 'web';
   /** Project secrets, loaded once by the runner. Optional: redact treats undefined as none. */
@@ -113,7 +115,7 @@ export async function runAgent(
   if (remainingUsd(ctx.state) <= 0) throw new BudgetExceeded('no budget remaining');
   // P4b-R1: only runner stages have an allowance; any other stage is limited by the job cap alone.
   const group = stageGroup(ctx.stage);
-  const settings = budgetSettings(await loadAntonConfig());
+  const settings = budgetSettings(ctx.config ?? await loadAntonConfig());
   const allowances = group ? settings.allowances : undefined;
   const specWarning = () =>
     `Spec has used its ${allowances!.spec}% share (${usd(allowanceUsage(ctx.state, 'spec', allowances).limitUsd)}); continuing up to the job cap.`;

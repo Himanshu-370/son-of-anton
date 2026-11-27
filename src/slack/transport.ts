@@ -6,6 +6,8 @@ import type { RoleConnection } from './service.js';
 import type { InboundHandler } from './inbound.js';
 import { slackSetupApi } from './setup-api.js';
 import type { SlackAction } from './actions.js';
+import { createSpendHomePublisher, loadSpendHomeData } from './spend-home.js';
+import { antonHome } from '../core/paths.js';
 import { MODAL_CALLBACK } from './views.js';
 
 const quiet: Logger = {
@@ -169,6 +171,12 @@ export function createSlackRuntime(config: SlackConfig, credentials: SlackCreden
     role, new webApi.WebClient(credentials[role].botToken, webOptions),
   ]));
 
+  const ownerHome = createSpendHomePublisher({
+    config,
+    load: () => loadSpendHomeData(antonHome()),
+    publish: (request) => clients.get('pm')!.views.publish(request),
+  });
+
   async function open(role: SlackRole, signal: AbortSignal): Promise<RoleConnection> {
     const { appToken, botToken } = credentials[role];
     const expected = config.roles[role];
@@ -187,6 +195,10 @@ export function createSlackRuntime(config: SlackConfig, credentials: SlackCreden
     const app = new App({
       receiver, token: botToken, botId: auth.bot_id, botUserId: expected.botUserId,
       tokenVerificationEnabled: false, logger: quiet, clientOptions: webOptions,
+    });
+    if (role === 'pm') app.event('app_home_opened', async ({ body, event }) => {
+      if (event.tab !== 'home') return;
+      await ownerHome({ teamId: body.team_id, appId: body.api_app_id, userId: event.user }, 'open');
     });
     if (!inbound) {
       if (role === 'pm') app.command('/anton', async ({ ack }) => {

@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { StageCtx } from '../../src/agent/host-runner.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
+import { loadAntonConfig } from '../../src/core/anton-config.js';
 import { ensureRepoMap } from '../../src/stages/repo-map.js';
+
+vi.mock('../../src/core/anton-config.js', { spy: true });
 
 let ctx: StageCtx;
 let repo: string;
@@ -67,6 +70,15 @@ describe('ensureRepoMap', () => {
     h.deps.diffSince = vi.fn(async () => { throw new Error('bad revision'); });
     await ensureRepoMap(ctx, h.deps);
     expect(h.reqs[0]!.prompt).not.toContain('# Old map');
+  });
+
+  it('uses the best preset without expanding mapper tools', async () => {
+    vi.mocked(loadAntonConfig).mockResolvedValueOnce({ models: { preset: 'best' } });
+    const h = harness();
+    await ensureRepoMap(ctx, h.deps);
+    expect(h.reqs[0]).toMatchObject({
+      role: 'mapper', model: 'claude-opus-5-5', effort: 'low', tools: ['Read', 'Grep', 'Glob'],
+    });
   });
 
   it('mapper request is read-only, sonnet-5-5/low', async () => {

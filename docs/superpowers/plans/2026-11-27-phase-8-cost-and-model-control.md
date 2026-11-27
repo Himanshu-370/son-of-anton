@@ -23,3 +23,9 @@ The host ledger now exposes `reserveSpend`, `settleSpend`, and `readMonthlySpend
 The overall cap stays disabled until every paid path is wired and prior month-to-date charges are reconciled. The cap check must read the current locked snapshot because jobs can run in processes separate from the Slack service.
 
 Phase 9 consumes the spend and reservation APIs for calls. The design spec is on `feat/slack-hub-specs` until that documentation lands.
+
+## Current implementation
+
+Build runs and Retro log settled spend with attribution. Slack answers hold estimated spend and settle known charges. Model presets and overrides feed the pipeline, and the pipeline keeps a snapshot for the run. The PM Home tab publishes a read-only spend view on open. The settings history core supports validated changes and undo.
+
+Remaining work includes historical import, reservations and monthly-cap enforcement for all paid paths, Slack confirmation for settings, automatic trial completion, weekly summaries and suggestions, and live App Home verification. The Phase 7 Slack intent layer lives on its own branch.

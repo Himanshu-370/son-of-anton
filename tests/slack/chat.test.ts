@@ -9,6 +9,7 @@ import { saveState, type JobState } from '../../src/core/state.js';
 import { SLACK_ROLES, type SlackConfig } from '../../src/slack/config.js';
 import { dispatchSlackAction, type DispatchDeps, type SlackAction } from '../../src/slack/actions.js';
 import { answerQuestion, classifyQuestion, CHAT_MODELS, type ChatClient, type ChatDeps } from '../../src/slack/chat.js';
+import { readMonthlySpend, readSpendLog } from '../../src/core/spend-log.js';
 import { chatSpentUsd } from '../../src/slack/chat-budget.js';
 import { normalizeEvent } from '../../src/slack/inbound.js';
 import { PRICES } from '../../src/agent/pricing.js';
@@ -179,10 +180,15 @@ describe('answerQuestion', () => {
     const spent = await chatSpentUsd('T0FAKE', Date.UTC(2026, 10, 20), { home });
     expect(spent).toBeGreaterThan(0.0005); // the upper bound, not the reported cost
     expect(spent).toBeLessThanOrEqual(0.1);
+    expect(await readMonthlySpend('2026-11', home)).toEqual({ settledUsd: 0, reservedUsd: spent });
   });
 
   it('records the reported cost once the call returns usage', async () => {
-    await answerQuestion(ask('How does the streak counter work?'), chatDeps());
+    const answer = await answerQuestion(ask('How does the streak counter work?'), chatDeps());
+    expect((await readSpendLog(home)).entries).toMatchObject([{
+      source: 'chat', project: 'p', role: 'tech_lead', model: 'claude-haiku-5-5', vendor: 'anthropic',
+      usd: answer.costUsd, tokens: { input: 1200, output: 150 },
+    }]);
     const price = PRICES['claude-haiku-5-5']!;
     expect(await chatSpentUsd('T0FAKE', Date.UTC(2026, 10, 20), { home })).toBeCloseTo((1200 * price.inPerM + 150 * price.outPerM) / 1e6, 8);
   });

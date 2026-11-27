@@ -6,7 +6,8 @@ import type { AgentRequest } from '../agent/protocol.js';
 import { writeFileAtomic } from '../core/atomic.js';
 import { redact } from '../core/secrets.js';
 import { remainingUsd } from '../core/budget.js';
-import { ROLE_MODELS } from '../core/config.js';
+import { loadAntonConfig } from '../core/anton-config.js';
+import { resolveModel } from '../core/model-settings.js';
 import type { JobState } from '../core/state.js';
 import type { AcceptanceCheck } from '../kits/types.js';
 import { loadPrompt } from './prompts.js';
@@ -100,7 +101,7 @@ export async function specTurn(
   deps: SpecDeps = {},
 ): Promise<SpecTurnResult> {
   const run = deps.runAgent ?? defaultRunAgent;
-  const { model, effort } = ROLE_MODELS.pm;
+  const { model, effort } = resolveModel(ctx.config ?? await loadAntonConfig(), 'pm');
   const req: AgentRequest = {
     role: 'pm',
     model,

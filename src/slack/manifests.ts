@@ -23,13 +23,13 @@ export function slackManifest(role: SlackRole, attemptId: string) {
   // Each role posts through the outbox and needs history for its own ambiguous sends.
   // Only the PM manages private channels and subscribes to project thread replies.
   const events: BotEvents = ['app_mention', 'message.im'];
-  if (pm) events.push('message.groups');
+  if (pm) events.push('message.groups', 'app_home_opened');
   if (pm) scopes.push('commands', 'groups:read', 'groups:write');
   if (pm || role === 'qa') scopes.push('files:write');
   return {
     display_information: { name: names[role], description: `Son of Anton setup ${attemptId}` },
     features: {
-      app_home: { home_tab_enabled: false, messages_tab_enabled: true, messages_tab_read_only_enabled: false },
+      app_home: { home_tab_enabled: pm, messages_tab_enabled: true, messages_tab_read_only_enabled: false },
       bot_user: { display_name: names[role], always_online: false },
       ...(pm ? { slash_commands: [{ command: '/anton', description: 'Work with the Son of Anton team' }] } : {}),
     },

@@ -1,3 +1,4 @@
+import { readSpendLog } from '../../src/core/spend-log.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -103,6 +104,20 @@ describe('submitRetro', () => {
     expect(JSON.stringify(p.messages)).toContain('Outcome: approved');
     expect(await retroJson()).toMatchObject({ status: 'submitted', batchId: 'msgbatch_1' });
     expect(out).toEqual(['Retro submitted; review lessons later with: anton lessons review']);
+  });
+
+  it('uses coach settings for submission and keeps its model for batch cost fallback', async () => {
+    const f = fake({ result: { type: 'succeeded', message: msg(OUTPUT, { model: '' }) } });
+    await writeFile(join(home, 'config.yaml'), 'models:\n  preset: best\n  roles:\n    coach: { effort: high }\n');
+    await submitRetro(await job(), 'approved', deps(f.client));
+    expect(f.batches[0]).toMatchObject({ model: 'claude-sonnet-5-5', output_config: { effort: 'high' } });
+
+    await writeFile(join(home, 'config.yaml'), 'models: { preset: economy }\n');
+    expect(await collectRetros(deps(f.client))).toMatchObject({ collected: 1 });
+    expect((await loadState(dir)).spentUsd).toBeCloseTo(2);
+    expect((await readSpendLog(home)).entries).toMatchObject([
+      { source: 'build', project: 'p', jobId: '1-init', stage: 'retro', role: 'coach', model: 'claude-sonnet-5-5', usd: 1 },
+    ]);
   });
 
   it('second approve or abandon does not resubmit', async () => {

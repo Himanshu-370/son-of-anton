@@ -11,6 +11,7 @@ import { loadJob } from '../core/job-actions.js';
 import { formatStatusTable, jobStatusRows } from '../core/job-status.js';
 import { antonHome } from '../core/paths.js';
 import { loadSecrets, redact } from '../core/secrets.js';
+import { reserveSpend, settleSpend } from '../core/spend-log.js';
 import { reasonOf } from '../retro/run.js';
 import { loadPrompt } from '../stages/prompts.js';
 import { assertJobDir } from '../stages/verify.js';
@@ -276,6 +277,23 @@ export async function answerQuestion(input: AuthorizedQuestion, deps: ChatDeps =
     return status(`This month's chat budget (${usd(settings.monthlyUsd)}) cannot cover another answer, so here is the status.`);
   }
 
+  const spendId = `chat:${input.teamId}:${requestId}`;
+  const hold = await reserveSpend({
+    id: spendId, at: new Date(now).toISOString(), source: 'chat', project: input.project,
+    role: input.role, model: plan.model, effort: plan.effort, vendor: 'anthropic', usd: bound,
+  }, undefined, home).catch(() => 'unavailable' as const);
+  if (hold !== 'reserved') {
+    await settleChatSpend(reservation, 0, { home }).catch(() => undefined);
+    return status('Anton could not reserve spend for this answer, so here is the status.');
+  }
+  const settleOverall = async (actual: Parameters<typeof settleSpend>[1]) => {
+    try {
+      await settleSpend(spendId, actual, home);
+    } catch {
+      (deps.log ?? console.error)('Could not settle the Slack answer in the overall spend log. Its reservation remains counted.');
+    }
+  };
+
   let response: Message;
   try {
     response = await (deps.client ?? anthropicChatClient)(key).send(params);
@@ -284,6 +302,7 @@ export async function answerQuestion(input: AuthorizedQuestion, deps: ChatDeps =
     const why = sanitizeSlackText(scrub(reasonOf(e, key), secrets), 120);
     if (e instanceof Anthropic.APIError && typeof e.status === 'number' && UNBILLED_STATUSES.has(e.status)) {
       // A definite rejection (a response arrived, nothing ran): book $0 and say why in the service log.
+      await settleOverall({ usd: 0 });
       await settleChatSpend(reservation, 0, { home }).catch(() => undefined);
       (deps.log ?? ((l: string) => console.error(l)))(`Slack answer rejected by the API (status ${e.status}); booked $0: ${why}`);
       return status(`The answer was rejected (${why}). Nothing was charged. Here is the status.`);
@@ -294,6 +313,14 @@ export async function answerQuestion(input: AuthorizedQuestion, deps: ChatDeps =
   }
   const usage = validUsage(response?.usage) ? response.usage : undefined;
   const costUsd = usage ? estimateUsd(plan.model, usage) : undefined;
+  if (usage && costUsd !== undefined) {
+    await settleOverall({
+      usd: costUsd, tokens: {
+        input: usage.input_tokens, output: usage.output_tokens,
+        cacheRead: usage.cache_read_input_tokens ?? 0, cacheWrite: usage.cache_creation_input_tokens ?? 0,
+      },
+    });
+  }
   await settleChatSpend(reservation, costUsd, { home });
 
   const raw = response.stop_reason === 'refusal'

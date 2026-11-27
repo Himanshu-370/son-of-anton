@@ -1,3 +1,5 @@
+import { loadAntonConfig } from '../core/anton-config.js';
+import { resolveModel } from '../core/model-settings.js';
 import { randomUUID } from 'node:crypto';
 import { cp, lstat, mkdir, readdir, readFile, rename, rm } from 'node:fs/promises';
 import { dirname, join, posix, relative } from 'node:path';
@@ -6,7 +8,6 @@ import { z } from 'zod';
 import type { runAgent as defaultRunAgent, StageCtx } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
 import { writeFileAtomic } from '../core/atomic.js';
-import { ROLE_MODELS } from '../core/config.js';
 import { diffNoIndex } from '../core/git.js';
 import { antonHome } from '../core/paths.js';
 import type { JobState } from '../core/state.js';
@@ -161,7 +162,7 @@ export async function updatePlugin(name: string, d: UpdateDeps): Promise<'up_to_
       budgetUsd: 1, spentUsd: 0, warned80: false, completedTasks: [], updatedAt: '',
     };
     const ctx: StageCtx = { project: REVIEW_SLUG, repo: reviewDir, container, jobDir, state, stage: REVIEW_SLUG };
-    const { model, effort } = ROLE_MODELS.plugin_reviewer;
+    const { model, effort } = resolveModel(await loadAntonConfig(home), 'plugin_reviewer');
     const req: AgentRequest = {
       role: 'plugin_reviewer',
       model,

@@ -1,3 +1,4 @@
+import { recordSpend } from '../core/spend-log.js';
 import { lessonOccurrence, publishMilestone } from '../slack/events.js';
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, readdir } from 'node:fs/promises';
@@ -6,11 +7,12 @@ import Anthropic from '@anthropic-ai/sdk';
 import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import type { Message, MessageBatchResult, MessageCreateParamsNonStreaming } from '@anthropic-ai/sdk/resources/messages';
 import { z } from 'zod';
-import { estimateUsd } from '../agent/pricing.js';
+import { estimateUsd, PRICES } from '../agent/pricing.js';
 import { budgetSettings, loadAntonConfig, retroBatch } from '../core/anton-config.js';
 import { readRegularFile, writeFileAtomic } from '../core/atomic.js';
 import { allowanceLeftUsd, appendStageCost, recordCost, remainingUsd, usd } from '../core/budget.js';
-import { ROLE_MODELS } from '../core/config.js';
+import type { ModelConfig } from '../core/config.js';
+import { resolveModel } from '../core/model-settings.js';
 import { antonHome, jobDir as jobDirOf } from '../core/paths.js';
 import { listProjects } from '../core/registry.js';
 import { acquireLockFile, AlreadyRunning } from '../core/lock.js';
@@ -60,13 +62,13 @@ type Job = { name: string; repo: string; jobId: string; jobDir: string };
 const CUSTOM_ID = 'retro';
 const MAX_LESSONS = 5;
 const MAX_PLUGINS = 2;
-const COACH = ROLE_MODELS.coach;
 const DONE_LINE = 'Retro submitted; review lessons later with: anton lessons review';
 
 const RetroFileSchema = z
   .object({
     status: z.enum(['submitted', 'done', 'failed', 'skipped']),
     batchId: z.string().min(1).optional(),
+    model: z.string().refine((model) => Object.hasOwn(PRICES, model)).optional(),
     reason: z.string().optional(),
     submittedAt: z.string(),
   })
@@ -102,14 +104,14 @@ export function retroUserMessage(record: string, outcome: 'approved' | 'abandone
   ].join('\n');
 }
 
-export function retroParams(system: string, user: string): MessageCreateParamsNonStreaming {
+export function retroParams(system: string, user: string, coach: ModelConfig = resolveModel({}, 'coach')): MessageCreateParamsNonStreaming {
   return {
-    model: COACH.model,
+    model: coach.model,
     max_tokens: 16000,
     system,
     messages: [{ role: 'user', content: user }],
     // Thinking is omitted (adaptive, on by default on Haiku 5.5); effort is the only depth control.
-    output_config: { effort: COACH.effort, format: { type: 'json_schema', schema: zodOutputFormat(RetroOutputSchema).schema } },
+    output_config: { effort: coach.effort, format: { type: 'json_schema', schema: zodOutputFormat(RetroOutputSchema).schema } },
   };
 }
 
@@ -142,11 +144,11 @@ export async function submitRetro(job: Job, outcome: 'approved' | 'abandoned', d
     const record = await buildRunRecord({ repo: job.repo, jobDir: job.jobDir, secrets, allowances });
     const system = await retroPrompt();
     const user = retroUserMessage(record, outcome);
-    const params = retroParams(system, user);
+    const params = retroParams(system, user, resolveModel(cfg, 'coach'));
 
     // shortcut: ~3 chars per token (conservative for Haiku 5.5's tokenizer); upgrade to count_tokens if skips misfire.
     const tokens = Math.ceil((system.length + user.length) / 3);
-    const estimate = estimateUsd(COACH.model, { input_tokens: tokens }) * (batch ? 0.5 : 1);
+    const estimate = estimateUsd(params.model, { input_tokens: tokens }) * (batch ? 0.5 : 1);
     const state = await loadState(job.jobDir);
     // P5a-R2: the retro share borrows what earlier shares left (cumulative, like every allowance).
     const share = allowanceLeftUsd(state, 'retro', allowances);
@@ -156,10 +158,10 @@ export async function submitRetro(job: Job, outcome: 'approved' | 'abandoned', d
     const client = (deps.client ?? anthropicRetroClient)(key);
     if (batch) {
       const batchId = await client.createBatch(CUSTOM_ID, params);
-      await writeRetro(job.jobDir, { status: 'submitted', batchId, submittedAt });
+      await writeRetro(job.jobDir, { status: 'submitted', batchId, model: params.model, submittedAt });
       out(DONE_LINE);
     } else {
-      const reason = await finishRetro(job, await client.send(params), 1, home, notes, { submittedAt }, key);
+      const reason = await finishRetro(job, await client.send(params), 1, home, notes, { submittedAt, model: params.model }, key);
       for (const n of notes) out(n);
       out(reason ? `retro failed: ${reason}` : DONE_LINE);
     }
@@ -190,7 +192,7 @@ async function recordRetroCost(job: Job, cost: number, home: string, notes: stri
  */
 async function finishRetro(
   job: Job, msg: Message, priceMult: number, home: string, notes: string[],
-  r: { batchId?: string; submittedAt: string }, key: string | undefined,
+  r: { batchId?: string; submittedAt: string; model?: string }, key: string | undefined,
 ): Promise<string | undefined> {
   let reason: string | undefined;
   let ps: Proposal[] = [];
@@ -204,7 +206,14 @@ async function finishRetro(
     await publishMilestone({ scope: 'workspace', kind: 'lesson-proposed', occurrence: lessonOccurrence(job.name, job.jobId), count: ps.length }, { home });
   }
   await writeRetro(job.jobDir, reason ? { status: 'failed', reason, ...r } : { status: 'done', ...r });
-  await recordRetroCost(job, estimateUsd(msg.model || COACH.model, msg.usage) * priceMult, home, notes);
+  const model = msg.model || r.model || resolveModel({}, 'coach').model;
+  const cost = estimateUsd(model, msg.usage) * priceMult;
+  await recordRetroCost(job, cost, home, notes);
+  const id = createHash('sha256').update(JSON.stringify([job.name, job.jobId, r.submittedAt])).digest('hex');
+  await recordSpend({
+    id: `retro:${id}`, at: new Date().toISOString(), source: 'build', stage: 'retro',
+    project: job.name, jobId: job.jobId, role: 'coach', model, vendor: 'anthropic', usd: cost,
+  }, home).catch(() => { notes.push(`${job.name}/${job.jobId}: retro spend log was not updated`); });
   return reason;
 }
 
@@ -337,7 +346,7 @@ export async function collectRetros(deps: RetroDeps = {}): Promise<{ collected: 
         }
         let reason: string | undefined;
         try {
-          reason = await finishRetro(job, got.result.message, 0.5, home, res.notes, { batchId: r.batchId, submittedAt: r.submittedAt }, key);
+          reason = await finishRetro(job, got.result.message, 0.5, home, res.notes, { batchId: r.batchId, submittedAt: r.submittedAt, model: r.model }, key);
         } catch (e) {
           retry('save retro results', e);
           continue;

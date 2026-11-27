@@ -1,3 +1,4 @@
+import { loadAntonConfig } from '../core/anton-config.js';
 import { publishJobMilestone } from '../slack/job-milestones.js';
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
@@ -224,7 +225,8 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       const container = await startContainer(project, repo, kit);
       secrets = await loadSecrets(project);
       const getPlan = async () => (plan ??= PlanSchema.parse(await readJson(join(jobDir, 'plan.json'))));
-      const ctx = (stage: string): StageCtx => ({ project, repo, container, jobDir, state, stage, secrets, kit: kitName });
+      const config = await loadAntonConfig();
+      const ctx = (stage: string): StageCtx => ({ project, repo, container, jobDir, state, stage, secrets, kit: kitName, config });
       let lastVerify: DeliverInput;
 
       while (ACTIVE_STAGES.includes(state.stage)) {

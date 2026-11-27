@@ -1,3 +1,5 @@
+import { loadAntonConfig } from '../../core/anton-config.js';
+import { resolveModel } from '../../core/model-settings.js';
 import { lstatSync } from 'node:fs';
 import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -6,7 +8,6 @@ import { runAgent as defaultRunAgent, type StageCtx } from '../../agent/host-run
 import type { AgentRequest } from '../../agent/protocol.js';
 import { writeFileAtomic } from '../../core/atomic.js';
 import { remainingUsd } from '../../core/budget.js';
-import { ROLE_MODELS } from '../../core/config.js';
 import { redact } from '../../core/secrets.js';
 import type { JobState } from '../../core/state.js';
 import { loadPrompt } from '../../stages/prompts.js';
@@ -71,7 +72,7 @@ const OUTPUT_JSON_SCHEMA = z.toJSONSchema(BrowserOutputSchema) as Record<string,
 export async function runBrowserAgent(
   ctx: StageCtx, checks: AcceptanceCheck[], url: string, screens: string, run: typeof defaultRunAgent = defaultRunAgent,
 ): Promise<{ checks: BrowserCheck[]; state: JobState }> {
-  const { model, effort } = ROLE_MODELS.browser_tester;
+  const { model, effort } = resolveModel(ctx.config ?? await loadAntonConfig(), 'browser_tester');
   const prompt = [
     `App URL: ${url}`,
     `Screens path: ${screens}`,

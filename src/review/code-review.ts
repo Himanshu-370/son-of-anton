@@ -1,8 +1,10 @@
+import { loadAntonConfig } from '../core/anton-config.js';
+import { resolveModel } from '../core/model-settings.js';
 import { z } from 'zod';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
 import { remainingUsd } from '../core/budget.js';
-import { ROLE_MODELS, type Area } from '../core/config.js';
+import { type Area } from '../core/config.js';
 import { diffSince as defaultDiffSince } from '../core/git.js';
 import type { JobState } from '../core/state.js';
 import { fenceDiff, sha8 } from './shared.js';
@@ -77,7 +79,7 @@ export async function runCodeReview(
 ): Promise<{ findings: ReviewFinding[]; state: JobState }> {
   const run = deps.runAgent ?? defaultRunAgent;
   const diff = await (deps.diffSince ?? defaultDiffSince)(ctx.repo, baseSha);
-  const { model, effort } = ROLE_MODELS.code_reviewer;
+  const { model, effort } = resolveModel(ctx.config ?? await loadAntonConfig(), 'code_reviewer');
   const req: AgentRequest = {
     role: 'code_reviewer',
     model,

@@ -4,7 +4,9 @@ import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner
 import type { AgentRequest } from '../agent/protocol.js';
 import { remainingUsd } from '../core/budget.js';
 import { z } from 'zod';
-import { AREA_ORDER, ROLE_MODELS, type Area } from '../core/config.js';
+import { AREA_ORDER, type Area } from '../core/config.js';
+import { loadAntonConfig } from '../core/anton-config.js';
+import { resolveModel } from '../core/model-settings.js';
 import { commitAll as defaultCommitAll } from '../core/git.js';
 import { saveState, transition, type JobState } from '../core/state.js';
 import { trimOutput } from '../core/trim.js';
@@ -150,9 +152,10 @@ export async function runBuild(
   const commit = deps.commitAll ?? defaultCommitAll;
   const baseSystemPrompt = await loadPrompt('build.md');
   let state = ctx.state;
+  const config = ctx.config ?? await loadAntonConfig();
 
   const session = async (prompt: string, role: Area): Promise<void> => {
-    const { model, effort } = ROLE_MODELS[role];
+    const { model, effort } = resolveModel(config, role);
     const systemPrompt = `${baseSystemPrompt}\n\n${await loadPrompt(`role-${role}.md`)}`;
     const req: AgentRequest = {
       role,

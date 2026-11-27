@@ -1,8 +1,10 @@
+import { loadAntonConfig } from '../core/anton-config.js';
+import { resolveModel } from '../core/model-settings.js';
 import { z } from 'zod';
 import { runAgent as defaultRunAgent, type StageCtx } from '../agent/host-runner.js';
 import type { AgentRequest } from '../agent/protocol.js';
 import { remainingUsd } from '../core/budget.js';
-import { ROLE_MODELS, type Area } from '../core/config.js';
+import { type Area } from '../core/config.js';
 import { diffSince as defaultDiffSince } from '../core/git.js';
 import type { JobState } from '../core/state.js';
 import { fenceDiff, sha8 } from '../review/shared.js';
@@ -159,7 +161,7 @@ export async function runSecurityReview(
   const diff = await (deps.diffSince ?? defaultDiffSince)(ctx.repo, baseSha);
   const withRefs = scanned.map((f) => ({ ref: scannerRef(f), ...f }));
   const byRef = new Map(withRefs.map((f) => [f.ref, f]));
-  const { model, effort } = ROLE_MODELS.security_reviewer;
+  const { model, effort } = resolveModel(ctx.config ?? await loadAntonConfig(), 'security_reviewer');
   const req: AgentRequest = {
     role: 'security_reviewer',
     model,
