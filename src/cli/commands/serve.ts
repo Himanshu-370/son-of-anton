@@ -3,6 +3,8 @@ import { antonHome } from '../../core/paths.js';
 import { SLACK_ROLES, loadSlackConfig, loadSlackCredentials } from '../../slack/config.js';
 import { drainOutbox, inspectOutbox, resolveOutboxEntry, type OutboxResolution } from '../../slack/outbox.js';
 import { reconcileCheckpoints } from '../../slack/reconcile.js';
+import { cleanupAll, expirePreviews, hostPreviewDeps } from '../../preview/sandbox.js';
+import { isCurrent } from '../../core/job-actions.js';
 import { attachCardMessage, dispatchSlackAction, prepareCardModal, type DispatchDeps } from '../../slack/actions.js';
 import { composeSlackMessage, remindPendingSpecs } from '../../slack/spec-session.js';
 import { collectRetros } from '../../retro/run.js';
@@ -56,6 +58,9 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
       d.err('Run anton slack setup before starting the Slack service.');
       return 1;
     }
+    // Sandbox runs of deliveries belong to this service: none outlives it, and leftovers from a crash go now.
+    const preview = hostPreviewDeps(home);
+    await cleanupAll(preview).catch(() => d.err('Could not remove earlier sandbox runs.'));
     // Slack orders run the same job actions as the CLI, in this process, with its effects.
     // Spec turns (the PM in Docker) run here too, with the same effects as anton new and anton spec.
     const dispatchDeps: DispatchDeps = {
@@ -77,6 +82,7 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
       chat: { home },
       classify: (input) => classifyIntent(input, { home }),
       intentSecrets: { slackBot: credentials.pm.botToken, slackApp: credentials.pm.appToken },
+      preview,
     };
     const inbound = createInboundHandler({
       log: d.out,
@@ -96,6 +102,10 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
         if (Date.now() >= reconcileAt) {
           await reconcileCheckpoints({ home, loadConfig: async () => config });
           await remindPendingSpecs({ home }).catch(() => undefined);
+          const stopped = await expirePreviews((r) => isCurrent({
+            project: r.project, jobId: r.jobId, stage: 'awaiting_final_review', revision: r.revision,
+          }), preview).catch(() => []);
+          for (const r of stopped) d.out(`Sandbox run of ${r.project} stopped.`);
           reconcileAt = Date.now() + 60_000;
         }
         retros.tick();
@@ -125,6 +135,7 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
       await service.stop();
       // Let accepted actions finish their local work; their records make a redelivery safe either way.
       await inbound.idle();
+      await cleanupAll(preview).catch(() => undefined);
       await retros.settle(5_000);
     });
     return 0;

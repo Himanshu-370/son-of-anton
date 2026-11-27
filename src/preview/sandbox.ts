@@ -1,9 +1,11 @@
+import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { readRegularFile, writeFileAtomic } from '../core/atomic.js';
-import type { ExecFn } from '../core/exec.js';
-import { redact } from '../core/secrets.js';
-import type { KitName } from '../kits/index.js';
+import { defaultExec, type ExecFn } from '../core/exec.js';
+import { loadSecrets, redact, secretsEnvFile } from '../core/secrets.js';
+import { ensureImage } from '../docker/container.js';
+import { kitByName, type KitName } from '../kits/index.js';
 
 /*
  * Run a delivered project so the Owner can try it before approving. The project's code was written by
@@ -166,4 +168,33 @@ export async function openFolder(repoPath: string, deps: Pick<PreviewDeps, 'exec
   if (code.exitCode === 0) return 'vscode';
   await deps.exec('open', [repoPath]);
   return 'finder';
+}
+
+/** The real effects, for anton serve. */
+export function hostPreviewDeps(home: string): PreviewDeps {
+  const listen = (port: number) => new Promise<number | undefined>((resolve) => {
+    const server = createServer();
+    server.once('error', () => resolve(undefined));
+    server.listen(port, '127.0.0.1', () => {
+      const address = server.address();
+      server.close(() => resolve(typeof address === 'object' && address ? address.port : undefined));
+    });
+  });
+  return {
+    exec: defaultExec,
+    image: (kit) => ensureImage(kitByName(kit)),
+    envFile: (slug) => secretsEnvFile(slug),
+    secrets: (slug) => loadSecrets(slug),
+    portFree: async (port) => (await listen(port)) === port,
+    freePort: async () => {
+      const port = await listen(0);
+      if (!port) throw new Error('No free port on this Mac.');
+      return port;
+    },
+    // Any HTTP answer means the app is up; only a failed connection means it is not.
+    reachable: (url) => fetch(url, { signal: AbortSignal.timeout(2000) }).then(() => true, () => false),
+    now: Date.now,
+    sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms).unref(); }),
+    home,
+  };
 }

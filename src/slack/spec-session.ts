@@ -1,3 +1,5 @@
+import { homedir } from 'node:os';
+import { PlanSchema } from '../stages/plan.js';
 import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -279,10 +281,24 @@ export async function composeSlackMessage(event: Milestone, deps: ComposeDeps): 
   if (event.scope === 'job' && event.kind === 'delivery-ready') {
     const job = await loadJob(event.project);
     const target = { project: event.project, jobId: event.jobId, stage: 'awaiting_final_review' as const, revision: event.occurrence };
+    // Run only what the plan says how to run; the commands themselves only ever run inside the sandbox.
+    const planRaw = await readCheckedFile(job.jobDir, ['plan.json'], 256 * 1024);
+    let runnable = false;
+    try {
+      const commands = planRaw ? PlanSchema.parse(JSON.parse(planRaw.toString('utf8'))).commands : undefined;
+      runnable = !!(commands?.run || commands?.serve);
+    } catch {
+      runnable = false;
+    }
     const buttons = [
+      ...(runnable ? [await card({ kind: 'preview-run', role: 'qa', target }, '▶ Run it')] : []),
+      await card({ kind: 'preview-stop', role: 'qa', target }, '■ Stop'),
+      await card({ kind: 'open-folder', role: 'qa', target }, 'Open in VS Code'),
       await card({ kind: 'approve', role: 'qa', target }, 'Approve delivery', 'primary'),
       await card({ kind: 'reject', role: 'qa', target }, 'Reject…', 'danger'),
     ];
+    const userHome = homedir();
+    const folder = job.repo === userHome || job.repo.startsWith(`${userHome}/`) ? `~${job.repo.slice(userHome.length)}` : job.repo;
     const raw = await readCheckedFile(job.jobDir, ['evidence', 'results.json'], 1024 * 1024);
     let findings: { id: string; title: string }[] = [];
     try {
@@ -298,7 +314,7 @@ export async function composeSlackMessage(event: Milestone, deps: ComposeDeps): 
     }
     const view = renderReview({ kind: 'delivery', project: event.project, jobId: event.jobId }, {
       mention, title: `Delivery ${event.occurrence.slice('delivered-'.length)} is ready for final review`,
-      lines: ['Review REPORT.md on the Mac or the evidence in this thread.'], buttons, sections,
+      lines: [`Folder: ${folder}`, 'Review REPORT.md on the Mac or the evidence in this thread. Run it to try it in a sandbox.'], buttons, sections,
     });
     return { ...view, cards: tokens };
   }

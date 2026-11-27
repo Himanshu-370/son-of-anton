@@ -775,6 +775,20 @@ describe('review cards', () => {
     expect(spawned).toEqual(['p']);
   });
 
+  it('the delivery card shows the folder and run, stop and open buttons, and leaves out Run without commands', async () => {
+    const plan = (commands: object) => JSON.stringify({ summary: 's', commands, tasks: [{ id: 'T1', title: 't', acceptanceChecks: ['AC-1'], instructions: 'i', area: 'backend' }] });
+    const event = { scope: 'job', source: 'factory', project: 'p', jobId: '1-init', kind: 'delivery-ready', occurrence: 'delivered-1' } as const;
+    const labels = (m: Awaited<ReturnType<typeof composeSlackMessage>>) =>
+      (m!.blocks as { elements?: { text: { text: string } }[] }[]).flatMap((b) => b.elements ?? []).map((b) => b.text.text);
+    const job = await project('p', { stage: 'awaiting_final_review' });
+    await writeFile(join(job.jobDir, 'plan.json'), plan({ install: 'npm ci', test: 'npm test', run: 'node bin/hello.js' }));
+    const m = await composeSlackMessage(event, { config, home, channelId: PROJECT_CHANNEL });
+    expect(m?.text).toContain(`Folder: ${job.repoPath}`); // the test home is not under ~, so the path is shown whole
+    expect(labels(m)).toEqual(['▶ Run it', '■ Stop', 'Open in VS Code', 'Approve delivery', 'Reject...']);
+    await writeFile(join(job.jobDir, 'plan.json'), plan({ install: 'npm ci', test: 'npm test' }));
+    expect(labels(await composeSlackMessage(event, { config, home, channelId: PROJECT_CHANNEL }))).toEqual(['■ Stop', 'Open in VS Code', 'Approve delivery', 'Reject...']);
+  });
+
   it('approves a spec from the posted card: plan stage, spec-approved tag, one spawn; a second click changes nothing', async () => {
     const job = await project();
     outputs.push({ kind: 'spec', spec: spec('Card Approve') });
