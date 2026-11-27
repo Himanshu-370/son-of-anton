@@ -95,7 +95,7 @@ describe('delivery run cards', () => {
     await writeFile(join(dir, 'plan.json'), JSON.stringify(plan({ install: 'npm ci', test: 'npm test', run: 'node bin/hello.js' })));
     const f = previewFake();
     const r = await dispatchSlackAction(click(await card('preview-run'), 'card:pr1'), deps({ preview: f.preview }));
-    expect(r).toEqual({ status: 'done', lines: ['A Terminal window opened inside the sandbox.', 'Try: node bin/hello.js'] });
+    expect(r).toEqual({ status: 'done', lines: ['A Terminal window opened inside the sandbox.'] });
     expect(f.calls.some((c) => c[0] === 'docker' && c[1] === 'run')).toBe(true);
     expect(r.close).toBeUndefined();
   });
@@ -105,6 +105,15 @@ describe('delivery run cards', () => {
     tags = ['anton/1-init/delivered-1', 'anton/1-init/delivered-2'];
     const f = previewFake();
     const r = await dispatchSlackAction(click(await card('preview-run'), 'card:pr2'), deps({ preview: f.preview }));
+    expect(r.status).toBe('stale');
+    expect(f.calls).toEqual([]);
+  });
+
+  it.each(['preview-stop', 'open-folder'] as const)('%s refuses a stale delivery card', async (kind) => {
+    await project('p');
+    tags = ['anton/1-init/delivered-1', 'anton/1-init/delivered-2'];
+    const f = previewFake();
+    const r = await dispatchSlackAction(click(await card(kind), 'card:stale-preview'), deps({ preview: f.preview }));
     expect(r.status).toBe('stale');
     expect(f.calls).toEqual([]);
   });

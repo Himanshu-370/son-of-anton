@@ -418,18 +418,22 @@ function cardOperation(a: CardAction, card: CardBinding): { op: Operation } | Ac
   }
 }
 
-/** Run, stop or open a delivered project. Only a run needs the job still at that delivery. */
+/** Run, stop or open a project from its current delivery. */
 async function dispatchPreview(card: CardBinding, deps: DispatchDeps): Promise<ActionResult> {
   if (!deps.preview) return result('unsupported', 'Running a delivery is available in anton serve.');
   const target = card.target!;
+  if (!(await isCurrent(target, deps.jobs.listTags).catch(() => false))) return result('stale', 'That is out of date. Nothing was changed.');
   if (card.kind === 'preview-stop') {
-    return result('done', (await stopPreview(target.project, deps.preview)) ? 'Stopped.' : `Nothing is running for ${target.project}.`);
+    const stopped = await stopPreview(target.project, deps.preview).catch(() => undefined);
+    if (stopped === undefined) return result('refused', 'Could not stop the sandbox. Try again when Docker is available.');
+    return result('done', stopped ? 'Stopped.' : `Nothing is running for ${target.project}.`);
   }
   const job = await loadJob(target.project);
   if (card.kind === 'open-folder') {
-    return result('done', (await openFolder(job.repo, deps.preview)) === 'vscode' ? 'Opened in VS Code.' : 'Opened in Finder.');
+    const opened = await openFolder(job.repo, deps.preview).catch(() => undefined);
+    if (!opened) return result('refused', 'Could not open the project folder.');
+    return result('done', opened === 'vscode' ? 'Opened in VS Code.' : 'Opened in Finder.');
   }
-  if (!(await isCurrent(target, deps.jobs.listTags).catch(() => false))) return result('stale', 'That is out of date. Nothing was changed.');
   const plan = PlanSchema.safeParse(JSON.parse((await readRegularFile(join(job.jobDir, 'plan.json'))) ?? 'null'));
   if (!plan.success) return result('refused', 'Nothing to run for this project.');
   const spec = JSON.parse((await readRegularFile(join(job.jobDir, 'spec.approved.json'))) ?? '{}') as { kit?: unknown };

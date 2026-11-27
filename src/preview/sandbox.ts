@@ -58,7 +58,11 @@ const writeRuns = (home: string, runs: PreviewRecord[]) =>
   writeFileAtomic(file(home), JSON.stringify({ version: 1, runs }, null, 2) + '\n');
 
 async function remove(container: string, deps: PreviewDeps): Promise<void> {
-  if (NAME.test(container)) await deps.exec('docker', ['rm', '-f', container]);
+  if (!NAME.test(container)) throw new Error('Invalid preview container name.');
+  const removed = await deps.exec('docker', ['rm', '-f', container]);
+  if (removed.exitCode !== 0 && !removed.stderr.includes(`No such container: ${container}`)) {
+    throw new Error('Could not remove the sandbox container.');
+  }
 }
 
 /** Inside the container only: plan commands are untrusted text. */
@@ -87,11 +91,15 @@ export async function runPreview(
     const appPort = Number(appUrl.port || 80);
     hostPort = (await deps.portFree(appPort)) ? appPort : await deps.freePort();
   }
+  const web = appUrl && hostPort;
+  const hint = (commands.run ?? commands.test ?? '').replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
+  const terminalHint = 'You are inside the sandbox in the project folder.' + (hint ? ' Try: ' + hint : '');
   const envFile = await deps.envFile(project);
   const started = await deps.exec('docker', [
     'run', '-d', '--name', name,
     '-v', `${repoPath}:/workspace`, '-w', '/workspace',
     ...(envFile ? ['--env-file', envFile] : []),
+    ...(web ? [] : ['--env', 'ANTON_PREVIEW_HINT=' + terminalHint]),
     ...(appUrl && hostPort ? ['-p', `127.0.0.1:${hostPort}:${Number(appUrl.port || 80)}`] : []),
     await deps.image(input.kit), 'sleep', 'infinity',
   ]);
@@ -120,19 +128,26 @@ export async function runPreview(
     if (!ready) {
       return { ok: false, lines: ['The app did not answer within 60 seconds. It may only listen inside the container; try the Terminal path from Open in VS Code.'] };
     }
-    await deps.exec('open', [local]);
+    const browser = await deps.exec('open', [local]).catch(() => undefined);
+    if (browser?.exitCode !== 0) {
+      return { ok: false, lines: [`Could not open the browser. The sandbox is running at ${local}.`] };
+    }
     return { ok: true, lines: [`Running at ${local}. It stops in 30 minutes, or press Stop.`] };
   }
 
   await writeRuns(deps.home, [...(await readRuns(deps.home)), run]);
-  const hint = commands.run ?? commands.test ?? '';
+  // The host script contains only the validated name. The container prints the hint as data.
+  const shell = 'printf "%s\\n" "$ANTON_PREVIEW_HINT"; unset ANTON_PREVIEW_HINT; exec sh -l';
+  const terminalCommand = "docker exec -it " + name + " sh -c '" + shell + "'";
   const script = [
-    `tell application "Terminal" to do script "docker exec -it ${name} sh -l"`,
+    'tell application "Terminal" to do script ' + JSON.stringify(terminalCommand),
     'tell application "Terminal" to activate',
   ];
-  // The container name (validated above) is the only variable in the script; the hint is shown in Slack.
-  await deps.exec('osascript', script.flatMap((line) => ['-e', line]));
-  return { ok: true, lines: ['A Terminal window opened inside the sandbox.', ...(hint ? [`Try: ${hint}`] : [])] };
+  const terminal = await deps.exec('osascript', script.flatMap((line) => ['-e', line])).catch(() => undefined);
+  if (terminal?.exitCode !== 0) {
+    return { ok: false, lines: ['Could not open Terminal. Press Stop to remove the sandbox.'] };
+  }
+  return { ok: true, lines: ['A Terminal window opened inside the sandbox.'] };
 }
 
 export async function stopPreview(project: string, deps: PreviewDeps): Promise<boolean> {
@@ -166,7 +181,8 @@ export async function cleanupAll(deps: PreviewDeps): Promise<void> {
 export async function openFolder(repoPath: string, deps: Pick<PreviewDeps, 'exec'>): Promise<'vscode' | 'finder'> {
   const code = await deps.exec('open', ['-a', 'Visual Studio Code', repoPath]);
   if (code.exitCode === 0) return 'vscode';
-  await deps.exec('open', [repoPath]);
+  const finder = await deps.exec('open', [repoPath]);
+  if (finder.exitCode !== 0) throw new Error('Could not open the project folder.');
   return 'finder';
 }
 

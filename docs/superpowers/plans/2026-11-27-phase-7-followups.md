@@ -13,3 +13,9 @@ ANTON_SLACK_E2E=1 npx vitest run tests/e2e/slack-workflow.e2e.test.ts
 ```
 
 The manual pass still covers real Owner messages, real button clicks, and paid intent classification.
+
+## Delivery preview smoke check
+
+On 2026-11-27, an isolated Docker check confirmed that the CLI hint printed literally inside the sandbox, including shell syntax, and that Stop removed the container. A web preview responded through its loopback port and Stop removed it. These checks used disposable containers and stood in for macOS window opening. The fake Slack workflow also passed.
+
+The live Owner check still needs real Slack button clicks for CLI Run, web Run, Stop, and Open in VS Code, plus a preview left running to verify the expiry notice in its job thread.

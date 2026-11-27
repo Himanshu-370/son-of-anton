@@ -540,3 +540,18 @@ it('promotes a recovered checkpoint when the real capture arrives with the same 
   expect(entries[0]?.recovered).toBeUndefined();
   expect(entries[0]?.reason).toBeUndefined();
 });
+
+it('posts one preview expiry notice in the delivery job thread', async () => {
+  const expiry = { ...job, kind: 'preview-expired', occurrence: '1000' } as const;
+  await publish(expiry);
+  await publish(expiry);
+  for (let i = 0; i < 5; i++) {
+    time += 1000;
+    await drain();
+  }
+  const messages = transport.postMessage.mock.calls.map(([message]) => message);
+  const notices = messages.filter((message) => message.text.includes('stopped after 30 minutes'));
+  expect(notices).toEqual([expect.objectContaining({
+    threadTs: expect.any(String), text: 'The sandbox run of demo stopped after 30 minutes.',
+  })]);
+});

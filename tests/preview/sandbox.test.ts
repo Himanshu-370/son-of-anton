@@ -55,13 +55,18 @@ describe('sandbox runs', () => {
     expect(await runs()).toHaveLength(1);
   });
 
-  it('cli run opens Terminal inside the sandbox', async () => {
-    const r = await runPreview(input(cli), deps());
+  it('prints the CLI hint inside the sandbox without putting it in the host script', async () => {
+    const runCommand = 'echo "$(touch /tmp/marker)"' + String.fromCharCode(27) + '[2J';
+    const r = await runPreview(input({ ...cli, run: runCommand }), deps());
     const osa = calls.find((c) => c[0] === 'osascript')!;
-    expect(osa.join(' ')).toContain('docker exec -it anton-preview-hello sh -l');
+    expect(osa.join(' ')).toContain('docker exec -it anton-preview-hello sh -c');
+    expect(osa.join(' ')).toContain('ANTON_PREVIEW_HINT');
+    expect(osa.join(' ')).not.toContain('touch /tmp/marker');
     expect(osa.join(' ')).not.toContain('node bin/hello.js'); // untrusted text never reaches the host script
-    expect(calls.find((c) => c[1] === 'run')!).not.toContain('-p');
-    expect(r).toEqual({ ok: true, lines: ['A Terminal window opened inside the sandbox.', 'Try: node bin/hello.js'] });
+    const dockerRun = calls.find((c) => c[1] === 'run')!;
+    expect(dockerRun).not.toContain('-p');
+    expect(dockerRun).toContain('ANTON_PREVIEW_HINT=You are inside the sandbox in the project folder. Try: echo "$(touch /tmp/marker)" [2J');
+    expect(r).toEqual({ ok: true, lines: ['A Terminal window opened inside the sandbox.'] });
   });
 
   it('run replaces an earlier run', async () => {
@@ -95,6 +100,25 @@ describe('sandbox runs', () => {
     expect(r).toEqual({ ok: false, lines: [expect.stringMatching(/^The app did not answer within 60 seconds/)] });
     expect(calls.some((c) => c[0] === 'open')).toBe(false);
     expect(await runs()).toHaveLength(1); // Stop can still remove it
+  });
+
+  it.each([
+    { commands: web, opener: 'open', message: 'Could not open the browser.' },
+    { commands: cli, opener: 'osascript', message: 'Could not open Terminal.' },
+  ])('reports a failed $opener and keeps the sandbox available to stop', async ({ commands, opener, message }) => {
+    const d = deps({ fail: ([cmd]) => cmd === opener ? { exitCode: 1 } : undefined });
+    const r = await runPreview(input(commands), d);
+    expect(r.ok).toBe(false);
+    expect(r.lines[0]).toContain(message);
+    expect(await stopPreview('hello', d)).toBe(true);
+  });
+
+  it('keeps the preview recorded if Docker fails to stop it', async () => {
+    await runPreview(input(cli), deps());
+    const blocked = deps({ fail: ([, sub]) => sub === 'rm' ? { exitCode: 1, stderr: 'permission denied' } : undefined });
+    await expect(stopPreview('hello', blocked)).rejects.toThrow('Could not remove');
+    expect(await runs()).toHaveLength(1);
+    expect(await stopPreview('hello', deps())).toBe(true);
   });
 
   it('refuses an invalid container name and a plan with nothing to run', async () => {

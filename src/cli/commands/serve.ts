@@ -3,7 +3,8 @@ import { antonHome } from '../../core/paths.js';
 import { SLACK_ROLES, loadSlackConfig, loadSlackCredentials } from '../../slack/config.js';
 import { drainOutbox, inspectOutbox, resolveOutboxEntry, type OutboxResolution } from '../../slack/outbox.js';
 import { reconcileCheckpoints } from '../../slack/reconcile.js';
-import { cleanupAll, expirePreviews, hostPreviewDeps } from '../../preview/sandbox.js';
+import { cleanupAll, expirePreviews, hostPreviewDeps, PREVIEW_LIFETIME_MS } from '../../preview/sandbox.js';
+import { publishMilestone } from '../../slack/events.js';
 import { isCurrent } from '../../core/job-actions.js';
 import { attachCardMessage, dispatchSlackAction, prepareCardModal, type DispatchDeps } from '../../slack/actions.js';
 import { composeSlackMessage, remindPendingSpecs } from '../../slack/spec-session.js';
@@ -102,10 +103,19 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
         if (Date.now() >= reconcileAt) {
           await reconcileCheckpoints({ home, loadConfig: async () => config });
           await remindPendingSpecs({ home }).catch(() => undefined);
+          const previewCheckAt = preview.now();
           const stopped = await expirePreviews((r) => isCurrent({
             project: r.project, jobId: r.jobId, stage: 'awaiting_final_review', revision: r.revision,
           }), preview).catch(() => []);
-          for (const r of stopped) d.out(`Sandbox run of ${r.project} stopped.`);
+          for (const r of stopped) {
+            d.out(`Sandbox run of ${r.project} stopped.`);
+            if (previewCheckAt - r.startedAt >= PREVIEW_LIFETIME_MS) {
+              await publishMilestone({
+                scope: 'job', source: 'factory', kind: 'preview-expired',
+                project: r.project, jobId: r.jobId, occurrence: String(r.startedAt),
+              }, { home, loadConfig: async () => config });
+            }
+          }
           reconcileAt = Date.now() + 60_000;
         }
         retros.tick();

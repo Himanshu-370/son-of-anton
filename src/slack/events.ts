@@ -31,7 +31,7 @@ export const MilestoneSchema = z.discriminatedUnion('kind', [
   z.strictObject({ ...job, kind: z.literal('paused'), occurrence: z.string().regex(/^paused-\d{1,15}$/), reason: z.enum(PAUSE_REASONS) }),
   z.strictObject({
     ...job, occurrence,
-    kind: z.enum(['plan-ready', 'checks-complete', 'code-review-complete', 'security-review-complete', 'budget-warning', 'budget-paused']),
+    kind: z.enum(['plan-ready', 'checks-complete', 'code-review-complete', 'security-review-complete', 'budget-warning', 'budget-paused', 'preview-expired']),
   }),
   z.strictObject({ ...workspace, kind: z.enum(['lesson-proposed', 'bench-summary', 'plugin-updated']) }),
 ]);
@@ -57,6 +57,7 @@ const milestones = {
   'screenshot-ready': ['qa', 'QA evidence selected for sharing'],
   'code-review-complete': ['code_reviewer', 'Code review complete'],
   'security-review-complete': ['security_reviewer', 'Security review complete'],
+  'preview-expired': ['qa', 'Sandbox run expired'],
   'budget-warning': ['pm', 'Budget warning'],
   'budget-paused': ['pm', 'Job paused at the budget limit'],
   paused: ['pm', 'Job paused'],
@@ -80,6 +81,7 @@ export const PAUSE_TEXT: Record<PauseReason, string> = {
 };
 
 export function eventText(event: Milestone): string {
+  if (event.kind === 'preview-expired') return `The sandbox run of ${event.project} stopped after 30 minutes.`;
   const title = event.kind === 'paused' ? PAUSE_TEXT[event.reason] : milestones[event.kind][1];
   const counts = (['count', 'passed', 'failed'] as const).flatMap((name) =>
     event[name] === undefined ? [] : [`${name}: ${event[name]}`]);
