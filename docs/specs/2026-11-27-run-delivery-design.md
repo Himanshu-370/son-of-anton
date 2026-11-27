@@ -60,7 +60,7 @@ The delivery-ready card (`composeSlackMessage`, `delivery-ready`) gains a line a
 ```
 Delivery 1 is ready for final review
 Folder: ~/Documents/Code_Playground/projects/anton/projects/hello-cli
-[ ▶ Run it ]  [ Open in VS Code ]  [ Approve delivery ]  [ Reject… ]
+[ ▶ Run it ]  [ ■ Stop ]  [ Open in VS Code ]  [ Approve delivery ]  [ Reject… ]
 ```
 
 - **Folder:** the project's registered path, with the home folder shown as `~`.
@@ -79,14 +79,14 @@ Folder: ~/Documents/Code_Playground/projects/anton/projects/hello-cli
 5. **Open it:**
    - **Web project:** run `commands.serve` in the background inside the container. Poll `http://127.0.0.1:<hostPort>` for up to 60 seconds, then run `open http://localhost:<hostPort><path>`. Reply: "Running at http://localhost:<hostPort>. It stops in 30 minutes, or press Stop."
    - **CLI project:** open Terminal with `docker exec -it anton-preview-<slug> sh -l`, printing first "You are inside the sandbox in the project folder. Try: <commands.run or commands.test>". Reply: "A Terminal window opened inside the sandbox."
-6. **Remember the run** in `~/anton/previews.json`, with the project, container, started time and port, written atomically. Then post a **■ Stop** card in the job thread.
+6. **Remember the run** in `~/anton/previews.json`, with the project, container, started time and port, written atomically. *(Planning change: the **■ Stop** button sits on the delivery card itself instead of a separate card in the thread, which is simpler and always in the same place.)*
 
 ### 5.3 Stopping
 
-- **The Stop card** runs `docker rm -f anton-preview-<slug>`. The card then closes with "Stopped."
+- **The Stop button** on the delivery card runs `docker rm -f anton-preview-<slug>` and replies privately "Stopped." The card stays open.
 - **Automatically:** `anton serve` checks `previews.json` every minute and removes any run older than 30 minutes, then posts "The sandbox run of <project> stopped after 30 minutes."
 - **On service start and stop:** when `anton serve` starts, it removes any `anton-preview-*` container left in `previews.json` from before. When the service stops, it removes the runs it started.
-- **When a job moves on** (approved, rejected or abandoned), its run is removed.
+- **When a job moves on** (approved, rejected or abandoned), its run is removed. The same minute check removes any run whose job is no longer at `awaiting_final_review` for that delivery.
 
 ### 5.4 Open in VS Code
 
