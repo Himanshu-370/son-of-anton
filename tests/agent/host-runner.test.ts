@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { z } from 'zod';
 import { runAgent, BudgetExceeded, AgentError, AllowanceExceeded, type StageCtx, type ChildLike } from '../../src/agent/host-runner.js';
-import { readSpendLog } from '../../src/core/spend-log.js';
+import { readMonthlySpend, readSpendLog } from '../../src/core/spend-log.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
 import { appendStageUsage, cacheHitRate } from '../../src/core/budget.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
@@ -166,6 +166,7 @@ describe('runAgent', () => {
     await expect(runAgent(ctx, req, { spawn: () => f.child, notify: vi.fn() })).rejects.toThrow(
       'agent exited without a result (exit 3)',
     );
+    expect((await readMonthlySpend(new Date().toISOString().slice(0, 7))).reservedUsd).toBe(req.budgetUsd);
   });
 
   it('non-JSON lines are logged, not fatal; chunks split mid-line', async () => {
@@ -214,7 +215,17 @@ describe('runAgent', () => {
   });
 
   it('records host spend by role and model without charging a resumed transcript twice', async () => {
+    const month = new Date().toISOString().slice(0, 7);
+    const seen: number[] = [];
     const f = fake([L({ type: 'cost', totalUsd: 0.9 }), result(1.2)]);
+    const stdout = f.child.stdout as AsyncIterable<string>;
+    f.child.stdout = (async function* () {
+      for await (const frame of stdout) {
+        const spend = await readMonthlySpend(month);
+        seen.push(spend.reservedUsd + spend.settledUsd);
+        yield frame;
+      }
+    })();
     await runAgent(ctx, { ...req, role: 'backend', model: 'claude-sonnet-5-5', baseUsd: 0.5 },
       { spawn: () => f.child, notify: vi.fn() });
     const { entries, skipped } = await readSpendLog();
@@ -227,6 +238,8 @@ describe('runAgent', () => {
       });
     }
     expect(entries.reduce((sum, row) => sum + row.usd, 0)).toBeCloseTo(0.7);
+    expect(seen).toEqual([req.budgetUsd, req.budgetUsd]);
+    expect((await readMonthlySpend(month)).reservedUsd).toBe(0);
   });
 
   it('returns totalUsd = last cumulative total (default base 0)', async () => {

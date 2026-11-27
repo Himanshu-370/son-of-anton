@@ -5,7 +5,7 @@ import { basename, join } from 'node:path';
 import { budgetSettings, loadAntonConfig, type AntonConfig } from '../core/anton-config.js';
 import { allowanceShareText, allowanceUsage, appendStageCost, appendStageUsage, recordCost, remainingUsd, stageGroup, usd } from '../core/budget.js';
 import { ROLE_MODELS, type Role } from '../core/config.js';
-import { recordSpend } from '../core/spend-log.js';
+import { debitSpendReservation, releaseSpendReservation, reserveSpend } from '../core/spend-log.js';
 import { execIn } from '../docker/container.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { redact } from '../core/secrets.js';
@@ -181,7 +181,8 @@ export async function runAgent(
   /** Last seen cumulative total. A resumed session's SDK total starts from the transcript's (baseUsd). */
   let lastTotal = req.baseUsd ?? 0;
   let killed = false;
-  const spendSession = randomUUID();
+  const spendSession = `build:${randomUUID()}`;
+  let debitFailed = false;
   let spendSequence = 0;
   const spendRole = Object.hasOwn(ROLE_MODELS, req.role) ? req.role as Role : undefined;
   /** A failed report-only write (cost.json, usage.json) must not drop a paid-for result or mask a pause. */
@@ -221,19 +222,14 @@ export async function runAgent(
     await saveState(ctx.jobDir, state);
     await bestEffort('cost.json', () => appendStageCost(ctx.jobDir, ctx.stage, inc));
     await bestEffort('spend.jsonl', async () => {
-      await recordSpend({
-        id: `build:${spendSession}:${++spendSequence}`,
-        at: new Date().toISOString(),
-        source: 'build',
-        project: ctx.project,
-        jobId: state.jobId,
-        stage: ctx.stage,
-        role: spendRole,
-        model: req.model,
-        effort: req.effort,
-        vendor: 'anthropic',
-        usd: inc,
-      });
+      try {
+        if (!await debitSpendReservation(spendSession, `${spendSession}:${++spendSequence}`, inc)) {
+          throw new Error('build spend reservation could not be debited');
+        }
+      } catch (error) {
+        debitFailed = true;
+        throw error;
+      }
     });
     if (r.crossedWarn) {
       await notify('Son of Anton', `${ctx.project}: 80% of budget used`);
@@ -251,6 +247,14 @@ export async function runAgent(
       throw overAllowance(state);
     }
   };
+
+  if (budgetUsd <= 0) throw new BudgetExceeded('no session budget remaining');
+  const reservation = await reserveSpend({
+    id: spendSession, at: new Date().toISOString(), source: 'build', project: ctx.project,
+    jobId: state.jobId, stage: ctx.stage, role: spendRole, model: req.model, effort: req.effort,
+    vendor: 'anthropic', usd: budgetUsd,
+  }, undefined);
+  if (reservation !== 'reserved') throw new AgentError('build spend reservation unavailable');
 
   const child = spawn(ctx.container, ['node', '/opt/anton/entry.js', containerPath]);
 
@@ -276,6 +280,9 @@ export async function runAgent(
         await applyTotal(ev.totalUsd, child, false);
         checkProtocol(ev.protocolVersion);
         await recordUsage(ev.usage);
+        if (!debitFailed) {
+          await bestEffort('spend.jsonl', async () => { await releaseSpendReservation(spendSession); });
+        }
         return { output: ev.output, sessionId: ev.sessionId };
       case 'error':
         await applyTotal(ev.totalUsd, child, false);

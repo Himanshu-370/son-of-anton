@@ -27,11 +27,16 @@ const spendEntry = z.strictObject({
 export type SpendEntry = z.infer<typeof spendEntry>;
 
 const reservationRow = z.strictObject({ reserve: spendEntry });
-const ledgerRow = z.union([spendEntry, reservationRow]);
+const debit = z.strictObject({ id: label, reservationId: label, usd: z.number().finite().positive() });
+const debitRow = z.strictObject({ debit });
+const releaseRow = z.strictObject({ release: label });
+const ledgerRow = z.union([spendEntry, reservationRow, debitRow, releaseRow]);
 
 function parseLog(raw: string) {
   const settled = new Map<string, SpendEntry>();
   const reserved = new Map<string, SpendEntry>();
+  const released = new Set<string>();
+  const used = (id: string) => settled.has(id) || reserved.has(id) || released.has(id);
   let skipped = 0;
   for (const line of raw.split('\n')) {
     if (!line.trim()) continue;
@@ -39,14 +44,33 @@ function parseLog(raw: string) {
       const row = ledgerRow.parse(JSON.parse(line));
       if ('reserve' in row) {
         const entry = row.reserve;
-        if (settled.has(entry.id) || reserved.has(entry.id)) {
+        if (used(entry.id)) {
           skipped++;
           continue;
         }
         reserved.set(entry.id, entry);
         continue;
       }
-      if (settled.has(row.id)) {
+      if ('debit' in row) {
+        const { id, reservationId, usd } = row.debit;
+        const hold = reserved.get(reservationId);
+        if (!hold || used(id)) {
+          skipped++;
+          continue;
+        }
+        settled.set(id, { ...hold, id, usd });
+        reserved.set(reservationId, { ...hold, usd: Math.max(0, hold.usd - usd) });
+        continue;
+      }
+      if ('release' in row) {
+        if (!reserved.delete(row.release)) {
+          skipped++;
+          continue;
+        }
+        released.add(row.release);
+        continue;
+      }
+      if (settled.has(row.id) || released.has(row.id)) {
         skipped++;
         continue;
       }
@@ -56,7 +80,7 @@ function parseLog(raw: string) {
       skipped++;
     }
   }
-  return { settled, reserved, skipped };
+  return { settled, reserved, skipped, used };
 }
 
 async function readRaw(home: string): Promise<string> {
@@ -105,7 +129,7 @@ async function updateLog<T>(
 
 export async function recordSpend(entry: SpendEntry, home = antonHome()): Promise<boolean> {
   const row = spendEntry.parse(entry);
-  return updateLog(home, (log) => log.settled.has(row.id) || log.reserved.has(row.id)
+  return updateLog(home, (log) => log.used(row.id)
     ? { result: false } : { result: true, row });
 }
 
@@ -118,7 +142,7 @@ export async function reserveSpend(
   const row = spendEntry.extend({ usd: z.number().finite().positive() }).parse(entry);
   const limit = z.number().finite().nonnegative().optional().parse(limitUsd);
   return updateLog<SpendReservationResult>(home, (log) => {
-    if (log.settled.has(row.id) || log.reserved.has(row.id)) return { result: 'duplicate' };
+    if (log.used(row.id)) return { result: 'duplicate' };
     if (limit !== undefined) {
       if (log.skipped) return { result: 'unavailable' };
       const { settledUsd, reservedUsd } = monthlyTotals(log, row.at.slice(0, 7));
@@ -138,4 +162,20 @@ export async function settleSpend(
     const row = spendEntry.parse({ ...held, usd: actual.usd, tokens: actual.tokens });
     return { result: true, row };
   });
+}
+
+
+/** Book an incremental charge and reduce its outstanding hold in the same write. */
+export async function debitSpendReservation(
+  reservationId: string, id: string, usd: number, home = antonHome(),
+): Promise<boolean> {
+  const row = debitRow.parse({ debit: { reservationId, id, usd } });
+  return updateLog(home, (log) => log.used(id) || !log.reserved.has(reservationId)
+    ? { result: false } : { result: true, row });
+}
+
+/** Release only unused capacity once a provider's final cost has been booked. */
+export async function releaseSpendReservation(id: string, home = antonHome()): Promise<boolean> {
+  const row = releaseRow.parse({ release: id });
+  return updateLog(home, (log) => log.reserved.has(id) ? { result: true, row } : { result: false });
 }
