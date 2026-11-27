@@ -1,4 +1,4 @@
-import { readSpendLog } from '../../src/core/spend-log.js';
+import { readMonthlySpend, readSpendLog } from '../../src/core/spend-log.js';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -111,13 +111,28 @@ describe('submitRetro', () => {
     await writeFile(join(home, 'config.yaml'), 'models:\n  preset: best\n  roles:\n    coach: { effort: high }\n');
     await submitRetro(await job(), 'approved', deps(f.client));
     expect(f.batches[0]).toMatchObject({ model: 'claude-sonnet-5-5', output_config: { effort: 'high' } });
+    const month = new Date().toISOString().slice(0, 7);
+    const pending = await readMonthlySpend(month, home);
+    expect(pending.settledUsd).toBe(0);
+    expect(pending.reservedUsd).toBeGreaterThan(0);
 
     await writeFile(join(home, 'config.yaml'), 'models: { preset: economy }\n');
     expect(await collectRetros(deps(f.client))).toMatchObject({ collected: 1 });
     expect((await loadState(dir)).spentUsd).toBeCloseTo(2);
+    expect(await readMonthlySpend(month, home)).toEqual({ settledUsd: 1, reservedUsd: 0 });
     expect((await readSpendLog(home)).entries).toMatchObject([
       { source: 'build', project: 'p', jobId: '1-init', stage: 'retro', role: 'coach', model: 'claude-sonnet-5-5', usd: 1 },
     ]);
+  });
+
+  it('keeps the hold when batch submission fails without a known billing outcome', async () => {
+    const f = fake({ throws: new Error('connection lost') });
+    await submitRetro(await job(), 'approved', deps(f.client));
+    const month = new Date().toISOString().slice(0, 7);
+    expect(await retroJson()).toMatchObject({ status: 'failed' });
+    const spend = await readMonthlySpend(month, home);
+    expect(spend.reservedUsd).toBeGreaterThan(0);
+    expect(spend.settledUsd).toBe(0);
   });
 
   it('second approve or abandon does not resubmit', async () => {

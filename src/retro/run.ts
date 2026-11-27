@@ -1,4 +1,4 @@
-import { recordSpend } from '../core/spend-log.js';
+import { recordSpend, reserveSpend, settleSpend } from '../core/spend-log.js';
 import { lessonOccurrence, publishMilestone } from '../slack/events.js';
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, readdir } from 'node:fs/promises';
@@ -115,6 +115,12 @@ export function retroParams(system: string, user: string, coach: ModelConfig = r
   };
 }
 
+function retroSpendIdentity(job: Job) {
+  const key = createHash('sha256').update(JSON.stringify([job.name, job.jobId])).digest('hex');
+  return { id: `retro:${key}`, source: 'build', stage: 'retro', project: job.name, jobId: job.jobId,
+    role: 'coach', vendor: 'anthropic' } as const;
+}
+
 /**
  * Runs Retro once for a finished job. Never throws: it writes retro.json and prints one line
  * (submitted, skipped or failed). A retro.json that already exists, whatever it holds, means done.
@@ -154,6 +160,15 @@ export async function submitRetro(job: Job, outcome: 'approved' | 'abandoned', d
     const share = allowanceLeftUsd(state, 'retro', allowances);
     if (estimate > share) return await skip(`retro share too small (estimate ${usd(estimate)}, ${usd(share)} left)`);
     if (estimate > remainingUsd(state)) return await skip(`job budget too small (estimate ${usd(estimate)}, ${usd(remainingUsd(state))} left)`);
+
+    // Reserve the conservative request cost before dispatch, including the full output ceiling.
+    const maxUsd = estimateUsd(params.model, {
+      input_tokens: Buffer.byteLength(system) + Buffer.byteLength(user), output_tokens: params.max_tokens,
+    }) * (batch ? 0.5 : 1);
+    const hold = await reserveSpend({
+      ...retroSpendIdentity(job), at: submittedAt, model: params.model, usd: maxUsd,
+    }, undefined, home);
+    if (hold !== 'reserved') return;
 
     const client = (deps.client ?? anthropicRetroClient)(key);
     if (batch) {
@@ -207,13 +222,22 @@ async function finishRetro(
   }
   await writeRetro(job.jobDir, reason ? { status: 'failed', reason, ...r } : { status: 'done', ...r });
   const model = msg.model || r.model || resolveModel({}, 'coach').model;
+  if (!msg.usage) return reason;
   const cost = estimateUsd(model, msg.usage) * priceMult;
   await recordRetroCost(job, cost, home, notes);
-  const id = createHash('sha256').update(JSON.stringify([job.name, job.jobId, r.submittedAt])).digest('hex');
-  await recordSpend({
-    id: `retro:${id}`, at: new Date().toISOString(), source: 'build', stage: 'retro',
-    project: job.name, jobId: job.jobId, role: 'coach', model, vendor: 'anthropic', usd: cost,
-  }, home).catch(() => { notes.push(`${job.name}/${job.jobId}: retro spend log was not updated`); });
+  const identity = retroSpendIdentity(job);
+  const tokens = {
+    input: msg.usage.input_tokens, output: msg.usage.output_tokens,
+    cacheRead: msg.usage.cache_read_input_tokens ?? 0, cacheWrite: msg.usage.cache_creation_input_tokens ?? 0,
+  };
+  try {
+    if (!await settleSpend(identity.id, { usd: cost, tokens }, home)) {
+      // Batches submitted before ledger holds were introduced still need an attributed charge.
+      await recordSpend({ ...identity, at: new Date().toISOString(), model, tokens, usd: cost }, home);
+    }
+  } catch {
+    notes.push(`${job.name}/${job.jobId}: retro spend log was not updated`);
+  }
   return reason;
 }
 

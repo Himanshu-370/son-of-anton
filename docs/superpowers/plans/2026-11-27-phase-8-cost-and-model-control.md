@@ -26,6 +26,6 @@ Phase 9 consumes the spend and reservation APIs for calls. The design spec is on
 
 ## Current implementation
 
-Build runs and Retro log settled spend with attribution. Slack answers hold estimated spend and settle known charges. Model presets and overrides feed the pipeline, and the pipeline keeps a snapshot for the run. The PM Home tab publishes a read-only spend view on open. The settings history core supports validated changes and undo.
+Build runs log settled spend with attribution. Retro and Slack answers reserve before dispatch and settle known charges. Retro batches started before reservations were introduced are recorded when collected. Model presets and overrides feed the pipeline, and the pipeline keeps a snapshot for the run. The PM Home tab publishes a read-only spend view on open. The settings history core supports validated changes and undo.
 
 Remaining work includes historical import, reservations and monthly-cap enforcement for all paid paths, Slack confirmation for settings, automatic trial completion, weekly summaries and suggestions, and live App Home verification. The Phase 7 Slack intent layer lives on its own branch.
