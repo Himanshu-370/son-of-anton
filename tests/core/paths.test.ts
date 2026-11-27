@@ -20,6 +20,11 @@ describe('paths', () => {
     expect(antonHome()).toBe(join(homedir(), 'anton'));
   });
 
+  it('projectDir uses projectsDir from config when set, expanding ~/', () => {
+    expect(projectDir('a', '/srv/anton-projects')).toBe('/srv/anton-projects/a');
+    expect(projectDir('a', '~/Documents/projects')).toBe(join(homedir(), 'Documents', 'projects', 'a'));
+  });
+
   it('projectDir ends with /projects/<slug>', () => {
     process.env.ANTON_HOME = '/tmp/x';
     expect(projectDir('a')).toBe('/tmp/x/projects/a');
