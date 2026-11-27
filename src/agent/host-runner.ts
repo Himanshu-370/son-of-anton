@@ -1,8 +1,11 @@
 import { publishJobMilestone } from '../slack/job-milestones.js';
+import { randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { budgetSettings, loadAntonConfig } from '../core/anton-config.js';
 import { allowanceShareText, allowanceUsage, appendStageCost, appendStageUsage, recordCost, remainingUsd, stageGroup, usd } from '../core/budget.js';
+import { ROLE_MODELS, type Role } from '../core/config.js';
+import { recordSpend } from '../core/spend-log.js';
 import { execIn } from '../docker/container.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { redact } from '../core/secrets.js';
@@ -176,6 +179,9 @@ export async function runAgent(
   /** Last seen cumulative total. A resumed session's SDK total starts from the transcript's (baseUsd). */
   let lastTotal = req.baseUsd ?? 0;
   let killed = false;
+  const spendSession = randomUUID();
+  let spendSequence = 0;
+  const spendRole = Object.hasOwn(ROLE_MODELS, req.role) ? req.role as Role : undefined;
   /** A failed report-only write (cost.json, usage.json) must not drop a paid-for result or mask a pause. */
   const bestEffort = async (name: string, write: () => Promise<void>): Promise<void> => {
     try {
@@ -212,6 +218,21 @@ export async function runAgent(
     // state.json first: it is what the caps read. cost.json is the report's per-stage table only.
     await saveState(ctx.jobDir, state);
     await bestEffort('cost.json', () => appendStageCost(ctx.jobDir, ctx.stage, inc));
+    await bestEffort('spend.jsonl', async () => {
+      await recordSpend({
+        id: `build:${spendSession}:${++spendSequence}`,
+        at: new Date().toISOString(),
+        source: 'build',
+        project: ctx.project,
+        jobId: state.jobId,
+        stage: ctx.stage,
+        role: spendRole,
+        model: req.model,
+        effort: req.effort,
+        vendor: 'anthropic',
+        usd: inc,
+      });
+    });
     if (r.crossedWarn) {
       await notify('Son of Anton', `${ctx.project}: 80% of budget used`);
       await publishJobMilestone(state, { kind: 'budget-warning', occurrence: `cap-${state.budgetUsd}` });

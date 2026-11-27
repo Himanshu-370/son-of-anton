@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { z } from 'zod';
 import { runAgent, BudgetExceeded, AgentError, AllowanceExceeded, type StageCtx, type ChildLike } from '../../src/agent/host-runner.js';
+import { readSpendLog } from '../../src/core/spend-log.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
 import { appendStageUsage, cacheHitRate } from '../../src/core/budget.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
@@ -210,6 +211,22 @@ describe('runAgent', () => {
     const r = await runAgent(ctx, { ...req, baseUsd: 0.5 }, { spawn: () => f.child, notify: vi.fn() });
     expect(r.state.spentUsd).toBeCloseTo(0.7, 10);
     expect(r.totalUsd).toBeCloseTo(1.2, 10);
+  });
+
+  it('records host spend by role and model without charging a resumed transcript twice', async () => {
+    const f = fake([L({ type: 'cost', totalUsd: 0.9 }), result(1.2)]);
+    await runAgent(ctx, { ...req, role: 'backend', model: 'claude-sonnet-5-5', baseUsd: 0.5 },
+      { spawn: () => f.child, notify: vi.fn() });
+    const { entries, skipped } = await readSpendLog();
+    expect(skipped).toBe(0);
+    expect(entries).toHaveLength(2);
+    for (const row of entries) {
+      expect(row).toMatchObject({
+        source: 'build', project: 'proj', jobId: 'j1', stage: 'build',
+        role: 'backend', model: 'claude-sonnet-5-5', effort: 'low', vendor: 'anthropic',
+      });
+    }
+    expect(entries.reduce((sum, row) => sum + row.usd, 0)).toBeCloseTo(0.7);
   });
 
   it('returns totalUsd = last cumulative total (default base 0)', async () => {
