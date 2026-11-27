@@ -1,15 +1,18 @@
 import { spawnSync } from 'node:child_process';
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { StageCtx } from '../../src/agent/host-runner.js';
 import type { AgentRequest } from '../../src/agent/protocol.js';
+import { writeFileAtomic } from '../../src/core/atomic.js';
+import { acquireLock, acquireLockFile } from '../../src/core/lock.js';
+import type { IntentClassification } from '../../src/slack/intent-router.js';
 import { initRepoIfMissing } from '../../src/core/git.js';
 import { jobDir as jobDirOf } from '../../src/core/paths.js';
-import { registerProject } from '../../src/core/registry.js';
+import { listProjects, registerProject } from '../../src/core/registry.js';
 import { loadState, saveState, type JobState } from '../../src/core/state.js';
-import { readSpecContinuation, runSpecRound, SPEC_REMINDER_MS, type SpecJob, type SpecRoundDeps } from '../../src/core/spec-continuation.js';
+import { markReminded, readSpecContinuation, runSpecRound, SPEC_REMINDER_MS, specContinuationPath, type SpecJob, type SpecRoundDeps } from '../../src/core/spec-continuation.js';
 import { appendProposals, readProposals, decideProposal, proposalRevision, type Proposal } from '../../src/lessons/proposals.js';
 import { readLessons } from '../../src/lessons/store.js';
 import { SLACK_ROLES, type SlackConfig } from '../../src/slack/config.js';
@@ -121,6 +124,309 @@ let n = 0;
 const reply = (text: string, actor = owner, threadTs = THREAD): SlackAction => ({
   via: 'message', key: `event:T0FAKE:Ev${++n}`, actor, eventType: 'message',
   source: { appId: PM_APP, role: 'pm', channelId: PROJECT_CHANNEL, messageTs: `1700000001.00000${n % 10}`, threadTs }, text,
+});
+
+describe('plain-English confirmation workflow', () => {
+  function fixture(intent: IntentClassification) {
+    let now = Date.now();
+    const sent: Array<{ channelId: string; threadTs: string; text: string; blocks?: unknown[]; ts: string }> = [];
+    const classify = vi.fn<NonNullable<DispatchDeps['classify']>>().mockResolvedValue(intent);
+    const d = deps({
+      classify, intentNow: () => now,
+      access: {
+        channel: async () => ({ isPrivate: true, isShared: false, isArchived: false, teamId: config.teamId }),
+        members: async () => [owner.userId],
+      },
+      postIntentThreadMessage: async (message) => {
+        const ts = `1700000200.${String(sent.length + 1).padStart(6, '0')}`;
+        sent.push({ ...message, ts });
+        return { ts };
+      },
+    });
+    const mention = (text: string, actor = owner): Extract<SlackAction, { via: 'message' }> => ({
+      via: 'message', key: `event:EvIntent${++n}`, actor, eventType: 'app_mention', mentions: [config.roles.pm.botUserId],
+      source: { role: 'pm', appId: PM_APP, channelId: PROJECT_CHANNEL, messageTs: `1700000100.${n}` }, text,
+    });
+    const click = (index: number, button: number): Extract<SlackAction, { via: 'card' }> => {
+      const card = sent[index]!;
+      const actions = card.blocks?.at(-1) as { elements: Array<{ value: string }> };
+      return {
+        via: 'card', actor: owner, key: `card:intent${++n}`, token: actions.elements[button]!.value,
+        source: { role: 'pm', appId: PM_APP, channelId: card.channelId, messageTs: card.ts },
+      };
+    };
+    return { d, classify, sent, mention, click, advance: (ms: number) => { now += ms; } };
+  }
+
+  it('validates all confirmation identities and cancels the card across button tokens', async () => {
+    const job = await project('p', { stage: 'awaiting_final_review' });
+    const f = fixture({ kind: 'intent', intent: { intent: 'reject', notes: 'Fix the header' } });
+    await dispatchSlackAction(f.mention('Send it back'), f.d);
+    const confirm = f.click(0, 0);
+    for (const invalid of [
+      { ...confirm, actor: member },
+      { ...confirm, actor: { ...owner, teamId: 'T0OTHER' } },
+      { ...confirm, source: { ...confirm.source, appId: QA_APP } },
+      { ...confirm, source: { ...confirm.source, channelId: 'C0OTHER' } },
+      { ...confirm, source: { ...confirm.source, messageTs: '1700000200.999999' } },
+    ]) {
+      expect((await dispatchSlackAction(invalid, f.d)).status).toBe('denied');
+    }
+    expect(await dispatchSlackAction(f.click(0, 1), f.d)).toMatchObject({ status: 'done', lines: ['Cancelled. Nothing was changed.'] });
+    expect((await dispatchSlackAction(confirm, f.d)).status).toBe('stale');
+    expect((await loadState(job.jobDir)).stage).toBe('awaiting_final_review');
+    expect(spawned).toHaveLength(0);
+  });
+
+  it('edits notes through a fresh preview and confirms the edited operation', async () => {
+    const job = await project('p', { stage: 'awaiting_final_review' });
+    const f = fixture({ kind: 'intent', intent: { intent: 'reject', notes: 'Original notes' } });
+    await dispatchSlackAction(f.mention('Send it back'), f.d);
+    const edit = f.click(0, 2);
+    expect(await prepareCardModal(edit, f.d)).toMatchObject({ kind: 'modal', view: { submit: { text: 'Review' } } });
+    await dispatchSlackAction({ ...edit, input: { notes: 'Edited notes' } }, f.d);
+    expect(JSON.stringify(f.sent[1]?.blocks)).toContain('Edited notes');
+    expect((await dispatchSlackAction(f.click(0, 0), f.d)).status).toBe('stale');
+    expect(spawned).toHaveLength(0);
+    expect((await dispatchSlackAction(f.click(1, 0), f.d)).status).toBe('done');
+    expect(await readFile(join(job.jobDir, 'notes-round-1.md'), 'utf8')).toContain('Edited notes');
+  });
+
+  it('refuses expired previews and previews whose delivery revision moved', async () => {
+    await project('p', { stage: 'awaiting_final_review' });
+    const f = fixture({ kind: 'intent', intent: { intent: 'reject', notes: 'Fix the header' } });
+    await dispatchSlackAction(f.mention('Send it back'), f.d);
+    f.advance(30 * 60_000);
+    expect(await dispatchSlackAction(f.click(0, 0), f.d)).toMatchObject({ status: 'stale', lines: [expect.stringContaining('expired')] });
+    await dispatchSlackAction(f.mention('Send it back again'), f.d);
+    tags.push('anton/1-init/delivered-2');
+    expect((await dispatchSlackAction(f.click(1, 0), f.d)).status).toBe('stale');
+    expect(spawned).toHaveLength(0);
+  });
+
+  it('claims Confirm once against concurrent Confirm and Cancel while Stop is awaiting the runner', async () => {
+    const job = await project('p', { stage: 'build' });
+    const f = fixture({ kind: 'intent', intent: { intent: 'stop' } });
+    const firstRun = await acquireLock(job.repoPath);
+    try {
+      await dispatchSlackAction(f.mention('Stop the runner'), f.d);
+      let entered!: () => void;
+      let resume!: () => void;
+      const paused = new Promise<void>((resolve) => { entered = resolve; });
+      const wait = new Promise<void>((resolve) => { resume = resolve; });
+      const kill = vi.fn((_pid: number, _signal: NodeJS.Signals | 0) => undefined);
+      f.d.jobs.kill = kill;
+      f.d.jobs.sleep = async () => { entered(); await wait; };
+      const confirm = f.click(0, 0);
+      const execution = dispatchSlackAction(confirm, f.d);
+      // Surface an early refusal instead of waiting for the test timeout.
+      await Promise.race([paused, execution.then((outcome) => { throw new Error(JSON.stringify(outcome)); })]);
+      let replacement: (() => Promise<void>) | undefined;
+      try {
+        const contested = await Promise.all([
+          dispatchSlackAction(confirm, f.d),
+          dispatchSlackAction(f.click(0, 0), f.d),
+          dispatchSlackAction(f.click(0, 1), f.d),
+        ]);
+        expect(contested.map(({ status }) => status)).toEqual(['stale', 'stale', 'stale']);
+        await firstRun();
+        replacement = await acquireLock(job.repoPath);
+      } finally {
+        resume();
+        expect((await execution).status).toBe('stale');
+        await replacement?.();
+      }
+      expect(kill.mock.calls.filter(([, signal]) => signal !== 0)).toEqual([[process.pid, 'SIGTERM']]);
+      expect((await loadState(job.jobDir)).stage).toBe('build');
+    } finally {
+      await firstRun();
+    }
+  });
+
+  it('deduplicates message and app-mention events with distinct IDs for the same Slack message', async () => {
+    await project('p', { stage: 'awaiting_final_review' });
+    const f = fixture({ kind: 'intent', intent: { intent: 'reject', notes: 'Fix the header' } });
+    const mention = f.mention('Send it back');
+    await Promise.all([
+      dispatchSlackAction(mention, f.d),
+      dispatchSlackAction({ ...mention, eventType: 'message', key: 'event:EvGroupsCopy' }, f.d),
+    ]);
+    expect(f.classify).toHaveBeenCalledTimes(1);
+    expect(f.sent).toHaveLength(1);
+    expect(f.sent[0]?.blocks?.at(-1)).toMatchObject({ type: 'actions' });
+  });
+
+  it.each(['membership revoked', 'channel shared', 'workspace changed'] as const)(
+    'rechecks live channel access before posting when %s', async (change) => {
+      await project('p', { stage: 'awaiting_final_review' });
+      const f = fixture({ kind: 'intent', intent: { intent: 'reject', notes: 'Fix the header' } });
+      const original = f.d.access!;
+      f.classify.mockImplementation(async () => {
+        f.d.access = {
+          channel: async () => ({
+            isPrivate: true, isShared: change === 'channel shared', isArchived: false,
+            teamId: change === 'workspace changed' ? 'T0OTHER' : config.teamId,
+          }),
+          members: change === 'membership revoked' ? async () => [] : original.members,
+        };
+        return { kind: 'intent', intent: { intent: 'reject', notes: 'Fix the header' } };
+      });
+      await dispatchSlackAction(f.mention('Send it back'), f.d);
+      expect(f.classify).toHaveBeenCalledTimes(1);
+      expect(f.sent).toHaveLength(0);
+      await dispatchSlackAction(f.mention('Try again'), f.d);
+      expect(f.classify).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('uses the shown starting budget even if config changes during preflight', async () => {
+    const f = fixture({ kind: 'intent', intent: { intent: 'start_new', description: 'a habit tracker' } });
+    outputs.push({ kind: 'questions', questions: ['Who uses it?'] });
+    const oldBudget = 12;
+    await writeFile(join(home, 'config.yaml'), `budget:\n  defaultUsd: ${oldBudget}\n`);
+    await dispatchSlackAction(f.mention('Start a habit tracker'), f.d);
+    expect(f.sent[0]?.text).toContain('$12.00');
+    f.d.spec!.preflight = async () => { await writeFile(join(home, 'config.yaml'), 'budget:\n  defaultUsd: 30\n'); };
+    expect((await dispatchSlackAction(f.click(0, 0), f.d)).status).toBe('done');
+    expect((await loadState(jobDirOf(join(home, 'projects', 'a-habit-tracker'), '1-init'))).budgetUsd).toBe(oldBudget);
+  });
+
+  it('refuses to create a project when confirmation expires during image preparation', async () => {
+    const f = fixture({ kind: 'intent', intent: { intent: 'start_new', description: 'a habit tracker' } });
+    await dispatchSlackAction(f.mention('Start a habit tracker'), f.d);
+    f.d.spec!.ensureImage = async () => {
+      f.advance(30 * 60_000);
+      return 'img';
+    };
+    expect(await dispatchSlackAction(f.click(0, 0), f.d)).toMatchObject({ status: 'stale', lines: [expect.stringContaining('expired')] });
+    expect(requests).toHaveLength(0);
+    expect(await listProjects()).toEqual([]);
+  });
+
+  it('refuses a change whose captured terminal job moves during preflight', async () => {
+    const old = await project('p', { stage: 'done' });
+    const f = fixture({ kind: 'intent', intent: { intent: 'start_change', description: 'Add a header' } });
+    await dispatchSlackAction(f.mention('Add a header'), f.d);
+    f.d.spec!.preflight = async () => {
+      await saveState(old.jobDir, { ...await loadState(old.jobDir), stage: 'abandoned' });
+    };
+    expect(await dispatchSlackAction(f.click(0, 0), f.d)).toMatchObject({ status: 'stale', lines: [expect.stringContaining('out of date')] });
+    expect(requests).toHaveLength(0);
+  });
+
+  it('keeps a spec answer confirmation valid when the PM sends a reminder', async () => {
+    const job = await project();
+    outputs.push({ kind: 'questions', questions: ['Who uses it?'] });
+    await openSlackSpec(job, specDeps());
+    const f = fixture({ kind: 'intent', intent: { intent: 'spec_answer', answers: ['Everyone'] } });
+    await dispatchSlackAction(f.mention('Tell the PM everyone will use it'), f.d);
+    expect(await markReminded(job.project, job.jobId, 1, home)).toBe(true);
+    outputs.push({ kind: 'questions', questions: ['Anything else?'] });
+    expect((await dispatchSlackAction(f.click(0, 0), f.d)).status).toBe('done');
+    expect(requests).toHaveLength(2);
+  });
+
+  it('offers budget and accept-as-is choices before confirming a budget-paused resume', async () => {
+    await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'budget_cap', spentUsd: 10 });
+    const f = fixture({ kind: 'intent', intent: { intent: 'resume' } });
+    await dispatchSlackAction(f.mention('Resume the job'), f.d);
+    expect(f.sent[0]?.text).toContain('Choose a new total budget');
+    expect(JSON.stringify(f.sent[0]?.blocks)).not.toContain('"text":"Confirm"');
+    expect(await prepareCardModal(f.click(0, 1), f.d)).toMatchObject({ kind: 'modal' });
+    await dispatchSlackAction(f.click(0, 2), f.d);
+    expect(f.sent[1]?.text).toContain('Deliver the current work as-is');
+    expect(JSON.stringify(f.sent[1]?.blocks)).toContain('"text":"Confirm"');
+    expect(spawned).toHaveLength(0);
+  });
+
+  it('checks the captured spec digest only after acquiring the continuation lock', async () => {
+    const job = await project();
+    outputs.push({ kind: 'questions', questions: ['Who uses it?'] });
+    await openSlackSpec(job, specDeps());
+    const f = fixture({ kind: 'intent', intent: { intent: 'spec_answer', answers: ['Everyone'] } });
+    await dispatchSlackAction(f.mention('Tell the PM everyone will use it'), f.d);
+    const path = specContinuationPath(job.project, job.jobId, home);
+    const release = await acquireLockFile(`${path}.lock`);
+    const confirm = f.click(0, 0);
+    const pending = dispatchSlackAction(confirm, f.d);
+    try {
+      await vi.waitFor(async () => {
+        const store = JSON.parse(await readFile(join(home, 'slack', 'actions.json'), 'utf8'));
+        expect(store.records[confirm.key]?.status).toBe('claimed');
+      });
+      const original = await readSpecContinuation(job.project, job.jobId, home);
+      await writeFileAtomic(path, JSON.stringify({ ...original, questions: ['Changed during the wait'] }));
+    } finally {
+      await release();
+    }
+    expect(await pending).toMatchObject({ status: 'stale', lines: [expect.stringContaining('spec conversation changed')] });
+    expect(requests).toHaveLength(1);
+  });
+
+  it('falls back to the original exact request with the named project and promotes the thread', async () => {
+    await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'error' });
+    await project('q', { stage: 'paused', pausedFrom: 'build', pauseReason: 'error' });
+    const f = fixture({ kind: 'clarification', text: 'Which project?' });
+    f.classify
+      .mockResolvedValueOnce({ kind: 'clarification', text: 'Which project?' })
+      .mockResolvedValueOnce({ kind: 'unavailable', reason: 'budget' })
+      .mockResolvedValueOnce({ kind: 'intent', intent: { intent: 'status' } });
+    const parent = f.mention('resume budget 30');
+    const follow = (text: string): Extract<SlackAction, { via: 'message' }> => {
+      const event = f.mention(text);
+      return { ...event, source: { ...event.source, threadTs: parent.source.messageTs } };
+    };
+    await dispatchSlackAction(parent, f.d);
+    await dispatchSlackAction(follow('q'), f.d);
+    expect(f.sent[1]?.text).toContain('I understood this as /anton resume');
+    expect(f.sent[1]?.text).toContain('Resume q');
+    expect(f.sent[1]?.text).toContain('$30.00');
+    expect(spawned).toHaveLength(0);
+    await dispatchSlackAction(follow('How is it going?'), f.d);
+    expect(f.classify).toHaveBeenCalledTimes(3);
+    expect(f.classify.mock.calls[2]?.[0].text).toBe('How is it going?');
+    expect(f.sent[2]?.text).toMatch(/\bq\b/);
+    expect(f.sent[2]?.text).not.toMatch(/\bp\b/);
+  });
+
+  it('uses one owner clarification in the originating thread and then sends help', async () => {
+    await project();
+    const f = fixture({ kind: 'clarification', text: 'Which task?' });
+    const parent = f.mention('Work on it');
+    const follow = (actor = owner): Extract<SlackAction, { via: 'message' }> => {
+      const event = f.mention('The header', actor);
+      return { ...event, source: { ...event.source, threadTs: parent.source.messageTs } };
+    };
+    await dispatchSlackAction(parent, f.d);
+    expect(f.sent[0]).toMatchObject({ text: 'Which task?', threadTs: parent.source.messageTs });
+    await dispatchSlackAction(follow(member), f.d);
+    expect(f.classify).toHaveBeenCalledTimes(1);
+    const reply = follow();
+    await Promise.all([dispatchSlackAction(reply, f.d), dispatchSlackAction(reply, f.d)]);
+    expect(f.classify).toHaveBeenCalledTimes(2);
+    expect(f.classify.mock.calls[1]?.[0].text).toContain('Work on it');
+    expect(f.classify.mock.calls[1]?.[0].text).toContain('The header');
+    expect(f.classify.mock.calls[1]?.[0].text).toContain('PM question:\nWhich task?');
+    expect(f.sent[1]).toMatchObject({ text: expect.stringContaining('Ask me to show progress'), threadTs: parent.source.messageTs });
+    await dispatchSlackAction(follow(), f.d);
+    expect(f.classify).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns help on an expired clarification and keeps existing job threads out of the classifier', async () => {
+    await project();
+    const f = fixture({ kind: 'clarification', text: 'Which task?' });
+    const parent = f.mention('Work on it');
+    await dispatchSlackAction(parent, f.d);
+    f.advance(10 * 60_000);
+    const late = f.mention('The header');
+    await dispatchSlackAction({ ...late, source: { ...late.source, threadTs: parent.source.messageTs } }, f.d);
+    expect(f.sent[1]?.text).toContain('Ask me to show progress');
+
+    outputs.push({ kind: 'questions', questions: ['Who uses it?'] }, { kind: 'spec', spec: spec() });
+    await openSlackSpec(await project(), specDeps());
+    expect((await dispatchSlackAction(reply('1. Everyone'), f.d)).status).toBe('done');
+    expect(f.classify).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('spec conversation in the job thread', () => {
@@ -334,16 +640,36 @@ describe('spec conversation in the job thread', () => {
     expect(requests).toHaveLength(1);
   });
 
-  it('takes explicit instructions from the owner in a DM to the PM', async () => {
+  it('requires confirmation for an exact DM instruction when classification is unavailable', async () => {
     outputs.push({ kind: 'questions', questions: ['Who uses it?'] });
-    const dm = (text: string, actor = owner): SlackAction => ({
+    const dm = (actor = owner): SlackAction => ({
       via: 'message', key: `event:T0FAKE:EvDm${++n}`, actor, eventType: 'message',
-      source: { appId: PM_APP, role: 'pm', channelId: 'D0OWNERDM', messageTs: '1700000002.000001' }, text,
+      source: { appId: PM_APP, role: 'pm', channelId: 'D0OWNERDM', messageTs: '1700000002.000001' },
+      text: 'new a todo app',
     });
-    expect((await dispatchSlackAction(dm('hello there'), deps())).status).toBe('ignored');
-    expect((await dispatchSlackAction(dm('new a todo app', member), deps())).status).toBe('ignored');
+    const sent: Array<{ text: string; blocks?: unknown[] }> = [];
+    const d = deps({
+      classify: async () => ({ kind: 'unavailable', reason: 'missing_key' }),
+      postIntentThreadMessage: async (message) => {
+        sent.push(message);
+        return { ts: '1700000003.000001' };
+      },
+    });
+    expect((await dispatchSlackAction(dm(member), d)).status).toBe('ignored');
+    const event = dm();
+    await Promise.all([dispatchSlackAction(event, d), dispatchSlackAction(event, d)]);
     expect(requests).toHaveLength(0);
-    expect((await dispatchSlackAction(dm('new a todo app'), deps())).status).toBe('done');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]?.text).toContain('Plain English is paused');
+    expect(sent[0]?.text).toContain('Start a new project');
+    const buttons = sent[0]?.blocks?.at(-1) as { elements: Array<{ value: string }> };
+    const confirm: SlackAction = {
+      via: 'card', key: 'card:confirm-new', actor: owner,
+      source: { appId: PM_APP, role: 'pm', channelId: 'D0OWNERDM', messageTs: '1700000003.000001' },
+      token: buttons.elements[0]!.value,
+    };
+    expect((await dispatchSlackAction(confirm, d)).status).toBe('done');
+    expect((await dispatchSlackAction({ ...confirm, key: 'card:confirm-new-again' }, d)).status).toBe('stale');
     expect(requests).toHaveLength(1);
   });
 

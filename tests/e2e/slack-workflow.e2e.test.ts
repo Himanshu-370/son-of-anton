@@ -100,9 +100,22 @@ describe.skipIf(!fakeE2E)('Slack workflow with fake agents in a fake workspace',
         },
       });
       const spawned: string[] = [];
+      const previews: Array<{ text: string; threadTs: string; blocks?: unknown[] }> = [];
       const memberships: Record<string, string[]> = Object.fromEntries(PROJECT_CHANNELS.map((c) => [c, [config.ownerId, MEMBER]]));
+      memberships[config.channelId] = [config.ownerId];
       const deps: DispatchDeps = {
         config, home,
+        classify: async ({ text }) => {
+          if (text === 'start a project') return { kind: 'clarification', text: 'What should the project do?' };
+          if (text.startsWith('new ')) return { kind: 'unavailable', reason: 'missing_key' };
+          expect(text).toContain('Original request:\nstart a project');
+          expect(text).toContain('Owner clarification:\nbuild a habit tracker');
+          return { kind: 'intent', intent: { intent: 'start_new', description: 'a habit tracker' } };
+        },
+        async postIntentThreadMessage(message) {
+          previews.push(message);
+          return { ts: `1800000300.${String(previews.length).padStart(6, '0')}` };
+        },
         jobs: {
           preflight: async () => undefined, spawnRun: (name) => { spawned.push(name); },
           stopContainer: async () => undefined, retro: { env: {}, home },
@@ -145,9 +158,38 @@ describe.skipIf(!fakeE2E)('Slack workflow with fake agents in a fake workspace',
         .flatMap((b) => b.elements ?? []);
       const tsOf = (m: OutboxMessageRequest) => `1800000000.${String(posted.indexOf(m) + 1).padStart(6, '0')}`;
 
-      // 1. A Slack-started spec: /anton new in #anton, questions in the job thread, answered there.
+      await event({ type: 'app_mention', user: config.ownerId, channel: config.channelId, text: `<@${config.roles.pm.botUserId}> start a project` });
+      await handler.idle();
+      expect(requests).toHaveLength(0);
+      expect(previews).toHaveLength(1);
+      expect(previews[0]?.text).toBe('What should the project do?');
+      await event({ type: 'app_mention', user: config.ownerId, channel: config.channelId,
+        thread_ts: previews[0]!.threadTs, text: `<@${config.roles.pm.botUserId}> build a habit tracker` });
+      await handler.idle();
+      expect(previews).toHaveLength(2);
+      const buttonsFor = (preview: (typeof previews)[number]) =>
+        (preview.blocks as { elements?: { value: string; text: { text: string } }[] }[]).flatMap((block) => block.elements ?? []);
+      const buttons = buttonsFor(previews[1]!);
+      const cancel = buttons.find((button) => button.text.text === 'Cancel');
+      const confirm = buttons.find((button) => button.text.text === 'Confirm');
+      expect(cancel).toBeDefined();
+      expect(confirm).toBeDefined();
+      await click('pm', config.channelId, '1800000300.000002', cancel!.value);
+      await handler.idle();
+      await click('pm', config.channelId, '1800000300.000002', confirm!.value);
+      await handler.idle();
+      expect(requests).toHaveLength(0);
+
+      // 1. A confirmed fallback request starts a spec. The PM questions stay in the job thread.
       outputs.push({ kind: 'questions', questions: ['Who uses it?'] });
-      await command('new a habit tracker');
+      await event({ type: 'app_mention', user: config.ownerId, channel: config.channelId, text: `<@${config.roles.pm.botUserId}> new a habit tracker` });
+      await handler.idle();
+      expect(requests).toHaveLength(0);
+      expect(previews).toHaveLength(3);
+      expect(previews[2]?.text).toContain("Plain English is paused");
+      const start = buttonsFor(previews[2]!).find((button) => button.text.text === 'Confirm');
+      expect(start).toBeDefined();
+      await click('pm', config.channelId, '1800000300.000003', start!.value);
       await handler.idle();
       expect(requests).toHaveLength(1);
       const slug = replies.join('\n').match(/Started project (\S+)/)?.[1];

@@ -1,7 +1,7 @@
 import { webApi } from '@slack/bolt';
 import { describe, expect, it, vi } from 'vitest';
-import type { SlackConfig } from '../../src/slack/config.js';
-import { createSlackTransport } from '../../src/slack/transport.js';
+import { SLACK_ROLES, type SlackConfig, type SlackCredentials } from '../../src/slack/config.js';
+import { createSlackRuntime, createSlackTransport } from '../../src/slack/transport.js';
 import type { OutboxMessageRequest } from '../../src/slack/outbox.js';
 
 const config = {
@@ -64,5 +64,41 @@ describe('Slack Web API delivery', () => {
       .rejects.toMatchObject({ outcome: 'retry', retryAfterMs: 15_000 });
     postMessage.mockRejectedValueOnce(new webApi.WebAPIPlatformError({ ok: false, error: 'missing_scope' }));
     await expect(transport.postMessage(request)).rejects.toMatchObject({ outcome: 'permanent' });
+  });
+});
+
+
+describe('Slack intent thread replies', () => {
+  const credentials = Object.fromEntries(SLACK_ROLES.map((role) => [
+    role, { botToken: `fake-${role}-bot`, appToken: `fake-${role}-app` },
+  ])) as SlackCredentials;
+  const input = { channelId: 'CPROJECT', threadTs: '1.000001', text: 'Confirm this action?' };
+
+  it('posts in the originating thread as PM with optional blocks and plain-text settings', async () => {
+    const apiCall = vi.spyOn(webApi.WebClient.prototype, 'apiCall')
+      .mockResolvedValue({ ok: true, ts: '2.000001' });
+    try {
+      const runtime = createSlackRuntime(config, credentials);
+      const blocks = [{ type: 'section', text: { type: 'plain_text', text: input.text } }];
+      await expect(runtime.postIntentThreadMessage({ ...input, blocks })).resolves.toEqual({ ts: '2.000001' });
+      expect(apiCall).toHaveBeenCalledExactlyOnceWith('chat.postMessage', {
+        channel: input.channelId, thread_ts: input.threadTs, text: input.text, blocks,
+        mrkdwn: false, unfurl_links: false, unfurl_media: false,
+      });
+      expect(apiCall.mock.contexts[0]).toMatchObject({ token: credentials.pm.botToken });
+    } finally {
+      apiCall.mockRestore();
+    }
+  });
+
+  it.each([undefined, '', 'invalid', 2.000001])('rejects an invalid reply timestamp (%s)', async (ts) => {
+    const apiCall = vi.spyOn(webApi.WebClient.prototype, 'apiCall').mockResolvedValue({ ok: true, ts });
+    try {
+      const runtime = createSlackRuntime(config, credentials);
+      await expect(runtime.postIntentThreadMessage(input)).rejects.toThrow(/timestamp/i);
+      expect(apiCall.mock.calls[0]?.[1]).not.toHaveProperty('blocks');
+    } finally {
+      apiCall.mockRestore();
+    }
   });
 });

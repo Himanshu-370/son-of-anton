@@ -14,7 +14,7 @@ import { jobDir as jobDirOf } from './paths.js';
 import { getProject } from './registry.js';
 import { loadSecrets } from './secrets.js';
 import { loadState, pause, saveState, transition, unpause, type JobState, type Stage } from './state.js';
-import { PreflightError } from '../docker/container.js';
+import { CONTAINER_ID, findRunContainer, PreflightError, removeRunContainer } from '../docker/container.js';
 import { ACTIVE_STAGES, allowanceHint, containerName, seededState } from '../pipeline/runner.js';
 import { submitRetro, type RetroDeps } from '../retro/run.js';
 import type { SecurityFinding } from '../security/review.js';
@@ -512,6 +512,8 @@ export async function abandonJob(target: ActionTarget, d: JobActionDeps): Promis
 export type StopProcessDeps = {
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
   sleep?: (ms: number) => Promise<void>;
+  findRunContainer?: typeof findRunContainer;
+  removeRunContainer?: (id: string) => Promise<void>;
 };
 
 type StopDeps = Pick<JobActionDeps, 'out' | 'err' | 'lockWaitMs' | 'listTags'> & StopProcessDeps;
@@ -588,9 +590,20 @@ export async function stopJob(target: ActionTarget, d: StopDeps, opts: { allowId
       d.out(`${project} has no running process.`);
     }
 
-    if (holder) d.out('Container cleanup was skipped because the container could not be identified for this runner.');
     const release = await acquireStoppedRun(job.repo, holder);
     try {
+      if (!(await currentJob())) return changed();
+      if (runNonce) {
+        try {
+          const id = await (d.findRunContainer ?? findRunContainer)({ project, jobId: target.jobId, runNonce });
+          if (id && CONTAINER_ID.test(id)) {
+            if (!(await currentJob())) return changed();
+            await (d.removeRunContainer ?? removeRunContainer)(id);
+          } else d.out('No Docker container could be verified for this runner acquisition.');
+        } catch {
+          d.err('Docker cleanup failed for the stopped runner. Check Docker before resuming.');
+        }
+      }
       return await interruptJob(jobTarget, d, { matchStage: true, expectedRepo: job.repo });
     } finally {
       await release();

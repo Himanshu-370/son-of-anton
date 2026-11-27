@@ -1,15 +1,16 @@
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { commitAll } from '../core/git.js';
-import { createChangeJob, createNewProject, currentJobId } from '../core/job.js';
-import { checkpointRevision, loadJob, preflightOr2, reopenSpec, type ActionTarget } from '../core/job-actions.js';
+import { createChangeJob, createNewProject, currentJobId, NoJobs } from '../core/job.js';
+import { checkpointRevision, isCurrent, loadJob, preflightOr2, reopenSpec, type ActionTarget } from '../core/job-actions.js';
+import { waitForLockFile } from '../core/lock.js';
 import { antonHome, jobDir as jobDirOf } from '../core/paths.js';
 import { getProject } from '../core/registry.js';
 import { loadSecrets } from '../core/secrets.js';
 import {
   claimSpecRound, holderAlive, listSpecContinuations, markReminded, markTurnStopped, readSpecContinuation, runClaimedRound, runSpecRound,
-  SPEC_REMINDER_MS, specStatus, type SpecJob, type SpecRoundDeps, type SpecRoundResult,
+  SPEC_REMINDER_MS, specStatus, type SpecJob, type SpecRoundConfirmation, type SpecRoundDeps, type SpecRoundResult,
 } from '../core/spec-continuation.js';
 import { loadState } from '../core/state.js';
 import { readProposals, proposalRevision } from '../lessons/proposals.js';
@@ -50,22 +51,54 @@ export async function openSlackSpec(job: SpecJob, deps: Omit<SpecRoundDeps, 'sur
   await runSpecRound(job, { kind: 'start' }, slack(deps));
 }
 
-/** `/anton new`, `/anton change` or a DM instruction: create the job exactly as the CLI does, then ask the PM. */
+export type SlackStartConfirmation = { budgetUsd: number; target?: ActionTarget; expiresAt: number; now?: () => number };
+
+const expiredStart = (): ActionResult => ({ status: 'stale', lines: ['That confirmation expired. Ask again.'] });
+const movedStart = (): ActionResult => ({ status: 'stale', lines: ['This is out of date. Nothing was changed. Ask again.'] });
+
+/** Create the job after preflight. Confirmed starts carry the exact budget and target shown in Slack. */
 export async function startSlackJob(
   op: { mode: 'new' | 'change'; project?: string; description: string }, deps: SlackSpecDeps,
+  confirmation?: SlackStartConfirmation,
 ): Promise<ActionResult> {
   const lines: string[] = [];
   if ((await preflightOr2({ preflight: deps.preflight, err: (l) => lines.push(l) })) !== 0) return { status: 'refused', lines };
   await deps.ensureImage();
+  const expired = () => confirmation && (confirmation.now ?? Date.now)() >= confirmation.expiresAt;
+  const budgetUsd = confirmation?.budgetUsd;
   let job: SpecJob;
   if (op.mode === 'new') {
-    const p = await createNewProject(op.description);
+    if (expired()) return expiredStart();
+    const p = await createNewProject(op.description, { budgetUsd });
     await commitAll(p.repoPath, 'chore: initialize project');
     job = { project: p.name, repoPath: p.repoPath, jobId: p.jobId, jobDir: p.jobDir, description: op.description, mode: 'new' };
   } else {
-    // A bad secrets file must fail before createChangeJob creates and switches the branch.
-    await loadSecrets(op.project!);
-    const p = await createChangeJob(op.project!, op.description);
+    const project = op.project!;
+    // Check secrets before creation switches branches.
+    await loadSecrets(project);
+    let p;
+    if (confirmation) {
+      const { repoPath } = await getProject(project);
+      const stateDir = join(repoPath, '.anton');
+      await mkdir(stateDir, { recursive: true });
+      const release = await waitForLockFile(join(stateDir, 'decision.lock'));
+      try {
+        const target = confirmation.target;
+        const unchanged = target
+          ? target.project === project && await isCurrent(target).catch(() => false)
+          : await currentJobId(repoPath).then(() => false, (error: unknown) => {
+            if (error instanceof NoJobs) return true;
+            throw error;
+          });
+        if (!unchanged) return movedStart();
+        if (expired()) return expiredStart();
+        p = await createChangeJob(project, op.description, { budgetUsd });
+      } finally {
+        await release();
+      }
+    } else {
+      p = await createChangeJob(project, op.description);
+    }
     job = { project: p.name, repoPath: p.repoPath, jobId: p.jobId, jobDir: p.jobDir, description: op.description, mode: 'change' };
   }
   const r = await runSpecRound(job, { kind: 'start' }, slack(deps));
@@ -75,9 +108,10 @@ export async function startSlackJob(
 /** The owner's answers to one round. The round claim makes a competing or late answer stale. */
 export async function submitSpecAnswers(
   target: ActionTarget & { round: number }, answers: string[], deps: Omit<SpecRoundDeps, 'surface'>,
+  confirmation?: SpecRoundConfirmation,
 ): Promise<ActionResult> {
   const job = await specJobFor(target.project, target.jobId);
-  return toAction(await runSpecRound(job, { kind: 'answers', round: target.round, answers }, slack(deps)));
+  return toAction(await runSpecRound(job, { kind: 'answers', round: target.round, answers, confirmation }, slack(deps)));
 }
 
 /** Request changes on the spec card: back to `spec` under the decision lock, then a revision round. */
@@ -99,9 +133,11 @@ export async function reviseSlackSpec(
 }
 
 /** `/anton spec retry`: the owner's explicit order to rerun an interrupted PM turn. */
-export async function retrySlackSpec(target: ActionTarget, deps: Omit<SpecRoundDeps, 'surface'>): Promise<ActionResult> {
+export async function retrySlackSpec(
+  target: ActionTarget, deps: Omit<SpecRoundDeps, 'surface'>, confirmation?: SpecRoundConfirmation,
+): Promise<ActionResult> {
   const job = await specJobFor(target.project, target.jobId);
-  return toAction(await runSpecRound(job, { kind: 'retry' }, slack(deps)));
+  return toAction(await runSpecRound(job, { kind: 'retry', confirmation }, slack(deps)));
 }
 
 /**

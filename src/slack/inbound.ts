@@ -148,7 +148,7 @@ const eventBody = z.object({
   }),
 });
 
-/** A message or mention. Normalized for the later conversation features; never an order. */
+/** A message or mention. Owner intent routing and existing job-thread replies use the normalized event. */
 export function normalizeEvent(body: unknown, role: SlackRole): Normalized {
   const b = eventBody.safeParse(body);
   if (!b.success) return ignored('unreadable event');
@@ -167,7 +167,7 @@ export function normalizeEvent(body: unknown, role: SlackRole): Normalized {
       via: 'message', key: `event:${d.team_id}:${d.event_id}`, eventType: e.type, mentions,
       actor: { teamId: d.team_id, userId: e.user, isBot: false },
       source: { appId: d.api_app_id, role, channelId: e.channel, messageTs: e.ts, ...(e.thread_ts ? { threadTs: e.thread_ts } : {}) },
-      text: sanitizeSlackText(e.text, 4000),
+      text: sanitizeSlackText(e.text, 6001),
     },
   };
 }

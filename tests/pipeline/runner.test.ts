@@ -429,6 +429,13 @@ describe('startOrReuseContainer', () => {
   }
   const ensure = async (k: Kit) => `anton/kit-${k.name}:1`;
 
+  it('creates a fresh container with the runner ownership label, even on the same image', async () => {
+    const f = fakeExec('anton/kit-web:1');
+    const runner = { project: 'p', jobId: '1-init', runNonce: '42.00000000-0000-4000-8000-000000000001' };
+    expect(await startOrReuseContainer('p', repo, { ...kit, name: 'web' }, f.exec, ensure, runner)).toBe('anton-p');
+    expect(f.calls.find((args) => args[0] === 'run')).toContain(`anton.runner=${JSON.stringify(Object.values(runner))}`);
+  });
+
   it('running container on another image is replaced', async () => {
     const f = fakeExec('anton/kit-fallback:1');
     expect(await startOrReuseContainer('p', repo, { ...kit, name: 'web' }, f.exec, ensure)).toBe('anton-p');

@@ -1,8 +1,7 @@
 import { z } from 'zod';
-import { stageGroup } from '../core/budget.js';
 import { NoJobs } from '../core/job.js';
 import { checkpointRevision, loadJob, readJobFinding, resumeRunnerAvailable, stopTarget, targetOf, type ActionTarget, type LoadedJob } from '../core/job-actions.js';
-import { readSpecContinuation, specStatus } from '../core/spec-continuation.js';
+import { readSpecContinuation, specContinuationDigest, specStatus } from '../core/spec-continuation.js';
 import type { Stage } from '../core/state.js';
 import { ACTIVE_STAGES } from '../pipeline/runner.js';
 import { ANSWER_LIMIT, DESCRIPTION_LIMIT, NOTES_LIMIT, REASON_LIMIT, type Operation } from './actions.js';
@@ -124,7 +123,7 @@ export type Intent = z.infer<typeof intentSchema>;
 type ReadOnly = 'help' | 'lessons' | 'status' | 'question';
 export type IntentResolution =
   | { kind: 'read-only'; intent: ReadOnly; project?: string }
-  | { kind: 'operation'; operation: Exclude<Operation, { kind: 'status' }>; target?: ActionTarget }
+  | { kind: 'operation'; operation: Exclude<Operation, { kind: 'status' }>; target?: ActionTarget; specTurn?: string }
   | { kind: 'clarification' | 'refused'; text: string };
 
 export type IntentContext = {
@@ -217,11 +216,7 @@ export async function resolveIntent(value: Intent, context: IntentContext): Prom
   if (reason) return refuse(reason);
   if (intent === 'resume') {
     if (!(await resumeRunnerAvailable(job))) return refuse('A runner is already active or starting for this project.');
-    const { stage, pauseReason, pausedFrom } = job.state;
-    if (stage === 'paused' && args.budgetUsd === undefined && !args.acceptAsIs
-      && (pauseReason === 'budget_cap' || (pauseReason === 'allowance' && stageGroup(pausedFrom ?? '')))) {
-      return clarify('What total budget in USD should the job resume with?');
-    }
+
   }
   if (intent === 'stop') {
     const target = await stopTarget(job);
@@ -234,6 +229,7 @@ export async function resolveIntent(value: Intent, context: IntentContext): Prom
   }
 
   let round: number | undefined;
+  let specTurn: string | undefined;
   if (intent === 'spec_retry' || intent === 'spec_answer') {
     const continuation = await readSpecContinuation(project, job.jobId, context.home);
     const status = continuation && specStatus(continuation);
@@ -243,10 +239,11 @@ export async function resolveIntent(value: Intent, context: IntentContext): Prom
       if (args.answers?.length !== continuation.questions.length) return clarify(`Please give all ${continuation.questions.length} answers in order.`);
       round = continuation.round;
     }
+    if (continuation) specTurn = specContinuationDigest(continuation);
   }
 
   const revision = await checkpointRevision(job, context.listTags);
   if (reviewStages.some((stage) => stage === job.state.stage) && !revision) return refuse('The current checkpoint could not be verified.');
   const target = { ...targetOf(job), ...(revision === undefined ? {} : { revision }) };
-  return { kind: 'operation', operation: entry.toOperation(target, args, round) };
+  return { kind: 'operation', operation: entry.toOperation(target, args, round), ...(specTurn ? { specTurn } : {}) };
 }

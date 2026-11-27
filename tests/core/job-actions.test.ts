@@ -163,13 +163,13 @@ describe('Owner actions', () => {
     const { repo, dir } = await project({ stage: 'build' });
     await writeRunLock(repo, nonce);
     const kill = vi.fn();
-    const stopContainer = vi.fn(async () => undefined);
-    const { d } = fake({ stopContainer });
+    const removeRunContainer = vi.fn(async () => undefined);
+    const { d } = fake();
     expect(await stopJob(target('build', { runNonce: nonce }), {
-      ...d, kill, sleep: async () => writeRunLock(repo, nextNonce),
+      ...d, kill, removeRunContainer, sleep: async () => writeRunLock(repo, nextNonce),
     })).toEqual({ code: 1, status: 'stale' });
     expect(kill.mock.calls.filter(([, signal]) => signal !== 0)).toEqual([[4242, 'SIGTERM']]);
-    expect(stopContainer).not.toHaveBeenCalled();
+    expect(removeRunContainer).not.toHaveBeenCalled();
     expect(await readFile(join(repo, '.anton', 'run.lock'), 'utf8')).toContain(nextNonce);
     expect((await loadState(dir)).stage).toBe('build');
   });
@@ -178,29 +178,53 @@ describe('Owner actions', () => {
     const { repo, dir } = await project({ stage: 'build' });
     await writeRunLock(repo, nonce);
     let exited = false;
-    const stopContainer = vi.fn(async () => undefined);
-    const { d } = fake({ stopContainer });
+    const removeRunContainer = vi.fn(async () => undefined);
+    const { d } = fake();
     expect(await stopJob(target('build', { runNonce: nonce }), {
-      ...d,
+      ...d, removeRunContainer,
       kill: () => {
         if (exited) throw Object.assign(new Error('exited'), { code: 'ESRCH' });
       },
       sleep: async () => { await writeRunLock(repo, nextNonce); exited = true; },
     })).toEqual({ code: 1, status: 'stale' });
-    expect(stopContainer).not.toHaveBeenCalled();
+    expect(removeRunContainer).not.toHaveBeenCalled();
     expect((await loadState(dir)).stage).toBe('build');
   });
 
-  it('pauses a matching stopped acquisition without a name-based container cleanup', async () => {
+  it.each([undefined, 'anton-p', 'a'.repeat(64)])('cleans up only a verified immutable ID (%s)', async (id) => {
     const { repo, dir } = await project({ stage: 'build' });
     await writeRunLock(repo, nonce);
-    const stopContainer = vi.fn(async () => undefined);
-    const { d } = fake({ stopContainer });
+    const findRunContainer = vi.fn(async () => id);
+    const removeRunContainer = vi.fn(async () => {
+      expect(await readRunLock(repo)).toMatchObject({ stopping: true });
+      await expect(acquireLock(repo)).rejects.toThrow('already running');
+    });
+    const { d } = fake();
     expect(await stopJob(target('build', { runNonce: nonce }), {
-      ...d, kill: () => { throw Object.assign(new Error('exited'), { code: 'ESRCH' }); },
+      ...d, findRunContainer, removeRunContainer,
+      kill: () => { throw Object.assign(new Error('exited'), { code: 'ESRCH' }); },
     })).toEqual({ code: 0, status: 'done' });
-    expect(stopContainer).not.toHaveBeenCalled();
+    expect(findRunContainer).toHaveBeenCalledWith({ project: 'p', jobId: '1-init', runNonce: nonce });
+    if (id?.length === 64) expect(removeRunContainer).toHaveBeenCalledExactlyOnceWith(id);
+    else expect(removeRunContainer).not.toHaveBeenCalled();
     expect((await loadState(dir)).stage).toBe('paused');
+  });
+
+  it('leaves the container alone if the job changes while Docker is inspected', async () => {
+    const { repo, dir } = await project({ stage: 'build' });
+    await writeRunLock(repo, nonce);
+    const removeRunContainer = vi.fn(async () => undefined);
+    const { d } = fake();
+    expect(await stopJob(target('build', { runNonce: nonce }), {
+      ...d, removeRunContainer,
+      findRunContainer: async () => {
+        await saveState(dir, { ...(await loadState(dir)), stage: 'verify' });
+        return 'a'.repeat(64);
+      },
+      kill: () => { throw Object.assign(new Error('exited'), { code: 'ESRCH' }); },
+    })).toEqual({ code: 1, status: 'stale' });
+    expect(removeRunContainer).not.toHaveBeenCalled();
+    expect((await loadState(dir)).stage).toBe('verify');
   });
 
   it('prevents an acquisition during stop bookkeeping and never targets the guard process', async () => {

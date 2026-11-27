@@ -69,14 +69,14 @@ describe('intent resolution', () => {
     expect(await resolveIntent(intent, { ...context, loadJob: async () => paused })).toMatchObject({ kind: 'refused' });
   });
 
-  it.each(['budget_cap', 'allowance'] as const)('asks for a budget on a %s pause and allows accepting as-is', async (pauseReason) => {
+  it.each(['budget_cap', 'allowance'] as const)('allows previewing resume options on a %s pause', async (pauseReason) => {
     const active = await fixtureJob();
     const paused = {
       ...active, state: { ...active.state, stage: 'paused' as const, pausedFrom: 'build' as const, pauseReason, spentUsd: 5 },
     };
     const pausedContext = { ...context, loadJob: async () => paused };
     const intent = { intent: 'resume', project: 'todo' } as const;
-    expect(await resolveIntent(intent, pausedContext)).toMatchObject({ kind: 'clarification' });
+    expect(await resolveIntent(intent, pausedContext)).toMatchObject({ kind: 'operation' });
     expect(await resolveIntent({ ...intent, budgetUsd: 5 }, pausedContext)).toMatchObject({ kind: 'refused' });
     expect(await resolveIntent({ ...intent, budgetUsd: 6 }, pausedContext)).toMatchObject({ kind: 'operation' });
     expect(await resolveIntent({ ...intent, acceptAsIs: true }, pausedContext)).toMatchObject({ kind: 'operation' });

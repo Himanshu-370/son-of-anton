@@ -65,6 +65,7 @@ function harness(extra: Partial<CliDeps> = {}) {
     stopContainer: async () => undefined,
     // No key by default: unit tests never reach the API.
     retro: { env: {} },
+    findRunContainer: async () => undefined,
     ...extra,
   };
   return { deps, out, err, spawned, text: () => out.join('\n'), errText: () => err.join('\n') };
@@ -362,6 +363,8 @@ describe('anton stop', () => {
     const signals: (string | number)[] = [];
     let slept = 0;
     const stopped: string[] = [];
+    const removed: string[] = [];
+    const containerId = 'a'.repeat(64);
     const h = harness({
       kill: (pid, sig) => {
         expect(pid).toBe(4242);
@@ -370,11 +373,14 @@ describe('anton stop', () => {
       },
       sleep: async (ms) => { slept += ms; },
       stopContainer: async (n) => { stopped.push(n); },
+      findRunContainer: async () => containerId,
+      removeRunContainer: async (id) => { removed.push(id); },
     });
     expect(await stopCommand('p', h.deps)).toBe(0);
     expect(signals.filter((s) => s !== 0)).toEqual(['SIGTERM', 'SIGKILL']);
     expect(slept).toBeGreaterThanOrEqual(10_000);
     expect(stopped).toEqual([]);
+    expect(removed).toEqual([containerId]);
     expect(await loadState(dir)).toMatchObject({ stage: 'paused', pausedFrom: 'build', pauseReason: 'interrupted' });
   });
 });
