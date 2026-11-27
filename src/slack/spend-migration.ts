@@ -2,7 +2,8 @@ import { lstat, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { readRegularFile } from '../core/atomic.js';
 import type { ProjectEntry } from '../core/registry.js';
-import { importLegacyJobSpend } from '../core/spend-log.js';
+import { usd } from '../core/budget.js';
+import { importLegacyJobSpend, markSpendReconciled, spendReconciled } from '../core/spend-log.js';
 import { JobStateSchema } from '../core/state.js';
 import { assertJobDir } from '../stages/verify.js';
 import { importMonthToDateSlackSpend } from './chat-budget.js';
@@ -49,4 +50,27 @@ export async function reconcileMonthToDateSpend(input: {
   }
   const slack = await importMonthToDateSlackSpend(teamId, now.getTime(), { home });
   return { jobs, jobUsd, slack };
+}
+
+/**
+ * Reconcile once, at service start before Slack workers run. A live run would race the job snapshots,
+ * so the cap stays inactive and this retries at the next start. Returns a line for the service log.
+ */
+export async function reconcileSpendOnce(input: {
+  home: string;
+  now: Date;
+  projects: readonly ProjectEntry[];
+  teamId: string;
+  running: (repo: string) => Promise<{ running: boolean }>;
+}): Promise<string | undefined> {
+  const { home, now, projects, running } = input;
+  if (await spendReconciled(home)) return undefined;
+  for (const project of projects) {
+    if ((await running(project.repoPath)).running) {
+      return `Monthly cap not active yet: ${project.name} has a run in progress. Spend is reconciled at the next start.`;
+    }
+  }
+  const result = await reconcileMonthToDateSpend(input);
+  await markSpendReconciled(now, home);
+  return `Spend reconciled for this month (${result.jobs} jobs, ${usd(result.jobUsd)}; ${result.slack.settled + result.slack.held} earlier Slack answers). The monthly cap is active when set.`;
 }

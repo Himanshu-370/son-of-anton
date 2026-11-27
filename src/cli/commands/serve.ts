@@ -8,6 +8,9 @@ import { composeSlackMessage, remindPendingSpecs } from '../../slack/spec-sessio
 import { collectRetros } from '../../retro/run.js';
 import { createInboundHandler } from '../../slack/inbound.js';
 import { startSlackService } from '../../slack/service.js';
+import { reconcileSpendOnce } from '../../slack/spend-migration.js';
+import { isRunning } from '../../core/lock.js';
+import { listProjects } from '../../core/registry.js';
 import { createSlackRuntime } from '../../slack/transport.js';
 import { slackSetupApi } from '../../slack/setup-api.js';
 import { guard, resolveDeps, type CliDeps } from '../deps.js';
@@ -54,6 +57,15 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
     if (!config || !credentials) {
       d.err('Run anton slack setup before starting the Slack service.');
       return 1;
+    }
+    // Before any Slack worker runs: bring this month's earlier spend into the host ledger once, so the cap counts it.
+    try {
+      const line = await reconcileSpendOnce({
+        home, now: new Date(), projects: await listProjects(), teamId: config.teamId, running: isRunning,
+      });
+      if (line) d.out(line);
+    } catch (e) {
+      d.err(`Monthly cap not active yet: spend could not be reconciled (${e instanceof Error ? e.message : String(e)}).`);
     }
     // Slack orders run the same job actions as the CLI, in this process, with its effects.
     // Spec turns (the PM in Docker) run here too, with the same effects as anton new and anton spec.

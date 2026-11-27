@@ -2,9 +2,9 @@ import { mkdtemp, mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
-import { readMonthlySpend } from '../../src/core/spend-log.js';
+import { readMonthlySpend, spendReconciled } from '../../src/core/spend-log.js';
 import { reserveChatSpend, settleChatSpend } from '../../src/slack/chat-budget.js';
-import { reconcileMonthToDateSpend } from '../../src/slack/spend-migration.js';
+import { reconcileMonthToDateSpend, reconcileSpendOnce } from '../../src/slack/spend-migration.js';
 
 it('reconciles old job and Slack costs once and refuses a symlinked job state', async () => {
   const home = await mkdtemp(join(tmpdir(), 'anton-migration-'));
@@ -34,6 +34,23 @@ it('reconciles old job and Slack costs once and refuses a symlinked job state', 
     await rm(statePath);
     await symlink(replacement, statePath);
     await expect(reconcileMonthToDateSpend(input)).rejects.toThrow(/not a regular file/);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+it('reconciles once at start, and waits while a run is in progress', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'anton-migration-once-'));
+  try {
+    const now = new Date('2026-11-27T12:00:00.000Z');
+    const input = { home, now, projects: [{ name: 'tracker', repoPath: join(home, 'project') }], teamId: 'T0FAKE' };
+    const busy = await reconcileSpendOnce({ ...input, running: async () => ({ running: true }) });
+    expect(busy).toBe('Monthly cap not active yet: tracker has a run in progress. Spend is reconciled at the next start.');
+    expect(await spendReconciled(home)).toBe(false);
+    const idle = { ...input, running: async () => ({ running: false }) };
+    expect(await reconcileSpendOnce(idle)).toMatch(/^Spend reconciled for this month \(0 jobs, \$0\.00; 0 earlier Slack answers\)/);
+    expect(await spendReconciled(home)).toBe(true);
+    expect(await reconcileSpendOnce(idle)).toBeUndefined();
   } finally {
     await rm(home, { recursive: true, force: true });
   }
