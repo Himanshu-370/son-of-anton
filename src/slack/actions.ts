@@ -49,7 +49,8 @@ export type SlackAction =
 
 export type ActionResultStatus =
   | 'done' | 'duplicate' | 'in-progress' | 'denied' | 'ignored' | 'stale' | 'refused' | 'unsupported' | 'failed';
-export type ActionResult = { status: ActionResultStatus; lines: string[] };
+/** close: the clicked card is finished, so Slack replaces its buttons with the outcome. */
+export type ActionResult = { status: ActionResultStatus; lines: string[]; close?: boolean };
 
 export const CARD_KINDS = [
   'approve', 'reject', 'resume', 'abandon', 'accept-risk', 'spec-revise', 'lesson-accept', 'lesson-edit', 'lesson-reject', 'confirmation',
@@ -300,8 +301,11 @@ export async function dispatchSlackAction(input: SlackAction, deps: DispatchDeps
       const cards = await readActionCards(input, home);
       const card = cards[input.token];
       if (!matchesCard(input, card)) return DENIED;
-      if (card.kind === 'confirmation') return await dispatchConfirmation(input, cards, deps, home);
-      resolved = cardOperation(input, card);
+      if (card.kind === 'confirmation') return closing(card.kind, await dispatchConfirmation(input, cards, deps, home));
+      const op = cardOperation(input, card);
+      if ('status' in op) return closing(card.kind, op);
+      if (op.op.kind === 'status') return await status(op.op.project);
+      return closing(card.kind, await claimAndRun(input, op.op, deps, home));
     } else {
       resolved = await commandOperation(input, deps);
     }
@@ -315,6 +319,18 @@ export async function dispatchSlackAction(input: SlackAction, deps: DispatchDeps
 }
 
 type CardAction = Extract<SlackAction, { via: 'card' }>;
+
+/**
+ * Mark a card click whose card can no longer act. A confirmation is single-use, so any final answer closes it.
+ * A review card closes once decided (or found stale or already decided). Lesson cards hold several proposals in
+ * one message, so they stay open.
+ */
+function closing(kind: CardKind, r: ActionResult): ActionResult {
+  if (kind.startsWith('lesson-')) return r;
+  const ends: ActionResultStatus[] = kind === 'confirmation'
+    ? ['done', 'duplicate', 'stale', 'refused', 'failed'] : ['done', 'duplicate', 'stale'];
+  return ends.includes(r.status) ? { ...r, close: true } : r;
+}
 type MessageAction = Extract<SlackAction, { via: 'message' }>;
 
 function matchesCard(a: CardAction, card: CardBinding | undefined): card is CardBinding {
@@ -339,7 +355,7 @@ export async function prepareCardModal(a: Extract<SlackAction, { via: 'card' }>,
   if (!matchesCard(a, card) || !a.source.messageTs) return { kind: 'denied', result: DENIED };
   if (card.kind === 'confirmation') {
     const bound = readConfirmation(a, cards, (deps.intentNow ?? Date.now)());
-    if ('status' in bound) return { kind: 'refused', result: bound };
+    if ('status' in bound) return { kind: 'refused', result: closing(card.kind, bound) };
     if (bound.button !== 'edit' || a.input) return { kind: 'direct' };
     const edit = confirmationEdit(bound.payload.operation);
     if (!edit) return { kind: 'refused', result: DENIED };
@@ -347,7 +363,7 @@ export async function prepareCardModal(a: Extract<SlackAction, { via: 'card' }>,
     const view = cardModal(kind, { token: a.token, channelId: card.channelId, messageTs: a.source.messageTs }, initial);
     return { kind: 'modal', view: { ...view, title: { type: 'plain_text', text: 'Edit confirmation' }, submit: { type: 'plain_text', text: 'Review' } } };
   }
-  if (card.usedAt !== undefined) return { kind: 'refused', result: USED };
+  if (card.usedAt !== undefined) return { kind: 'refused', result: closing(card.kind, USED) };
   if (!MODAL_KINDS.includes(card.kind) || a.input) return { kind: 'direct' };
   let initial: string | undefined;
   if (card.kind === 'lesson-edit') {
@@ -603,6 +619,13 @@ async function postConfirmation(
   const tokens = [confirmToken, cancelToken, ...(editToken ? [editToken] : []), ...(acceptToken ? [acceptToken] : [])];
   const now = (deps.intentNow ?? Date.now)();
   await withStore(home, async (store) => {
+    // A newer card for the same request replaces an older unanswered one, so one request cannot run twice.
+    const same = JSON.stringify(payload.operation);
+    for (const card of Object.values(store.cards)) {
+      const c = card.confirmation;
+      if (card.kind === 'confirmation' && c?.button === 'confirm' && c.ownerId === a.actor.userId && c.expiresAt > now
+        && !card.usedAt && c.payload && JSON.stringify(c.payload.operation) === same) c.expiresAt = now;
+    }
     for (const token of tokens) {
       store.cards[token] = cardSchema.parse({
         kind: 'confirmation', role: 'pm', appId: a.source.appId, channelId, createdAt: Date.now(),

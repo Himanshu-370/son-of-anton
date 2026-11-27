@@ -359,6 +359,33 @@ describe('inbound normalization', () => {
   });
 });
 
+it('replaces a finished card with its content and outcome, and keeps buttons when it is not finished', async () => {
+  const body = (blocks: unknown[]) => ({
+    type: 'block_actions', team: { id: 'T0FAKE' }, user: { id: 'U0OWNER', name: 'owner' }, api_app_id: PM_APP,
+    channel: { id: PROJECT_CHANNEL }, container: { message_ts: '1700000000.000100' },
+    actions: [{ action_id: 'anton:approve', value: 'a'.repeat(32), action_ts: '1700000001.000001' }],
+    message: { blocks },
+  });
+  const blocks = [{ type: 'section', text: { type: 'plain_text', text: 'Delivery 1 is ready' } }, { type: 'actions', elements: [] }];
+  for (const [result, replaced] of [
+    [{ status: 'done', lines: ['Delivery approved. Done.'], close: true }, true],
+    [{ status: 'refused', lines: ['Anton is busy.'] }, false],
+  ] as const) {
+    const replies: unknown[] = [];
+    const inbound = createInboundHandler({ dispatch: async () => result });
+    await inbound.action(body(blocks), 'pm', async () => undefined, async (m) => { replies.push(m); });
+    await inbound.idle();
+    if (replaced) {
+      expect(replies).toEqual([{
+        replace_original: true, text: 'Delivery approved. Done.',
+        blocks: [blocks[0], { type: 'context', elements: [{ type: 'plain_text', text: '✅ Delivery approved. Done.', emoji: true }] }],
+      }]);
+    } else {
+      expect(replies).toEqual([{ response_type: 'ephemeral', text: 'Anton is busy.', replace_original: false }]);
+    }
+  }
+});
+
 it('keeps action state under the private Slack directory', async () => {
   await project('p');
   await card('approve');

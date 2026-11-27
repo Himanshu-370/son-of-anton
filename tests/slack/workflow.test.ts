@@ -173,10 +173,20 @@ describe('plain-English confirmation workflow', () => {
     ]) {
       expect((await dispatchSlackAction(invalid, f.d)).status).toBe('denied');
     }
-    expect(await dispatchSlackAction(f.click(0, 1), f.d)).toMatchObject({ status: 'done', lines: ['Cancelled. Nothing was changed.'] });
-    expect((await dispatchSlackAction(confirm, f.d)).status).toBe('stale');
+    expect(await dispatchSlackAction(f.click(0, 1), f.d)).toMatchObject({ status: 'done', lines: ['Cancelled. Nothing was changed.'], close: true });
+    expect(await dispatchSlackAction(confirm, f.d)).toMatchObject({ status: 'stale', close: true });
     expect((await loadState(job.jobDir)).stage).toBe('awaiting_final_review');
     expect(spawned).toHaveLength(0);
+  });
+
+  it('a newer card for the same request retires the older one, so it runs once', async () => {
+    const job = await project('p', { stage: 'awaiting_final_review' });
+    const f = fixture({ kind: 'intent', intent: { intent: 'reject', notes: 'Fix the header' } });
+    await dispatchSlackAction(f.mention('Send it back'), f.d);
+    await dispatchSlackAction(f.mention('Send it back'), f.d);
+    expect(await dispatchSlackAction(f.click(0, 0), f.d)).toMatchObject({ status: 'stale', lines: ['That confirmation expired. Ask again.'], close: true });
+    expect(await dispatchSlackAction(f.click(1, 0), f.d)).toMatchObject({ status: 'done', close: true });
+    expect(await readFile(join(job.jobDir, 'notes-round-1.md'), 'utf8')).toContain('Fix the header');
   });
 
   it('edits notes through a fresh preview and confirms the edited operation', async () => {
