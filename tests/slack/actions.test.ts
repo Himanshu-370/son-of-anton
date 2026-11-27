@@ -64,7 +64,7 @@ function deps(over: Partial<DispatchDeps> = {}): DispatchDeps {
 const owner = { teamId: 'T0FAKE', userId: 'U0OWNER', isBot: false };
 const pmSource = (messageTs = '1700000000.000100') => ({ appId: PM_APP, role: 'pm' as const, channelId: PROJECT_CHANNEL, messageTs });
 
-async function card(kind: 'approve' | 'reject', target: Partial<{ jobId: string; stage: JobState['stage']; revision: string }> = {}) {
+async function card(kind: 'approve' | 'reject' | 'preview-run' | 'preview-stop' | 'open-folder', target: Partial<{ jobId: string; stage: JobState['stage']; revision: string }> = {}) {
   const token = await registerActionCard({
     kind, role: 'pm', channelId: PROJECT_CHANNEL,
     target: { project: 'p', jobId: '1-init', stage: 'awaiting_final_review', revision: 'delivered-1', ...target },
@@ -76,6 +76,69 @@ async function card(kind: 'approve' | 'reject', target: Partial<{ jobId: string;
 const click = (token: string, key: string, over: Partial<SlackAction> = {}, input?: { notes?: string }): SlackAction => ({
   via: 'card', key, actor: owner, source: pmSource(), token, ...(input ? { input } : {}), ...over,
 } as SlackAction);
+
+describe('delivery run cards', () => {
+  const previewFake = () => {
+    const calls: string[][] = [];
+    const preview = {
+      exec: async (cmd: string, args: string[]) => { calls.push([cmd, ...args]); return { exitCode: 0, stdout: '', stderr: '' }; },
+      image: async () => 'anton/kit-fallback:test', envFile: async () => undefined, secrets: async () => ({}),
+      portFree: async () => true, freePort: async () => 40000, reachable: async () => true,
+      now: () => 0, sleep: async () => undefined, home,
+    };
+    return { calls, preview };
+  };
+  const plan = (commands: object) => ({ summary: 's', commands, tasks: [{ id: 'T1', title: 't', acceptanceChecks: ['AC-1'], instructions: 'i', area: 'backend' }] });
+
+  it('run card runs the current delivery in the sandbox', async () => {
+    const { dir } = await project('p');
+    await writeFile(join(dir, 'plan.json'), JSON.stringify(plan({ install: 'npm ci', test: 'npm test', run: 'node bin/hello.js' })));
+    const f = previewFake();
+    const r = await dispatchSlackAction(click(await card('preview-run'), 'card:pr1'), deps({ preview: f.preview }));
+    expect(r).toEqual({ status: 'done', lines: ['A Terminal window opened inside the sandbox.', 'Try: node bin/hello.js'] });
+    expect(f.calls.some((c) => c[0] === 'docker' && c[1] === 'run')).toBe(true);
+    expect(r.close).toBeUndefined();
+  });
+
+  it('run card on a moved job is stale and runs nothing', async () => {
+    await project('p');
+    tags = ['anton/1-init/delivered-1', 'anton/1-init/delivered-2'];
+    const f = previewFake();
+    const r = await dispatchSlackAction(click(await card('preview-run'), 'card:pr2'), deps({ preview: f.preview }));
+    expect(r.status).toBe('stale');
+    expect(f.calls).toEqual([]);
+  });
+
+  it('run without commands refuses', async () => {
+    const { dir } = await project('p');
+    await writeFile(join(dir, 'plan.json'), JSON.stringify(plan({ install: 'npm ci', test: 'npm test' })));
+    const r = await dispatchSlackAction(click(await card('preview-run'), 'card:pr3'), deps({ preview: previewFake().preview }));
+    expect(r).toEqual({ status: 'refused', lines: ['Nothing to run for this project.'] });
+  });
+
+  it('stop and open cards act and stay open', async () => {
+    await project('p');
+    const f = previewFake();
+    const stop = await dispatchSlackAction(click(await card('preview-stop'), 'card:ps1'), deps({ preview: f.preview }));
+    expect(stop).toEqual({ status: 'done', lines: ['Nothing is running for p.'] });
+    const open = await dispatchSlackAction(click(await card('open-folder'), 'card:of1'), deps({ preview: f.preview }));
+    expect(open).toEqual({ status: 'done', lines: ['Opened in VS Code.'] });
+    expect(f.calls.at(-1)).toEqual(['open', '-a', 'Visual Studio Code', join(home, 'projects', 'p')]);
+  });
+
+  it('non-owner is denied and nothing runs', async () => {
+    await project('p');
+    const f = previewFake();
+    const r = await dispatchSlackAction(click(await card('preview-run'), 'card:pr4', { actor: { ...owner, userId: 'U0OTHER' } }), deps({ preview: f.preview }));
+    expect(r.status).toBe('denied');
+    expect(f.calls).toEqual([]);
+  });
+
+  it('outside anton serve it is unsupported', async () => {
+    await project('p');
+    expect((await dispatchSlackAction(click(await card('preview-stop'), 'card:ps2'), deps())).status).toBe('unsupported');
+  });
+});
 
 describe('authorization', () => {
   it('denies a non-owner and changes nothing', async () => {

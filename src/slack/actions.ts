@@ -6,6 +6,10 @@ import {
   type ActionOutcome, type ActionTarget, type JobActionDeps, type StopProcessDeps,
 } from '../core/job-actions.js';
 import { RUN_NONCE, waitForLockFile } from '../core/lock.js';
+import { readRegularFile } from '../core/atomic.js';
+import type { KitName } from '../kits/index.js';
+import { openFolder, runPreview, stopPreview, type PreviewDeps } from '../preview/sandbox.js';
+import { PlanSchema } from '../stages/plan.js';
 import { budgetSettings, loadAntonConfig } from '../core/anton-config.js';
 import { stageGroup, usd } from '../core/budget.js';
 import { NoJobs } from '../core/job.js';
@@ -54,7 +58,10 @@ export type ActionResult = { status: ActionResultStatus; lines: string[]; close?
 
 export const CARD_KINDS = [
   'approve', 'reject', 'resume', 'abandon', 'accept-risk', 'spec-revise', 'lesson-accept', 'lesson-edit', 'lesson-reject', 'confirmation',
+  'preview-run', 'preview-stop', 'open-folder',
 ] as const;
+/** Delivery cards that run, stop or open the project. They act every time and never close. */
+const PREVIEW_KINDS: readonly CardKind[] = ['preview-run', 'preview-stop', 'open-folder'];
 /** Cards whose click opens a form; the submission carries the input. */
 const MODAL_KINDS: readonly CardKind[] = ['reject', 'spec-revise', 'accept-risk', 'lesson-edit', 'resume'];
 export type CardKind = (typeof CARD_KINDS)[number];
@@ -242,6 +249,8 @@ export interface DispatchDeps {
   postIntentThreadMessage?: (message: { channelId: string; threadTs: string; text: string; blocks?: unknown[] }) => Promise<{ ts: string }>;
   intentNow?: () => number;
   intentSecrets?: Record<string, string>;
+  /** Sandbox runs of a delivery (anton serve only). */
+  preview?: PreviewDeps;
 }
 
 export type ChannelFacts = { isPrivate: boolean; isShared: boolean; isArchived: boolean; teamId?: string };
@@ -302,6 +311,7 @@ export async function dispatchSlackAction(input: SlackAction, deps: DispatchDeps
       const card = cards[input.token];
       if (!matchesCard(input, card)) return DENIED;
       if (card.kind === 'confirmation') return closing(card.kind, await dispatchConfirmation(input, cards, deps, home));
+      if (PREVIEW_KINDS.includes(card.kind)) return await dispatchPreview(card, deps);
       const op = cardOperation(input, card);
       if ('status' in op) return closing(card.kind, op);
       if (op.op.kind === 'status') return await status(op.op.project);
@@ -385,7 +395,7 @@ function cardOperation(a: CardAction, card: CardBinding): { op: Operation } | Ac
   }
   const target = card.target!;
   switch (card.kind) {
-    case 'confirmation': return DENIED;
+    case 'confirmation': case 'preview-run': case 'preview-stop': case 'open-folder': return DENIED;
     case 'approve': return { op: { kind: 'approve', target } };
     case 'abandon': return { op: { kind: 'abandon', target } };
     case 'reject': {
@@ -406,6 +416,28 @@ function cardOperation(a: CardAction, card: CardBinding): { op: Operation } | Ac
       return reason ? { op: { kind: 'accept-risk', target, findingId: card.findingId!, reason } } : result('refused', 'Give a reason for accepting the risk.');
     }
   }
+}
+
+/** Run, stop or open a delivered project. Only a run needs the job still at that delivery. */
+async function dispatchPreview(card: CardBinding, deps: DispatchDeps): Promise<ActionResult> {
+  if (!deps.preview) return result('unsupported', 'Running a delivery is available in anton serve.');
+  const target = card.target!;
+  if (card.kind === 'preview-stop') {
+    return result('done', (await stopPreview(target.project, deps.preview)) ? 'Stopped.' : `Nothing is running for ${target.project}.`);
+  }
+  const job = await loadJob(target.project);
+  if (card.kind === 'open-folder') {
+    return result('done', (await openFolder(job.repo, deps.preview)) === 'vscode' ? 'Opened in VS Code.' : 'Opened in Finder.');
+  }
+  if (!(await isCurrent(target, deps.jobs.listTags).catch(() => false))) return result('stale', 'That is out of date. Nothing was changed.');
+  const plan = PlanSchema.safeParse(JSON.parse((await readRegularFile(join(job.jobDir, 'plan.json'))) ?? 'null'));
+  if (!plan.success) return result('refused', 'Nothing to run for this project.');
+  const spec = JSON.parse((await readRegularFile(join(job.jobDir, 'spec.approved.json'))) ?? '{}') as { kit?: unknown };
+  const kit: KitName = spec.kit === 'web' ? 'web' : 'fallback';
+  const r = await runPreview({
+    project: target.project, jobId: target.jobId, revision: target.revision ?? '', repoPath: job.repo, kit, commands: plan.data.commands,
+  }, deps.preview);
+  return result(r.ok ? 'done' : 'refused', ...r.lines);
 }
 
 type BoundConfirmation = {
