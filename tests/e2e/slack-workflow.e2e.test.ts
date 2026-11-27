@@ -420,6 +420,36 @@ describe.skipIf(!liveSlack)('Slack workflow in the dedicated test workspace (fak
       }, deps);
       expect(q.status).toBe('done');
       expect(q.lines.join('\n')).toMatch(/awaiting_final_review/);
+      // Phase 7 posts a real threaded preview in the dedicated workspace. The Owner event and
+      // click are synthetic, and the classifier is fake, so this costs no model calls.
+      const { webApi } = await import('@slack/bolt');
+      const pm = new webApi.WebClient(credentials.pm.botToken, { retryConfig: { retries: 0 } });
+      const parent = await pm.chat.postMessage({ channel: channelId, text: 'Phase 7 test fixture: send the delivery back.' });
+      expect(parent.ts).toBeTruthy();
+      let previewTs: string | undefined;
+      let cancelToken: string | undefined;
+      deps.classify = async () => ({ kind: 'intent', intent: { intent: 'reject', notes: 'Test fixture review notes' } });
+      deps.postIntentThreadMessage = async (message) => {
+        const sent = await runtime.postIntentThreadMessage(message);
+        previewTs = sent.ts;
+        const blocks = (message.blocks ?? []) as { elements?: { value: string; text: { text: string } }[] }[];
+        cancelToken = blocks.flatMap((block) => block.elements ?? []).find((button) => button.text.text === 'Cancel')?.value;
+        return sent;
+      };
+      const owner = { teamId: live.teamId, userId: live.ownerId, isBot: false };
+      const source = { appId: live.roles.pm.appId, role: 'pm' as const, channelId };
+      await dispatchSlackAction({
+        via: 'message', key: `event:${live.teamId}:EvPreview${Date.now()}`, eventType: 'app_mention',
+        actor: owner, mentions: [live.roles.pm.botUserId], source: { ...source, messageTs: parent.ts! },
+        text: 'Send the delivery back.',
+      }, deps);
+      expect(previewTs).toBeTruthy();
+      expect(cancelToken).toBeTruthy();
+      expect(await dispatchSlackAction({
+        via: 'card', key: `card:${live.teamId}:live-cancel`, actor: owner, token: cancelToken!,
+        source: { ...source, messageTs: previewTs! },
+      }, deps)).toMatchObject({ status: 'done', lines: ['Cancelled. Nothing was changed.'] });
+      expect((await loadState(dir)).stage).toBe('awaiting_final_review');
       // A forged team gets nothing.
       const forged = await dispatchSlackAction({
         via: 'message', key: `event:T0FORGED:EvLive${Date.now()}`, eventType: 'app_mention',
