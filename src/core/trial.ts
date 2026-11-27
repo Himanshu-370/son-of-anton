@@ -30,7 +30,7 @@ export async function completeTrialJob(job: { project: string; jobId: string }, 
       edits.push({ path: ['models', 'roles', trial.role], value: trial.revertTo } as SettingEdit);
     }
   }
-  await applySettingsChange({ expectedHash: hash, intent, edits }, home);
+  await applySettingsChange({ expectedHash: hash, intent, edits, source: 'auto' }, home);
   return left > 0
     ? `Model trial: ${trial.role} on ${trial.model} has ${left} ${left === 1 ? 'job' : 'jobs'} left.`
     : `Model trial ended: ${trial.role} is back on ${trial.revertTo.model} (${trial.revertTo.effort}).`;

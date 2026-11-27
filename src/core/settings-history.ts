@@ -26,7 +26,8 @@ const recordSchema = z.object({
   id: z.string(),
   at: z.iso.datetime(),
   intent: z.string(),
-  source: z.enum(['slack', 'file']),
+  /** auto: anton changed it (a trial counting down); undo never picks these. */
+  source: z.enum(['slack', 'file', 'auto']),
   beforeHash: z.string(),
   hash: z.string(),
   changes: z.array(changeSchema),
@@ -238,7 +239,7 @@ export function readSettingsHistory(home = antonHome()) {
 }
 
 export type SettingsRequest = { expectedHash: string } & (
-  { intent: string; edits: readonly SettingEdit[] } | { undoId: string }
+  { intent: string; edits: readonly SettingEdit[]; source?: 'slack' | 'auto' } | { undoId: string }
 );
 
 /** Apply a confirmed batch or undo the latest applied entry as a single config write. */
@@ -298,7 +299,7 @@ export function applySettingsChange(request: SettingsRequest, home = antonHome()
         }
       }
     }
-    const change = entry('intent' in request ? request.intent : 'undo_setting', 'slack', hash, contentHash(output), actualChanges);
+    const change = entry('intent' in request ? request.intent : 'undo_setting', 'intent' in request ? request.source ?? 'slack' : 'slack', hash, contentHash(output), actualChanges);
     if (target) change.undoOf = target.id;
     await write(output, nextConfig, change);
     return change;

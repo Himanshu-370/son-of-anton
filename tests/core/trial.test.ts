@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadAntonConfig } from '../../src/core/anton-config.js';
 import { recordSpend } from '../../src/core/spend-log.js';
+import { readSettingsHistory } from '../../src/core/settings-history.js';
 import { completeTrialJob } from '../../src/core/trial.js';
 
 const trialConfig = (jobsLeft: number) => [
@@ -32,6 +33,8 @@ describe('model trial completion', () => {
     expect(await completeTrialJob({ project: 'todo', jobId: '1-init' }, home)).toBe('Model trial: qa on claude-haiku-5-5 has 2 jobs left.');
     expect(await completeTrialJob({ project: 'todo', jobId: '1-init' }, home)).toBeUndefined();
     expect((await loadAntonConfig(home)).models?.trial?.jobsLeft).toBe(2);
+    // An automatic count is not the Owner's change, so "undo that" never picks it.
+    expect((await readSettingsHistory(home)).history.at(-1)).toMatchObject({ intent: 'trial_job:todo/1-init', source: 'auto' });
   });
 
   it('ignores a job where the trial role did not run on the trial model', async () => {
