@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { readRegularFile, writeFileAtomic } from './atomic.js';
 import { budgetSettings, loadAntonConfig } from './anton-config.js';
 import { monthlyCapRefusal } from './spend-log.js';
+import { completeTrialJob } from './trial.js';
 import { allowanceUsage, stageGroup, usd } from './budget.js';
 import { AREA_ORDER } from './config.js';
 import { commitAll, currentBranch, isClean, listTags as defaultListTags, switchBranch, tagHead } from './git.js';
@@ -357,6 +358,7 @@ export async function approveJob(target: ActionTarget, d: JobActionDeps): Promis
           await switchBackFromJob(d, job.repo, job.state);
         } finally {
           await submitRetro(job, 'approved', { ...d.retro, out: d.out });
+        await completeTrialJob({ project: job.name, jobId: job.state.jobId }).then((line) => line && d.out(line), () => undefined);
         }
       },
     }, d);
@@ -499,6 +501,7 @@ export async function abandonJob(target: ActionTarget, d: JobActionDeps): Promis
         await switchBackFromJob(d, job.repo, job.state);
       } finally {
         await submitRetro(job, 'abandoned', { ...d.retro, out: d.out });
+        await completeTrialJob({ project: job.name, jobId: job.state.jobId }).then((line) => line && d.out(line), () => undefined);
       }
     },
   }, d);
