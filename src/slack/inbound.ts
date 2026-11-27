@@ -148,7 +148,7 @@ const eventBody = z.object({
   }),
 });
 
-/** A message or mention. Normalized for the later conversation features; never an order. */
+/** A message or mention. Owner intent routing and existing job-thread replies use the normalized event. */
 export function normalizeEvent(body: unknown, role: SlackRole): Normalized {
   const b = eventBody.safeParse(body);
   if (!b.success) return ignored('unreadable event');
@@ -167,12 +167,15 @@ export function normalizeEvent(body: unknown, role: SlackRole): Normalized {
       via: 'message', key: `event:${d.team_id}:${d.event_id}`, eventType: e.type, mentions,
       actor: { teamId: d.team_id, userId: e.user, isBot: false },
       source: { appId: d.api_app_id, role, channelId: e.channel, messageTs: e.ts, ...(e.thread_ts ? { threadTs: e.thread_ts } : {}) },
-      text: sanitizeSlackText(e.text, 4000),
+      text: sanitizeSlackText(e.text, 6001),
     },
   };
 }
 
-export type Reply = { response_type: 'ephemeral'; text: string; replace_original?: false };
+export type Reply =
+  | { response_type: 'ephemeral'; text: string; replace_original?: false }
+  /** Replaces the clicked card in place: its buttons are gone and the outcome shows on it. */
+  | { replace_original: true; text: string; blocks: unknown[] };
 type Ack = (reply?: Reply) => Promise<void>;
 type Respond = (reply: Reply) => Promise<unknown>;
 
@@ -187,6 +190,13 @@ export interface InboundHandler {
   event(body: unknown, role: SlackRole, notify?: (action: SlackAction) => Notify): Promise<void>;
   /** Resolves when all accepted work has finished (service stop and tests). */
   idle(): Promise<void>;
+}
+
+/** The clicked message's blocks without its buttons, so a finished card keeps its content. */
+function cardContent(body: unknown): unknown[] | undefined {
+  const blocks = (body as { message?: { blocks?: unknown } } | undefined)?.message?.blocks;
+  if (!Array.isArray(blocks)) return undefined;
+  return blocks.filter((b) => !(b && typeof b === 'object' && (b as { type?: unknown }).type === 'actions')).slice(0, 48);
 }
 
 /** Plain, mention-free reply text. Denials carry only Anton's fixed lines, which say nothing about projects. */
@@ -224,12 +234,20 @@ export function createInboundHandler(deps: {
     active.add(p);
   }
 
-  async function reply(respond: Respond, r: ActionResult): Promise<void> {
+  async function reply(respond: Respond, r: ActionResult, card?: unknown[]): Promise<void> {
     if (r.status === 'ignored') return;
-    await respond({ response_type: 'ephemeral', text: renderResult(r), replace_original: false }).catch(() => log('Slack reply failed.'));
+    const text = renderResult(r);
+    if (r.close && card) {
+      const outcome = { type: 'context', elements: [{ type: 'plain_text', text: `${r.status === 'done' ? '✅' : '⚪'} ${text}`.slice(0, 2000), emoji: true }] };
+      const replaced = await respond({ replace_original: true, text, blocks: [...card, outcome] }).then(() => true, () => false);
+      if (replaced) return;
+    }
+    await respond({ response_type: 'ephemeral', text, replace_original: false }).catch(() => log('Slack reply failed.'));
   }
 
-  async function interactive(n: Normalized, ack: Ack, respond: Respond, ackText: boolean, openView?: OpenView): Promise<void> {
+  async function interactive(
+    n: Normalized, ack: Ack, respond: Respond, ackText: boolean, openView?: OpenView, card?: unknown[],
+  ): Promise<void> {
     if (n.kind === 'ignored') {
       await ack(ackText ? { response_type: 'ephemeral', text: 'Anton could not read that.' } : undefined);
       return;
@@ -250,14 +268,15 @@ export function createInboundHandler(deps: {
         await openView(action.triggerId, decision.view).catch(() => reply(respond, { status: 'refused', lines: ['Anton could not open the form. Try again.'] }));
         return;
       }
-      if (decision.kind !== 'direct') return reply(respond, decision.result);
+      if (decision.kind !== 'direct') return reply(respond, decision.result, card);
     }
-    start(async () => reply(respond, await deps.dispatch(action)));
+    start(async () => reply(respond, await deps.dispatch(action), card));
   }
 
   return {
     command: (body, role, ack, respond) => interactive(normalizeCommand(body, role), ack, respond, true),
-    action: (body, role, ack, respond, openView) => interactive(normalizeBlockAction(body, role), ack, respond, false, openView),
+    action: (body, role, ack, respond, openView) =>
+      interactive(normalizeBlockAction(body, role), ack, respond, false, openView, cardContent(body)),
     async view(body, role, ack, notify) {
       // Closing the modal is the acknowledgement; the result arrives as a private message.
       await ack();

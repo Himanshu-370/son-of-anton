@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { readRegularFile, writeFileAtomic } from './atomic.js';
 import { budgetSettings, loadAntonConfig } from './anton-config.js';
@@ -8,12 +9,12 @@ import { allowanceUsage, stageGroup, usd } from './budget.js';
 import { AREA_ORDER } from './config.js';
 import { commitAll, currentBranch, isClean, listTags as defaultListTags, switchBranch, tagHead } from './git.js';
 import { assertOnJobBranch, currentJobId } from './job.js';
-import { AlreadyRunning, isRunning, waitForLockFile } from './lock.js';
+import { acquireStoppedRun, AlreadyRunning, isRunning, readRunLock, RUN_NONCE, RunLockChanged, waitForLockFile } from './lock.js';
 import { jobDir as jobDirOf } from './paths.js';
 import { getProject } from './registry.js';
 import { loadSecrets } from './secrets.js';
 import { loadState, pause, saveState, transition, unpause, type JobState, type Stage } from './state.js';
-import { PreflightError } from '../docker/container.js';
+import { CONTAINER_ID, findRunContainer, PreflightError, removeRunContainer } from '../docker/container.js';
 import { ACTIVE_STAGES, allowanceHint, containerName, seededState } from '../pipeline/runner.js';
 import { submitRetro, type RetroDeps } from '../retro/run.js';
 import type { SecurityFinding } from '../security/review.js';
@@ -30,7 +31,7 @@ import { failureReportPath } from '../stages/verify.js';
  */
 
 /** What an Owner action acts on. `revision` binds a review action to the exact spec or delivery the owner saw. */
-export type ActionTarget = { project: string; jobId: string; stage: Stage; revision?: string };
+export type ActionTarget = { project: string; jobId: string; stage: Stage; revision?: string; runNonce?: string };
 
 export type ActionStatus = 'done' | 'stale' | 'refused';
 /** `code` is the CLI exit code: 0 done, 1 refused or stale, 2 Docker preflight failed. */
@@ -134,10 +135,11 @@ async function mismatch(
   target: ActionTarget,
   listTags: ((repo: string, pattern: string) => Promise<string[]>) | undefined,
   matchStage: boolean,
-): Promise<'job' | 'stage' | 'revision' | undefined> {
+): Promise<'job' | 'stage' | 'revision' | 'runner' | undefined> {
   if (fresh.jobId !== target.jobId) return 'job';
   if (matchStage && fresh.state.stage !== target.stage) return 'stage';
   if (target.revision !== undefined && (await checkpointRevision(fresh, listTags)) !== target.revision) return 'revision';
+  if (target.runNonce !== undefined && (await readRunLock(fresh.repo))?.nonce !== target.runNonce) return 'runner';
   return undefined;
 }
 
@@ -147,9 +149,10 @@ export async function withDecisionLock<T>(project: string, body: (fresh: LoadedJ
 }
 
 function staleMessage(
-  fresh: LoadedJob, target: ActionTarget, why: 'job' | 'stage' | 'revision', nothing: string, note = 'Nothing was changed.',
+  fresh: LoadedJob, target: ActionTarget, why: 'job' | 'stage' | 'revision' | 'runner', nothing: string, note = 'Nothing was changed.',
 ): string {
   if (why === 'job') return `${target.project}: job ${target.jobId} is no longer the current job (now ${fresh.jobId}). ${note}`;
+  if (why === 'runner') return `${target.project}: the runner changed after this stop was requested. ${note}`;
   if (why === 'revision') return `${target.project}: this review is out of date; a newer version is waiting. ${note}`;
   return `${nothing} (stage: ${fresh.state.stage})`;
 }
@@ -465,6 +468,11 @@ async function planResume(job: LoadedJob, opts: ResumeOptions, d: Pick<JobAction
   return state;
 }
 
+/** A preview can reject a resume that has no available runner slot. Execution checks again. */
+export async function resumeRunnerAvailable(job: LoadedJob): Promise<boolean> {
+  return !(await isRunning(job.repo)).running && !(ACTIVE_STAGES.includes(job.state.stage) && await spawnClaimed(job));
+}
+
 /** Continue a paused job, or an interrupted one (active stage, no live run). `budget` sets a new total cap. */
 export async function resumeJob(target: ActionTarget, opts: ResumeOptions, d: JobActionDeps): Promise<ActionOutcome> {
   return decide(target, {
@@ -501,17 +509,132 @@ export async function abandonJob(target: ActionTarget, d: JobActionDeps): Promis
   }, d);
 }
 
+export type StopProcessDeps = {
+  kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
+  sleep?: (ms: number) => Promise<void>;
+  findRunContainer?: typeof findRunContainer;
+  removeRunContainer?: (id: string) => Promise<void>;
+};
+
+type StopDeps = Pick<JobActionDeps, 'out' | 'err' | 'lockWaitMs' | 'listTags'> & StopProcessDeps;
+
+/** Bind a stop preview to a single, nonce-bearing acquisition of the project's run lock. */
+export async function stopTarget(job: LoadedJob): Promise<(ActionTarget & { runNonce: string }) | undefined> {
+  const holder = await readRunLock(job.repo);
+  if (!holder?.nonce || holder.stopping || !RUN_NONCE.test(holder.nonce) || !holder.nonce.startsWith(`${holder.pid}.`)) return undefined;
+  return { ...targetOf(job), runNonce: holder.nonce };
+}
+
+/** Stop only the bound runner. Docker's reusable project name does not identify its container. */
+export async function stopJob(target: ActionTarget, d: StopDeps, opts: { allowIdle?: boolean } = {}): Promise<ActionOutcome> {
+  const { project } = target;
+  const changed = () => {
+    d.err(`${project}: the runner or job changed after this stop was requested.`);
+    return stale;
+  };
+  if (target.runNonce === undefined && !opts.allowIdle) return changed();
+  if (target.runNonce !== undefined && !RUN_NONCE.test(target.runNonce)) return changed();
+  const job = await loadJob(project);
+  const { runNonce, ...jobTarget } = target;
+  const currentJob = async () => {
+    const fresh = await loadJob(project);
+    return fresh.repo === job.repo && (await mismatch(fresh, jobTarget, d.listTags, true)) === undefined;
+  };
+  const currentHolder = async () => {
+    const holder = await readRunLock(job.repo);
+    if (runNonce === undefined ? holder !== undefined : holder?.nonce !== runNonce || holder.stopping || !runNonce.startsWith(`${holder.pid}.`)) {
+      throw new RunLockChanged();
+    }
+    return holder;
+  };
+  const kill = d.kill ?? ((pid, signal) => { process.kill(pid, signal); });
+  const sleep = d.sleep ?? delay;
+  const alive = (pid: number): boolean => {
+    try {
+      kill(pid, 0);
+      return true;
+    } catch (e) {
+      return (e as NodeJS.ErrnoException).code === 'EPERM';
+    }
+  };
+
+  try {
+    if (!(await currentJob())) return changed();
+    const holder = await currentHolder();
+    if (holder && alive(holder.pid)) {
+      const { pid } = holder;
+      d.out(`Stopping ${project} (pid ${pid})…`);
+      await currentHolder();
+      try {
+        kill(pid, 'SIGTERM');
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e;
+      }
+      for (let waited = 0; waited < 10_000 && alive(pid); waited += 250) await sleep(250);
+      if (alive(pid)) {
+        if (!(await currentJob())) return changed();
+        d.out('Still running after 10s; sending SIGKILL.');
+        await currentHolder();
+        try {
+          kill(pid, 'SIGKILL');
+        } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'ESRCH') throw e;
+        }
+        for (let waited = 0; waited < 2_000 && alive(pid); waited += 250) await sleep(250);
+      }
+      if (alive(pid)) {
+        d.err(`pid ${pid} is still alive. The pause was not recorded.`);
+        return refused();
+      }
+    } else {
+      d.out(`${project} has no running process.`);
+    }
+
+    const release = await acquireStoppedRun(job.repo, holder);
+    try {
+      if (!(await currentJob())) return changed();
+      if (runNonce) {
+        try {
+          const id = await (d.findRunContainer ?? findRunContainer)({ project, jobId: target.jobId, runNonce });
+          if (id && CONTAINER_ID.test(id)) {
+            if (!(await currentJob())) return changed();
+            await (d.removeRunContainer ?? removeRunContainer)(id);
+          } else d.out('No Docker container could be verified for this runner acquisition.');
+        } catch {
+          d.err('Docker cleanup failed for the stopped runner. Check Docker before resuming.');
+        }
+      }
+      return await interruptJob(jobTarget, d, { matchStage: true, expectedRepo: job.repo });
+    } finally {
+      await release();
+    }
+  } catch (e) {
+    if (e instanceof RunLockChanged) return changed();
+    const why = e instanceof Error ? e.message : String(e);
+    d.err(`${project}: the pause was not recorded (${why}). Check its status before retrying.`);
+    return refused();
+  }
+}
+
 /**
- * Pause the job `anton stop` just killed. The caller has already stopped the run and its container; under the lock
- * this pauses the job as `interrupted` only if it is still the same job and in an active stage (a stage that moved on
- * to a Checkpoint or an end is only reported). A replaced job is left alone.
+ * Record a runner interruption under the decision lock. The same job is paused only if it is in an active stage.
+ * A stop request can additionally require the captured stage and repository.
  */
-export async function interruptJob(target: ActionTarget, d: Pick<JobActionDeps, 'out' | 'err' | 'lockWaitMs'>): Promise<ActionOutcome> {
+export async function interruptJob(
+  target: ActionTarget,
+  d: Pick<JobActionDeps, 'out' | 'err' | 'lockWaitMs' | 'listTags'>,
+  opts: { matchStage?: boolean; expectedRepo?: string } = {},
+): Promise<ActionOutcome> {
   const p = target.project;
   return decide<{ paused: JobState | undefined; stage: Stage }>(target, {
     nothing: `${p} changed before the stop`,
     staleNote: "The run was stopped, but the job's state was not changed.",
-    matchStage: false,
+    matchStage: opts.matchStage ?? false,
+    check: async (job) => {
+      if (opts.expectedRepo === undefined || job.repo === opts.expectedRepo) return true;
+      d.err(`${p}: the project location changed. The pause was not recorded.`);
+      return false;
+    },
     apply: async (job) => {
       if (!ACTIVE_STAGES.includes(job.state.stage)) return { result: { paused: undefined, stage: job.state.stage } };
       const paused = pause(job.state, 'interrupted');
@@ -528,6 +651,14 @@ export async function interruptJob(target: ActionTarget, d: Pick<JobActionDeps, 
   }, d);
 }
 
+export async function readJobFinding(jobDir: string, findingId: string): Promise<SecurityFinding | undefined> {
+  if (!findingId.startsWith('SEC-')) return undefined;
+  const raw = await readRegularFile(join(jobDir, 'evidence', 'results.json'));
+  if (raw === undefined) return undefined;
+  const evidence = JSON.parse(raw) as { security?: { findings?: SecurityFinding[] } };
+  return evidence.security?.findings?.find((finding) => finding.id === findingId);
+}
+
 /** Record an accepted security risk. Allowed while paused or awaiting final review. */
 export async function acceptJobRisk(target: ActionTarget, findingId: string, reason: string, d: JobActionDeps): Promise<ActionOutcome> {
   return decide(target, {
@@ -542,16 +673,7 @@ export async function acceptJobRisk(target: ActionTarget, findingId: string, rea
       return false;
     },
     apply: async (job) => {
-      let findings: SecurityFinding[] = [];
-      try {
-        const raw = JSON.parse(await fsp.readFile(join(job.jobDir, 'evidence', 'results.json'), 'utf8')) as {
-          security?: { findings?: SecurityFinding[] };
-        };
-        findings = raw.security?.findings ?? [];
-      } catch (e) {
-        if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e;
-      }
-      const finding = findingId.startsWith('SEC-') ? findings.find((f) => f.id === findingId) : undefined;
+      const finding = await readJobFinding(job.jobDir, findingId);
       if (!finding) {
         d.err(`Unknown security finding ${findingId}`);
         return undefined;

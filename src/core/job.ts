@@ -21,9 +21,10 @@ export async function createNewProject(
   opts: { budgetUsd?: number; registeredProject?: ProjectEntry } = {},
 ): Promise<NewProject> {
   // Read config before any filesystem work: an invalid config.yaml must leave nothing behind.
-  const budgetUsd = opts.budgetUsd ?? budgetSettings(await loadAntonConfig()).defaultUsd;
+  const config = await loadAntonConfig();
+  const budgetUsd = opts.budgetUsd ?? budgetSettings(config).defaultUsd;
   const name = opts.registeredProject?.name ?? await uniqueName(slugify(description));
-  const repoPath = opts.registeredProject?.repoPath ?? projectDir(name);
+  const repoPath = opts.registeredProject?.repoPath ?? projectDir(name, config.projectsDir);
   const jobId = '1-init';
   const dir = jobDir(repoPath, jobId);
   await fsp.mkdir(dir, { recursive: true });

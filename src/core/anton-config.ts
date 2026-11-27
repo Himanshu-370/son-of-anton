@@ -35,6 +35,8 @@ export const AntonConfigSchema = z
       .strict()
       .optional(),
     retro: z.object({ batch: z.boolean().optional() }).strict().optional(),
+    /** Where new projects are created: an absolute path or one starting with ~/. Default ~/anton/projects. */
+    projectsDir: z.string().regex(/^(\/|~\/)/, 'projectsDir must be an absolute path or start with ~/').optional(),
     /** Paid Slack answers: a monthly pool (UTC month) and a cap per answer, separate from build budgets. */
     chat: z
       .object({ monthlyUsd: z.number().min(0).optional(), perAnswerUsd: z.number().positive().optional() })

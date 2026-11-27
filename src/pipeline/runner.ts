@@ -6,7 +6,7 @@ import { readRegularFile, writeFileAtomic } from '../core/atomic.js';
 import { allowanceShareText, seedStageSpend } from '../core/budget.js';
 import { defaultExec, type ExecFn } from '../core/exec.js';
 import { assertOnJobBranch, currentJobId } from '../core/job.js';
-import { acquireLock as defaultAcquireLock } from '../core/lock.js';
+import { acquireLock as defaultAcquireLock, readRunLock, RUN_NONCE } from '../core/lock.js';
 import { notify as defaultNotify } from '../core/notify.js';
 import { antonHome, jobDir as jobDirOf } from '../core/paths.js';
 import { getProject } from '../core/registry.js';
@@ -15,6 +15,8 @@ import { loadState, pause, saveState, transition, type JobState, type PauseReaso
 import {
   assertSlackDataOutsideMount,
   ensureImage,
+  findRunContainer,
+  type RunContainerBinding,
   MOUNTS_VERSION,
   startContainer as dockerStartContainer,
   stopContainer as dockerStopContainer,
@@ -40,7 +42,7 @@ export const ACTIVE_STAGES: readonly JobState['stage'][] = ['plan', 'baseline', 
 export type RunnerDeps = {
   publishMilestone?: Parameters<typeof publishJobMilestone>[2];
   acquireLock?: (repo: string) => Promise<() => Promise<void>>;
-  /** Start (or reuse) the job's container on the kit's image; returns its name. */
+  /** Inject the job container for tests; returns its name. */
   startContainer?: (slug: string, repo: string, kit: Kit) => Promise<string>;
   stopContainer?: (name: string) => Promise<void>;
   notify?: (title: string, message: string) => Promise<void>;
@@ -58,9 +60,8 @@ export type RunnerDeps = {
 };
 
 /**
- * Reuse a running `anton-<slug>` container when it runs the kit's image with the current mounts
- * (`anton.mounts` label); otherwise start a fresh one
- * (startContainer removes the old one first, e.g. a spec-session container on the fallback image).
+ * A bound runner creates a fresh container so Docker records the acquisition on it.
+ * Unbound callers may reuse a container with the requested image and current mount layout.
  */
 export async function startOrReuseContainer(
   slug: string,
@@ -68,12 +69,15 @@ export async function startOrReuseContainer(
   kit: Kit,
   exec: ExecFn = defaultExec,
   ensure: (kit: Kit, exec: ExecFn) => Promise<string> = ensureImage,
+  runner?: RunContainerBinding,
 ): Promise<string> {
   // Validate secrets before any docker call or API spend.
   const envFile = await secretsEnvFile(slug);
   await Promise.all([assertSlackDataOutsideMount(repo), assertSlackDataOutsideMount(join(antonHome(), 'plugins'))]);
   const name = containerName(slug);
   const image = await ensure(kit, exec);
+  // Only creation can establish ownership for a new acquisition.
+  if (runner) return dockerStartContainer(slug, repo, image, exec, { envFile, runner });
   const r = await exec('docker', ['inspect', '-f', '{{.State.Running}}', name]);
   if (r.exitCode === 0 && r.stdout.trim() === 'true') {
     const img = await exec('docker', ['inspect', '-f', '{{.Config.Image}}', name]);
@@ -187,7 +191,6 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
     }
   };
   const stopContainer = deps.stopContainer ?? ((n: string) => dockerStopContainer(n));
-  const startContainer = deps.startContainer ?? ((s: string, r: string, k: Kit) => startOrReuseContainer(s, r, k));
   const runPlan = deps.runPlan ?? defaultRunPlan;
   const runBaseline = deps.runBaseline ?? defaultRunBaseline;
   const runBuild = deps.runBuild ?? defaultRunBuild;
@@ -195,15 +198,23 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
   const runDeliver = deps.runDeliver ?? defaultRunDeliver;
 
   const { repoPath: repo } = await getProject(project);
-  const jobDir = jobDirOf(repo, await currentJobId(repo));
   const release = await (deps.acquireLock ?? defaultAcquireLock)(repo);
   let startedContainer = false;
+  let containerBinding: RunContainerBinding | undefined;
   /**
    * The end-of-run notification is sent only after the container is stopped and the lock released,
    * so a user acting on it (reject/resume) doesn't race this runner's shutdown.
    */
   let final: string | undefined;
   try {
+    const jobId = await currentJobId(repo);
+    const jobDir = jobDirOf(repo, jobId);
+    if (!deps.startContainer) {
+      const holder = await readRunLock(repo);
+      if (!holder?.nonce || holder.stopping || holder.pid !== process.pid || !RUN_NONCE.test(holder.nonce)
+        || !holder.nonce.startsWith(`${process.pid}.`)) throw new Error('The runner could not identify its run lock acquisition.');
+      containerBinding = { project, jobId, runNonce: holder.nonce };
+    }
     let state = await loadState(jobDir);
     const bench = state.bench !== undefined;
     if (!ACTIVE_STAGES.includes(state.stage)) {
@@ -221,7 +232,9 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
       // Before any container or spend: a listed plugin that is not installed fails here, not mid-stage.
       await writeRunRecord(repo, jobDir, await pluginsForJob(kitName), await activeLessonIds(kitName));
       startedContainer = true;
-      const container = await startContainer(project, repo, kit);
+      const container = deps.startContainer
+        ? await deps.startContainer(project, repo, kit)
+        : await startOrReuseContainer(project, repo, kit, defaultExec, ensureImage, containerBinding);
       secrets = await loadSecrets(project);
       const getPlan = async () => (plan ??= PlanSchema.parse(await readJson(join(jobDir, 'plan.json'))));
       const ctx = (stage: string): StageCtx => ({ project, repo, container, jobDir, state, stage, secrets, kit: kitName });
@@ -286,7 +299,12 @@ export async function runUnattended(project: string, deps: RunnerDeps = {}): Pro
     }
   } finally {
     try {
-      if (startedContainer) await stopContainer(containerName(project));
+      if (startedContainer) {
+        const id = containerBinding
+          ? await findRunContainer(containerBinding).catch(() => undefined)
+          : containerName(project);
+        if (id) await stopContainer(id);
+      }
     } finally {
       try {
         await release();

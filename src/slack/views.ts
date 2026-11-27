@@ -78,6 +78,49 @@ export function renderReview(target: ReviewTarget, data: ReviewData): SlackView 
   return { text, blocks };
 }
 
+export type ConfirmReviewData = {
+  description: string;
+  effects: string;
+  /** Already-redacted notes. Rendered verbatim in plain-text sections. */
+  notes?: string;
+  dangerous?: boolean;
+  hideConfirm?: boolean;
+  confirmToken: string;
+  cancelToken: string;
+  edit?: { token: string; label?: string };
+};
+
+/** Preview a pending operation. Each button value identifies its own server-side card binding. */
+export function renderConfirmReview(data: ConfirmReviewData): SlackView {
+  const summary = [data.description, data.effects]
+    .map((line) => displayText(line).replace(/[\uD800-\uDBFF]$/, ''))
+    .filter(Boolean);
+  const notices = [
+    ...(data.dangerous ? ["This can't be undone."] : []),
+    'This card expires in 30 minutes.',
+  ];
+  const lines = [...summary, ...(data.notes ? [`Notes: ${data.notes}`] : []), ...notices];
+  // Keep notes within the section limit without splitting a surrogate pair.
+  const blocks: SlackBlock[] = lines.flatMap((line) =>
+    (line.match(/[\s\S]{1,2900}(?![\uDC00-\uDFFF])/g) ?? []).map((text) => ({
+      type: 'section',
+      text: { type: 'plain_text', text, emoji: false },
+    })),
+  );
+  const buttons: ReviewButton[] = [];
+  if (!data.hideConfirm) buttons.push({ label: 'Confirm', token: data.confirmToken, style: data.dangerous ? 'danger' : 'primary' });
+  buttons.push({ label: 'Cancel', token: data.cancelToken });
+  if (data.edit) buttons.push({ label: data.edit.label ?? 'Edit', token: data.edit.token });
+  blocks.push(actions(buttons, 0));
+  // Leave room for both notices and the card pointer within Slack's 4,000-character fallback.
+  const fallbackLineLimit = 1900;
+  const fallback = summary.map((line) => line.length <= fallbackLineLimit
+    ? line
+    : `${line.slice(0, fallbackLineLimit - 1).replace(/[\uD800-\uDBFF]$/, '')}…`);
+  const text = [...fallback, ...notices, 'Full details are in the card.'].join('\n');
+  return { text, blocks };
+}
+
 export type ModalKind = 'reject' | 'spec-revise' | 'accept-risk' | 'lesson-edit' | 'resume';
 export type ModalMeta = { token: string; channelId: string; messageTs: string };
 export type ModalView = {

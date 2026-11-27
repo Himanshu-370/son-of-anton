@@ -43,6 +43,14 @@ describe('config budget', () => {
 });
 
 describe('invalid config', () => {
+  it('config projectsDir sets where a new project is created', async () => {
+    const root = join(process.env.ANTON_HOME!, 'elsewhere');
+    await writeFile(join(process.env.ANTON_HOME!, 'config.yaml'), `projectsDir: ${root}\n`);
+    const p = await createNewProject('A CLI that cleans Downloads');
+    expect(p.repoPath).toBe(join(root, p.name));
+    await stat(join(p.repoPath, '.git'));
+  });
+
   it('invalid config.yaml leaves no project directory behind', async () => {
     await writeFile(join(process.env.ANTON_HOME!, 'config.yaml'), 'bogus: 1\n');
     await expect(createNewProject('A CLI that cleans Downloads')).rejects.toThrow(/Invalid ~\/anton\/config\.yaml/);

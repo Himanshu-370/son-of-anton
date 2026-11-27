@@ -6,6 +6,7 @@ import { reconcileCheckpoints } from '../../slack/reconcile.js';
 import { attachCardMessage, dispatchSlackAction, prepareCardModal, type DispatchDeps } from '../../slack/actions.js';
 import { composeSlackMessage, remindPendingSpecs } from '../../slack/spec-session.js';
 import { collectRetros } from '../../retro/run.js';
+import { classifyIntent } from '../../slack/intent-router.js';
 import { createInboundHandler } from '../../slack/inbound.js';
 import { startSlackService } from '../../slack/service.js';
 import { createSlackRuntime } from '../../slack/transport.js';
@@ -59,7 +60,10 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
     // Spec turns (the PM in Docker) run here too, with the same effects as anton new and anton spec.
     const dispatchDeps: DispatchDeps = {
       config, home,
-      jobs: { preflight: d.preflight, spawnRun: d.spawnRun, stopContainer: d.stopContainer, retro: d.retro },
+      jobs: {
+        preflight: d.preflight, spawnRun: d.spawnRun, stopContainer: d.stopContainer, retro: d.retro, kill: d.kill, sleep: d.sleep,
+        findRunContainer: d.findRunContainer, removeRunContainer: d.removeRunContainer,
+      },
       spec: {
         home, preflight: d.preflight, ensureImage: d.ensureImage, startContainer: d.startContainer, stopContainer: d.stopContainer,
         runAgent: d.runAgent, ensureRepoMap: d.ensureRepoMap, listFiles: d.listFiles, readHistory: d.readHistory,
@@ -71,6 +75,8 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
         members: (channelId) => slackSetupApi.channelMembers(credentials.pm.botToken, channelId),
       },
       chat: { home },
+      classify: (input) => classifyIntent(input, { home }),
+      intentSecrets: { slackBot: credentials.pm.botToken, slackApp: credentials.pm.appToken },
     };
     const inbound = createInboundHandler({
       log: d.out,
@@ -78,6 +84,7 @@ export async function serveCommand(deps: CliDeps = {}): Promise<number> {
       prepareModal: (action) => prepareCardModal(action, dispatchDeps),
     });
     const runtime = createSlackRuntime(config, credentials, inbound);
+    dispatchDeps.postIntentThreadMessage = runtime.postIntentThreadMessage;
     let reconcileAt = 0;
     // Finished Retros queue their proposals here, so the coach can post lesson cards without the CLI.
     // Collecting reads submitted batches; it starts no new model call.

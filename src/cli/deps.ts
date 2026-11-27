@@ -13,6 +13,8 @@ import {
   ensureImage as dockerEnsureImage,
   preflight as dockerPreflight,
   startContainer as dockerStartContainer,
+  findRunContainer,
+  removeRunContainer,
   stopContainer as dockerStopContainer,
 } from '../docker/container.js';
 import { fallbackKit } from '../kits/fallback/index.js';
@@ -48,6 +50,8 @@ export type CliDeps = {
   spawnRun?: (name: string, jobDir: string) => void;
   kill?: (pid: number, signal: NodeJS.Signals | 0) => void;
   sleep?: (ms: number) => Promise<void>;
+  findRunContainer?: typeof findRunContainer;
+  removeRunContainer?: (id: string) => Promise<void>;
   runUnattended?: (project: string) => Promise<void>;
   /** Install a SIGINT handler; returns a function that removes it. */
   onSigint?: (handler: () => Promise<void> | void) => () => void;
@@ -135,6 +139,8 @@ export function resolveDeps(d: CliDeps = {}): Resolved {
     spawnRun: d.spawnRun ?? defaultSpawnRun,
     kill: d.kill ?? ((pid, sig) => { process.kill(pid, sig); }),
     sleep: d.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms))),
+    findRunContainer: d.findRunContainer ?? ((binding) => findRunContainer(binding, d.exec)),
+    removeRunContainer: d.removeRunContainer ?? ((id) => removeRunContainer(id, d.exec)),
     runUnattended: d.runUnattended ?? ((p) => defaultRunUnattended(p)),
     onSigint: d.onSigint ?? defaultOnSigint,
     exit: d.exit ?? ((code) => { process.exit(code); }),

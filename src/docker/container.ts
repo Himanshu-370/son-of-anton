@@ -143,13 +143,35 @@ export async function assertSlackDataOutsideMount(path: string, home = antonHome
   }
 }
 
+export type RunContainerBinding = { project: string; jobId: string; runNonce: string };
+const RUNNER_LABEL = 'anton.runner';
+const runnerLabelValue = ({ project, jobId, runNonce }: RunContainerBinding) => JSON.stringify([project, jobId, runNonce]);
+export const CONTAINER_ID = /^[a-f0-9]{64}$/;
+
+const cleanupExec: ExecFn = async (cmd, args) => {
+  const result = await execa(cmd, args, { reject: false, timeout: 10_000 });
+  return { exitCode: result.exitCode ?? 1, stdout: String(result.stdout ?? ''), stderr: String(result.stderr ?? '') };
+};
+
+/** Resolve a container ID only when Docker reports the original runner's creation label on that same object. */
+export async function findRunContainer(binding: RunContainerBinding, exec: ExecFn = cleanupExec): Promise<string | undefined> {
+  const result = await exec('docker', ['container', 'inspect', '--format', `{{.Id}} {{index .Config.Labels "${RUNNER_LABEL}"}}`, `anton-${binding.project}`]);
+  if (result.exitCode !== 0) {
+    if (/No such (?:object|container):/i.test(result.stderr)) return undefined;
+    throw new Error('Docker could not inspect the runner container.');
+  }
+  const [id, ...label] = result.stdout.trim().split(' ');
+  if (id && CONTAINER_ID.test(id) && label.join(' ') === runnerLabelValue(binding)) return id;
+  return undefined;
+}
+
 /** Run a kit container: the repo at /workspace and `<home>/plugins` read-only at /opt/anton/plugins. */
 export async function startContainer(
   slug: string,
   repoPath: string,
   image: string,
   exec: ExecFn = defaultExec,
-  opts: { envFile?: string; home?: string } = {},
+  opts: { envFile?: string; home?: string; runner?: RunContainerBinding } = {},
 ): Promise<string> {
   const name = `anton-${slug}`;
   // Created first so Docker does not create it (root-owned) for the bind mount.
@@ -162,6 +184,7 @@ export async function startContainer(
     'run', '-d', '--name', name,
     // Bumped when the mount set changes; the runner replaces a running container without it.
     '--label', `anton.mounts=${MOUNTS_VERSION}`,
+    ...(opts.runner ? ['--label', `${RUNNER_LABEL}=${runnerLabelValue(opts.runner)}`] : []),
     '-v', `${repoPath}:/workspace`,
     '-v', `${plugins}:${CONTAINER_PLUGINS}:ro`,
     '-w', '/workspace',
@@ -192,6 +215,12 @@ export async function removeContainer(name: string, exec: ExecFn = defaultExec):
   if (result.exitCode !== 0 && !/No such container:/i.test(result.stderr)) {
     throw new Error(`Docker could not remove ${name}: ${result.stderr.trim() || `exit ${result.exitCode}`}`);
   }
+}
+
+/** A stopped runner's verified ID is the only accepted cleanup target. */
+export async function removeRunContainer(id: string, exec: ExecFn = cleanupExec): Promise<void> {
+  if (!CONTAINER_ID.test(id)) throw new Error('Runner cleanup requires a full Docker container ID.');
+  return removeContainer(id, exec);
 }
 
 export async function stopContainer(name: string, exec: ExecFn = defaultExec): Promise<void> {

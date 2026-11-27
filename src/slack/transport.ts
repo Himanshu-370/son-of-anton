@@ -19,6 +19,7 @@ const webOptions = {
   rejectRateLimitedCalls: true,
 };
 const uploadReceipt = z.object({ files: z.array(z.object({ files: z.array(z.object({ id: z.string() })) })) });
+const slackTimestamp = /^\d{1,16}\.\d{1,6}$/;
 const unavailable = { status: 'unavailable' } as const;
 const rejectedWrite = new Set([
   'account_inactive', 'channel_not_found', 'invalid_arguments', 'invalid_auth', 'invalid_name',
@@ -135,7 +136,7 @@ export function createSlackTransport(config: SlackConfig, deps: TransportDeps): 
     },
 
     async confirmParent(request, ts) {
-      if (request.threadTs !== undefined || request.role !== 'pm' || !/^\d{1,16}\.\d{1,6}$/.test(ts)) return false;
+      if (request.threadTs !== undefined || request.role !== 'pm' || !slackTimestamp.test(ts)) return false;
       const client = await verified(request);
       const { messages } = await client.conversations.history({
         channel: request.channelId, oldest: ts, latest: ts, inclusive: true, limit: 1, include_all_metadata: true,
@@ -240,6 +241,26 @@ export function createSlackRuntime(config: SlackConfig, credentials: SlackCreden
 
   return {
     open,
+    async postIntentThreadMessage(input: {
+      channelId: string;
+      threadTs: string;
+      text: string;
+      blocks?: unknown[];
+    }): Promise<{ ts: string }> {
+      const { ts } = await clients.get('pm')!.chat.postMessage({
+        channel: input.channelId,
+        thread_ts: input.threadTs,
+        text: input.text,
+        ...(input.blocks?.length ? { blocks: input.blocks as never } : {}),
+        mrkdwn: false,
+        unfurl_links: false,
+        unfurl_media: false,
+      });
+      if (typeof ts !== 'string' || !slackTimestamp.test(ts)) {
+        throw new Error('Slack intent reply returned an invalid timestamp.');
+      }
+      return { ts };
+    },
     transport(signal: AbortSignal): SlackTransport {
       return createSlackTransport(config, {
         client: (role) => clients.get(role)!,

@@ -8,6 +8,7 @@ import {
   PreflightError,
   ensureImage,
   startContainer,
+  findRunContainer,
   stopContainer,
   runIn,
 } from '../../src/docker/container.js';
@@ -233,6 +234,25 @@ describe('startContainer', () => {
     const { exec } = fake((c) => (c.args[0] === 'run' ? { exitCode: 125, stderr: 'nope' } : {}));
     await expect(startContainer('s1', '/repo', 'img', exec)).rejects.toThrow('nope');
   });
+});
+
+describe('findRunContainer', () => {
+  const id = 'a'.repeat(64);
+  const binding = { project: 'p', jobId: '1-init', runNonce: '42.00000000-0000-4000-8000-000000000001' };
+  it('uses one Docker snapshot to return the ID for the exact runner', async () => {
+    const { exec, calls } = fake(() => ({ stdout: `${id} ${JSON.stringify(Object.values(binding))}\n` }));
+    await expect(findRunContainer(binding, exec)).resolves.toBe(id);
+    expect(calls).toEqual([{
+      cmd: 'docker', args: ['container', 'inspect', '--format', '{{.Id}} {{index .Config.Labels "anton.runner"}}', 'anton-p'],
+    }]);
+  });
+
+  it.each(['<no value>', '["p","2-change","nonce"]', '["p","1-init","other-acquisition"]'])(
+    'ignores a same-name container with label %s', async (label) => {
+      const { exec } = fake(() => ({ stdout: `${id} ${label}\n` }));
+      await expect(findRunContainer(binding, exec)).resolves.toBeUndefined();
+    },
+  );
 });
 
 describe('stopContainer / runIn', () => {

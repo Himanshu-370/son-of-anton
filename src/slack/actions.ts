@@ -1,23 +1,30 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { z } from 'zod';
 import {
-  abandonJob, acceptJobRisk, approveJob, isCurrent, loadJob, rejectJob, resumeJob, targetOf,
-  type ActionOutcome, type ActionTarget, type JobActionDeps,
+  abandonJob, acceptJobRisk, approveJob, checkpointRevision, isCurrent, loadJob, rejectJob, resumeJob, stopJob, targetOf,
+  type ActionOutcome, type ActionTarget, type JobActionDeps, type StopProcessDeps,
 } from '../core/job-actions.js';
-import { waitForLockFile } from '../core/lock.js';
+import { RUN_NONCE, waitForLockFile } from '../core/lock.js';
+import { budgetSettings, loadAntonConfig } from '../core/anton-config.js';
+import { stageGroup, usd } from '../core/budget.js';
+import { NoJobs } from '../core/job.js';
+import { loadSecrets } from '../core/secrets.js';
 import { antonHome } from '../core/paths.js';
 import { listProjects } from '../core/registry.js';
 import { STAGES } from '../core/state.js';
 import { decideProposal, readProposals, proposalRevision } from '../lessons/proposals.js';
 import {
-  appIdSchema, channelIdSchema, readSlackFile, slackDirectory, SLACK_ROLES, writeSlackFile, type SlackConfig, type SlackRole,
+  appIdSchema, teamIdSchema, userIdSchema, readSlackFile, slackDirectory, SLACK_ROLES, writeSlackFile, type SlackConfig, type SlackRole,
 } from './config.js';
 import { jobId as jobIdSchema, projectId as projectIdSchema } from './events.js';
 import { sanitizeSlackText } from './inbound.js';
 import type { SpecRoundDeps } from '../core/spec-continuation.js';
-import { cardModal, type ModalKind, type ModalView } from './views.js';
-import { answerQuestion, statusLines, type ChatDeps } from './chat.js';
+import { cardModal, renderConfirmReview, renderReview, type ModalKind, type ModalView } from './views.js';
+import { claimIntentThreadReply, completeIntentThreadClarification, registerIntentThread, updateIntentThreadProject } from './intent-threads.js';
+import type { classifyIntent, IntentProjectFact, IntentUnavailableReason } from './intent-router.js';
+import type { Intent, IntentResolution } from './intents.js';
+import { answerQuestion, scrub, statusLines, type ChatDeps } from './chat.js';
 
 /*
  * The Slack side of the shared job actions. Every input is a typed, allowlisted operation. Mutations need
@@ -34,11 +41,6 @@ export type CardInput = { notes?: string; reason?: string; text?: string; budget
 export type SlackAction =
   | { via: 'command'; key: string; actor: SlackActor; source: SlackSource; text: string }
   | { via: 'card'; key: string; actor: SlackActor; source: SlackSource; token: string; input?: CardInput; triggerId?: string }
-  /**
-   * Plain messages are never orders, with two explicit exceptions for the owner: answers to waiting spec
-   * questions in the job thread, and `new …` / `change <project> …` in a DM to the PM. Mentions of a role
-   * bot, and DMs to one, are questions (role Q&A): answered from the records, never acted on.
-   */
   | {
     via: 'message'; key: string; actor: SlackActor; source: SlackSource; text: string; eventType?: 'message' | 'app_mention';
     /** User and bot IDs mentioned in the raw text, in order. */
@@ -47,10 +49,11 @@ export type SlackAction =
 
 export type ActionResultStatus =
   | 'done' | 'duplicate' | 'in-progress' | 'denied' | 'ignored' | 'stale' | 'refused' | 'unsupported' | 'failed';
-export type ActionResult = { status: ActionResultStatus; lines: string[] };
+/** close: the clicked card is finished, so Slack replaces its buttons with the outcome. */
+export type ActionResult = { status: ActionResultStatus; lines: string[]; close?: boolean };
 
 export const CARD_KINDS = [
-  'approve', 'reject', 'resume', 'abandon', 'accept-risk', 'spec-revise', 'lesson-accept', 'lesson-edit', 'lesson-reject',
+  'approve', 'reject', 'resume', 'abandon', 'accept-risk', 'spec-revise', 'lesson-accept', 'lesson-edit', 'lesson-reject', 'confirmation',
 ] as const;
 /** Cards whose click opens a form; the submission carries the input. */
 const MODAL_KINDS: readonly CardKind[] = ['reject', 'spec-revise', 'accept-risk', 'lesson-edit', 'resume'];
@@ -65,6 +68,7 @@ export type Operation =
   | { kind: 'reject'; target: ActionTarget; notes: string }
   | { kind: 'resume'; target: ActionTarget; budget?: number; acceptAsIs?: boolean }
   | { kind: 'abandon'; target: ActionTarget }
+  | { kind: 'stop'; target: ActionTarget }
   | { kind: 'accept-risk'; target: ActionTarget; findingId: string; reason: string }
   | { kind: 'lesson'; decision: 'accept' | 'reject'; proposal: { id: string; revision: string }; text?: string }
   | { kind: 'start'; mode: 'new' | 'change'; project?: string; description: string }
@@ -85,18 +89,45 @@ const MAX_RECORDS = 5000;
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const ts = z.string().regex(/^\d{1,16}\.\d{1,6}$/);
 const revision = z.string().regex(/^(?:[a-f0-9]{64}|delivered-[1-9]\d{0,14}|paused-\d{1,15})$/);
-const targetSchema = z.strictObject({ project: projectIdSchema, jobId: jobIdSchema, stage: z.enum(STAGES), revision: revision.optional() });
+const targetSchema = z.strictObject({ project: projectIdSchema, jobId: jobIdSchema, stage: z.enum(STAGES), revision: revision.optional(), runNonce: z.string().regex(RUN_NONCE).optional() });
+const positive = z.number().positive();
+const notesField = z.string().min(1).max(NOTES_LIMIT);
+const operationSchema = z.union([
+  z.strictObject({ kind: z.literal('start'), mode: z.literal('new'), description: z.string().min(1).max(DESCRIPTION_LIMIT) }),
+  z.strictObject({ kind: z.literal('start'), mode: z.literal('change'), project: projectIdSchema, description: z.string().min(1).max(DESCRIPTION_LIMIT) }),
+  z.strictObject({ kind: z.enum(['approve', 'abandon']), target: targetSchema }),
+  z.strictObject({ kind: z.literal('spec-retry'), target: targetSchema }),
+  z.strictObject({ kind: z.literal('stop'), target: targetSchema.extend({ runNonce: z.string().regex(RUN_NONCE) }) }),
+  z.strictObject({ kind: z.enum(['reject', 'spec-revise']), target: targetSchema, notes: notesField }),
+  z.strictObject({ kind: z.literal('resume'), target: targetSchema, budget: positive.optional(), acceptAsIs: z.boolean().optional() }),
+  z.strictObject({ kind: z.literal('accept-risk'), target: targetSchema, findingId: z.string().regex(/^SEC-[A-Za-z0-9-]{1,40}$/), reason: z.string().min(1).max(REASON_LIMIT) }),
+  z.strictObject({ kind: z.literal('spec-answer'), target: targetSchema, round: z.number().int().positive(), answers: z.array(z.string().min(1).max(ANSWER_LIMIT)).min(1).max(20) }),
+]);
+const confirmationPayload = z.strictObject({
+  operation: operationSchema,
+  startTarget: targetSchema.optional(),
+  specTurn: digest.optional(),
+  startBudget: positive.optional(),
+  threadTs: ts,
+});
+type ConfirmationPayload = z.infer<typeof confirmationPayload>;
+const cardToken = z.string().regex(/^[a-f0-9]{32}$/);
 const proposalRef = z.strictObject({ id: z.string().min(1).max(200), revision: digest });
 const cardSchema = z.strictObject({
   kind: z.enum(CARD_KINDS),
   appId: appIdSchema,
   role: z.enum(SLACK_ROLES),
-  channelId: channelIdSchema,
+  channelId: z.string().regex(/^[CDG][A-Z0-9]+$/),
   messageTs: ts.optional(),
   target: targetSchema.optional(),
   findingId: z.string().regex(/^SEC-[A-Za-z0-9-]{1,40}$/).optional(),
   proposal: proposalRef.optional(),
   createdAt: z.number(),
+  confirmation: z.strictObject({
+    teamId: teamIdSchema, ownerId: userIdSchema, primary: cardToken,
+    button: z.enum(['confirm', 'cancel', 'edit', 'accept-as-is']), expiresAt: z.number(),
+    payload: confirmationPayload.optional(),
+  }).optional(),
   /** Set once an action from this card is done: a card acts at most once. */
   usedAt: z.number().optional(),
 });
@@ -166,6 +197,7 @@ export async function registerActionCard(card: NewCard, opts: { config: SlackCon
   const token = randomBytes(16).toString('hex');
   const binding = cardSchema.parse({ ...card, appId: opts.config.roles[card.role].appId, createdAt: Date.now() });
   const jobKind = !card.kind.startsWith('lesson-');
+  if (card.kind === 'confirmation') throw new Error('Confirmations must be registered together.');
   if (jobKind ? !binding.target : !binding.proposal) throw new Error('A card needs its target.');
   if (card.kind === 'accept-risk' && !binding.findingId) throw new Error('A risk card needs its finding.');
   await withStore(opts.home ?? antonHome(), async (store) => {
@@ -190,7 +222,7 @@ export interface DispatchDeps {
   config: SlackConfig;
   home?: string;
   /** The job action effects (spawn, Docker, Retro); output is collected per action. */
-  jobs: Omit<JobActionDeps, 'out' | 'err'>;
+  jobs: Omit<JobActionDeps, 'out' | 'err'> & StopProcessDeps;
   /** The project whose recorded channel ID this is. Defaults to the outbox's channel map. */
   projectForChannel?: (channelId: string) => Promise<string | undefined>;
   /** The job whose thread this is. Defaults to the outbox's thread map. */
@@ -206,6 +238,10 @@ export interface DispatchDeps {
   access?: SlackAccess;
   /** Role Q&A effects (the model client and the chat budget). */
   chat?: ChatDeps;
+  classify?: (input: Parameters<typeof classifyIntent>[0]) => ReturnType<typeof classifyIntent>;
+  postIntentThreadMessage?: (message: { channelId: string; threadTs: string; text: string; blocks?: unknown[] }) => Promise<{ ts: string }>;
+  intentNow?: () => number;
+  intentSecrets?: Record<string, string>;
 }
 
 export type ChannelFacts = { isPrivate: boolean; isShared: boolean; isArchived: boolean; teamId?: string };
@@ -223,6 +259,8 @@ export type ModalDecision =
 
 const result = (status: ActionResultStatus, ...lines: string[]): ActionResult => ({ status, lines });
 const DENIED = result('denied', 'Only the Anton owner can do that here.');
+const CONFIRM_STALE = result('stale', 'This is out of date. Nothing was changed. Ask again.');
+const EXPIRED = result('stale', 'That confirmation expired. Ask again.');
 const USED = result('stale', 'That card was already used. Nothing was changed.');
 
 function authorized(a: SlackAction, config: SlackConfig): boolean {
@@ -240,6 +278,10 @@ export async function dispatchSlackAction(input: SlackAction, deps: DispatchDeps
   try {
     const home = deps.home ?? antonHome();
     if (input.via === 'message') {
+      if (authorized(input, deps.config)) {
+        const routed = await ownerIntentRoute(input, deps, home);
+        if (routed) return routed;
+      }
       const asked = await questionRoute(input, deps, home);
       if (asked) return asked;
       // Anyone else's message is discussion, never an answer or an order.
@@ -254,23 +296,51 @@ export async function dispatchSlackAction(input: SlackAction, deps: DispatchDeps
       if (input.via === 'command') return (await memberStatus(input, deps)) ?? DENIED;
       return DENIED;
     }
-    const resolved = input.via === 'card' ? await cardOperation(input, home) : await commandOperation(input, deps);
+    let resolved: { op: Operation } | ActionResult;
+    if (input.via === 'card') {
+      const cards = await readActionCards(input, home);
+      const card = cards[input.token];
+      if (!matchesCard(input, card)) return DENIED;
+      if (card.kind === 'confirmation') return closing(card.kind, await dispatchConfirmation(input, cards, deps, home));
+      const op = cardOperation(input, card);
+      if ('status' in op) return closing(card.kind, op);
+      if (op.op.kind === 'status') return await status(op.op.project);
+      return closing(card.kind, await claimAndRun(input, op.op, deps, home));
+    } else {
+      resolved = await commandOperation(input, deps);
+    }
     if ('status' in resolved) return resolved;
     const { op } = resolved;
     if (op.kind === 'status') return await status(op.project);
     return await claimAndRun(input, op, deps, home);
   } catch (e) {
-    return result('failed', `That did not work: ${clean(e instanceof Error ? e.message : String(e))}`);
+    return result('failed', `That did not work: ${safePreviewText(e instanceof Error ? e.message : String(e), deps.intentSecrets ?? {}, 1000)}`);
   }
 }
 
-async function boundCard(a: Extract<SlackAction, { via: 'card' }>, home: string): Promise<CardBinding | undefined> {
-  if (!/^[a-f0-9]{32}$/.test(a.token)) return undefined;
-  const card = (await readSlackFile(home, 'actions.json', storeSchema))?.cards[a.token];
-  // Bound to the app, channel and message the card was posted as.
-  if (!card || card.appId !== a.source.appId || card.role !== a.source.role || card.channelId !== a.source.channelId
-    || card.messageTs === undefined || card.messageTs !== a.source.messageTs) return undefined;
-  return card;
+type CardAction = Extract<SlackAction, { via: 'card' }>;
+
+/**
+ * Mark a card click whose card can no longer act. A confirmation is single-use, so any final answer closes it.
+ * A review card closes once decided (or found stale or already decided). Lesson cards hold several proposals in
+ * one message, so they stay open.
+ */
+function closing(kind: CardKind, r: ActionResult): ActionResult {
+  if (kind.startsWith('lesson-')) return r;
+  const ends: ActionResultStatus[] = kind === 'confirmation'
+    ? ['done', 'duplicate', 'stale', 'refused', 'failed'] : ['done', 'duplicate', 'stale'];
+  return ends.includes(r.status) ? { ...r, close: true } : r;
+}
+type MessageAction = Extract<SlackAction, { via: 'message' }>;
+
+function matchesCard(a: CardAction, card: CardBinding | undefined): card is CardBinding {
+  return card !== undefined && card.appId === a.source.appId && card.role === a.source.role
+    && card.channelId === a.source.channelId && card.messageTs !== undefined && card.messageTs === a.source.messageTs;
+}
+
+async function readActionCards(a: CardAction, home: string): Promise<Store['cards']> {
+  if (!cardToken.safeParse(a.token).success) return {};
+  return (await readSlackFile(home, 'actions.json', storeSchema))?.cards ?? {};
 }
 
 /**
@@ -280,9 +350,20 @@ async function boundCard(a: Extract<SlackAction, { via: 'card' }>, home: string)
 export async function prepareCardModal(a: Extract<SlackAction, { via: 'card' }>, deps: DispatchDeps): Promise<ModalDecision> {
   if (!authorized(a, deps.config)) return { kind: 'denied', result: DENIED };
   const home = deps.home ?? antonHome();
-  const card = await boundCard(a, home);
-  if (!card || !a.source.messageTs) return { kind: 'denied', result: DENIED };
-  if (card.usedAt !== undefined) return { kind: 'refused', result: USED };
+  const cards = await readActionCards(a, home);
+  const card = cards[a.token];
+  if (!matchesCard(a, card) || !a.source.messageTs) return { kind: 'denied', result: DENIED };
+  if (card.kind === 'confirmation') {
+    const bound = readConfirmation(a, cards, (deps.intentNow ?? Date.now)());
+    if ('status' in bound) return { kind: 'refused', result: closing(card.kind, bound) };
+    if (bound.button !== 'edit' || a.input) return { kind: 'direct' };
+    const edit = confirmationEdit(bound.payload.operation);
+    if (!edit) return { kind: 'refused', result: DENIED };
+    const { kind, initial } = edit;
+    const view = cardModal(kind, { token: a.token, channelId: card.channelId, messageTs: a.source.messageTs }, initial);
+    return { kind: 'modal', view: { ...view, title: { type: 'plain_text', text: 'Edit confirmation' }, submit: { type: 'plain_text', text: 'Review' } } };
+  }
+  if (card.usedAt !== undefined) return { kind: 'refused', result: closing(card.kind, USED) };
   if (!MODAL_KINDS.includes(card.kind) || a.input) return { kind: 'direct' };
   let initial: string | undefined;
   if (card.kind === 'lesson-edit') {
@@ -293,9 +374,7 @@ export async function prepareCardModal(a: Extract<SlackAction, { via: 'card' }>,
   return { kind: 'modal', view: cardModal(card.kind as ModalKind, { token: a.token, channelId: card.channelId, messageTs: a.source.messageTs }, initial) };
 }
 
-async function cardOperation(a: Extract<SlackAction, { via: 'card' }>, home: string): Promise<{ op: Operation } | ActionResult> {
-  const card = await boundCard(a, home);
-  if (!card) return DENIED;
+function cardOperation(a: CardAction, card: CardBinding): { op: Operation } | ActionResult {
   const input = a.input ?? {};
   if (card.kind === 'lesson-accept' || card.kind === 'lesson-reject') {
     return { op: { kind: 'lesson', decision: card.kind === 'lesson-accept' ? 'accept' : 'reject', proposal: card.proposal! } };
@@ -306,6 +385,7 @@ async function cardOperation(a: Extract<SlackAction, { via: 'card' }>, home: str
   }
   const target = card.target!;
   switch (card.kind) {
+    case 'confirmation': return DENIED;
     case 'approve': return { op: { kind: 'approve', target } };
     case 'abandon': return { op: { kind: 'abandon', target } };
     case 'reject': {
@@ -328,10 +408,266 @@ async function cardOperation(a: Extract<SlackAction, { via: 'card' }>, home: str
   }
 }
 
+type BoundConfirmation = {
+  card: CardBinding;
+  primary: string;
+  expiresAt: number;
+  button: NonNullable<CardBinding['confirmation']>['button'];
+  payload: ConfirmationPayload;
+};
+
+function readConfirmation(a: CardAction, cards: Store['cards'], now: number): BoundConfirmation | ActionResult {
+  const clicked = cards[a.token];
+  const ref = clicked?.confirmation;
+  if (!matchesCard(a, clicked) || clicked.kind !== 'confirmation' || !ref
+    || ref.teamId !== a.actor.teamId || ref.ownerId !== a.actor.userId) return DENIED;
+  const card = cards[ref.primary];
+  const main = card?.confirmation;
+  if (!matchesCard(a, card) || card.kind !== 'confirmation' || !main?.payload || main.button !== 'confirm'
+    || main.primary !== ref.primary || main.teamId !== ref.teamId || main.ownerId !== ref.ownerId) return DENIED;
+  if (card.usedAt !== undefined) return USED;
+  if (now >= main.expiresAt) return EXPIRED;
+  return { card, primary: ref.primary, expiresAt: main.expiresAt, button: ref.button, payload: main.payload };
+}
+
+function confirmationEdit(op: ConfirmationPayload['operation']): { kind: ModalKind; initial?: string; label?: string } | undefined {
+  switch (op.kind) {
+    case 'reject':
+    case 'spec-revise': return { kind: op.kind, initial: op.notes };
+    case 'accept-risk': return { kind: op.kind, initial: op.reason };
+    case 'resume': return { kind: op.kind, initial: op.budget?.toString(), label: 'Change budget' };
+  }
+}
+
+async function dispatchConfirmation(a: CardAction, cards: Store['cards'], deps: DispatchDeps, home: string): Promise<ActionResult> {
+  const now = deps.intentNow ?? Date.now;
+  const bound = readConfirmation(a, cards, now());
+  if ('status' in bound) return bound;
+  const { payload, button } = bound;
+  if (button === 'confirm') {
+    if (a.input) return DENIED;
+    return claimAndRun(a, payload.operation, deps, home, bound);
+  }
+
+  let updated: ConfirmationPayload | undefined;
+  const op = payload.operation;
+  if (button === 'edit') {
+    if (!a.input) return result('refused', 'Open the edit form first.');
+    if (op.kind === 'resume') {
+      const budget = a.input.budgetUsd;
+      if (budget !== undefined && !positive.safeParse(budget).success) return result('refused', 'The budget must be a positive number of USD.');
+      if (budget !== undefined) {
+        const job = await currentJob(op.target.project);
+        if (!job || budget <= job.state.spentUsd) return result('refused', 'The new budget must exceed the amount already spent.');
+      }
+      updated = { ...payload, operation: { ...op, budget } };
+    } else if (op.kind === 'reject' || op.kind === 'spec-revise' || op.kind === 'accept-risk') {
+      const secrets = await previewSecrets(deps, op.target.project);
+      const notes = safePreviewText(op.kind === 'accept-risk' ? a.input.reason : a.input.notes, secrets,
+        op.kind === 'accept-risk' ? REASON_LIMIT : NOTES_LIMIT);
+      if (!notes) return result('refused', 'Add the requested text.');
+      updated = { ...payload, operation: op.kind === 'accept-risk' ? { ...op, reason: notes } : { ...op, notes } };
+    } else return DENIED;
+  } else if (button === 'accept-as-is') {
+    if (a.input || op.kind !== 'resume') return DENIED;
+    updated = { ...payload, operation: { ...op, acceptAsIs: true } };
+  } else if (a.input) return DENIED;
+
+  const consumed = await withStore<ActionResult | undefined>(home, async (current) => {
+    const fresh = readConfirmation(a, current.cards, now());
+    if ('status' in fresh) return { value: fresh, write: false };
+    fresh.card.usedAt = now();
+    return { value: undefined, write: true };
+  });
+  if (consumed) return consumed;
+  if (!updated) return result('done', 'Cancelled. Nothing was changed.');
+  return postConfirmation(a, updated, deps, home);
+}
+
+async function currentJob(project: string) {
+  try {
+    return await loadJob(project, { allowBench: true });
+  } catch (e) {
+    if (e instanceof NoJobs) return undefined;
+    throw e;
+  }
+}
+
+async function specTurnDigest(project: string, jobId: string, home: string): Promise<string | undefined> {
+  const { readSpecContinuation, specContinuationDigest } = await import('../core/spec-continuation.js');
+  const turn = await readSpecContinuation(project, jobId, home);
+  return turn && specContinuationDigest(turn);
+}
+
+async function confirmationCurrent(payload: ConfirmationPayload, deps: DispatchDeps, home: string): Promise<boolean> {
+  const op = payload.operation;
+  const target = 'target' in op ? op.target : payload.startTarget;
+  if (target && !await isCurrent(target, deps.jobs.listTags)) return false;
+  if (op.kind === 'start') {
+    if (op.mode === 'change' && !target && await currentJob(op.project)) return false;
+    return payload.startBudget !== undefined;
+  }
+  if (op.kind === 'spec-answer' || op.kind === 'spec-retry') {
+    return !!payload.specTurn && payload.specTurn === await specTurnDigest(op.target.project, op.target.jobId, home);
+  }
+  return true;
+}
+
+async function runConfirmed(confirmation: { payload: ConfirmationPayload; expiresAt: number }, deps: DispatchDeps, home: string): Promise<ActionResult> {
+  const { payload, expiresAt } = confirmation;
+  const { operation: op } = payload;
+  const now = deps.intentNow ?? Date.now;
+  if (now() >= expiresAt) return EXPIRED;
+  if (deps.spec && op.kind === 'start') {
+    const { startSlackJob } = await import('./spec-session.js');
+    if (payload.startBudget === undefined) return CONFIRM_STALE;
+    return startSlackJob(op, deps.spec, { budgetUsd: payload.startBudget, target: payload.startTarget, expiresAt, now });
+  }
+  if (deps.spec && (op.kind === 'spec-answer' || op.kind === 'spec-retry')) {
+    if (!payload.specTurn) return CONFIRM_STALE;
+    const { retrySlackSpec, submitSpecAnswers } = await import('./spec-session.js');
+    const specDeps = { ...deps.spec, now };
+    const claim = { digest: payload.specTurn, expiresAt };
+    return op.kind === 'spec-retry'
+      ? retrySlackSpec(op.target, specDeps, claim)
+      : submitSpecAnswers({ ...op.target, round: op.round }, op.answers, specDeps, claim);
+  }
+  if (!await confirmationCurrent(payload, deps, home).catch(() => false)) return CONFIRM_STALE;
+  if (now() >= expiresAt) return EXPIRED;
+  return run(op, deps, home);
+}
+
+async function previewSecrets(deps: DispatchDeps, project?: string): Promise<Record<string, string>> {
+  return {
+    ...(process.env.ANTHROPIC_API_KEY ? { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY } : {}),
+    ...deps.intentSecrets,
+    ...(project ? await loadSecrets(project) : {}),
+  };
+}
+
+function safePreviewText(value: unknown, secrets: Record<string, string>, limit: number): string {
+  return sanitizeSlackText(scrub(typeof value === 'string' ? value : '', secrets), limit);
+}
+
+const CONFIRM_MS = 30 * 60_000;
+const CONFIRM_LABELS = {
+  approve: 'Approve', reject: 'Reject the delivery and request changes for', 'spec-revise': 'Request spec changes for',
+  'spec-answer': 'Submit spec answers for', 'spec-retry': 'Retry the interrupted PM turn for',
+  resume: 'Resume', stop: 'Stop the runner and pause', abandon: 'Permanently abandon', 'accept-risk': 'Accept a risk for',
+};
+
+async function postConfirmation(
+  a: MessageAction | CardAction, payload: ConfirmationPayload, deps: DispatchDeps, home: string, fallback?: string, onPosted?: () => Promise<void>,
+): Promise<ActionResult> {
+  if (!deps.postIntentThreadMessage) return result('unsupported', 'Confirmation cards are available in anton serve.');
+  if (!await confirmationCurrent(payload, deps, home).catch(() => false)) return CONFIRM_STALE;
+
+  const op = payload.operation;
+  const target = 'target' in op ? op.target : payload.startTarget;
+  const job = target && await currentJob(target.project);
+  const left = job ? Math.max(0, job.state.budgetUsd - job.state.spentUsd) : 0;
+  const spending = `Future work uses the current budget (${usd(left)} left).`;
+  let description: string;
+  let effects: string;
+  let notes: string | undefined;
+  let offerAccept = false;
+  let needsBudget = false;
+  if (op.kind === 'start') {
+    description = op.mode === 'new' ? 'Start a new project.' : `Start a change for ${op.project}${target ? ` after job ${target.jobId}` : ''}.`;
+    effects = `The PM starts the spec with a ${usd(payload.startBudget!)} job budget.`;
+    notes = op.description;
+  } else {
+    const checkpoint = op.target.stage === 'awaiting_spec_approval' ? 'spec review'
+      : op.target.stage === 'awaiting_final_review' ? 'final review' : op.target.stage;
+    const revision = op.target.revision?.startsWith('delivered-') ? `, ${op.target.revision}` : '';
+    const verb = op.kind === 'approve' ? `Approve the ${checkpoint} for` : CONFIRM_LABELS[op.kind];
+    description = `${verb} ${op.target.project} (job ${op.target.jobId}, ${checkpoint}${revision}).`;
+    effects = spending;
+    switch (op.kind) {
+      case 'approve':
+        effects = op.target.stage === 'awaiting_spec_approval' ? `Start planning. ${spending}` : 'Accept the final delivery and run the Retrospective. The Retrospective can spend from the remaining job budget and may be skipped if funds are insufficient.';
+        break;
+      case 'reject': effects = `Send the delivery back for rework. ${spending}`; notes = op.notes; break;
+      case 'spec-revise': effects = `Ask the PM to revise the spec. ${spending}`; notes = op.notes; break;
+      case 'spec-answer': notes = op.answers.map((answer, i) => `${i + 1}. ${answer}`).join('\n'); break;
+      case 'resume':
+        if (!job) return CONFIRM_STALE;
+        if (op.budget !== undefined && op.budget <= job.state.spentUsd) return result('refused', 'The new budget must exceed the amount already spent.');
+        offerAccept = !op.acceptAsIs && job.state.stage === 'paused' && (job.state.pausedFrom === 'build' || job.state.pausedFrom === 'verify');
+        needsBudget = job.state.stage === 'paused' && op.budget === undefined && !op.acceptAsIs
+          && (job.state.pauseReason === 'budget_cap'
+            || (job.state.pauseReason === 'allowance' && !!stageGroup(job.state.pausedFrom ?? '')));
+        effects = needsBudget ? 'Choose a new total budget to resume.' : op.budget === undefined ? spending : `Set the total job budget to ${usd(op.budget)} (${usd(op.budget - job.state.spentUsd)} left).`;
+        if (op.acceptAsIs) effects = [
+          'Deliver the current work as-is for review without more build or verification spend.',
+          op.budget === undefined ? '' : effects,
+        ].filter(Boolean).join(' ');
+        break;
+      case 'stop': effects = 'Stop the active runner. The job budget stays the same.'; break;
+      case 'abandon': effects = 'End this job permanently and run the Retrospective. The Retrospective can spend from the remaining job budget and may be skipped if funds are insufficient.'; break;
+      case 'accept-risk': effects = `Record acceptance of ${op.findingId}. Recording the decision has no model cost.`; notes = op.reason; break;
+    }
+  }
+
+  const { channelId } = a.source;
+  const { threadTs } = payload;
+  const edit = confirmationEdit(op);
+  const confirmToken = randomBytes(16).toString('hex');
+  const cancelToken = randomBytes(16).toString('hex');
+  const editToken = edit && randomBytes(16).toString('hex');
+  const acceptToken = offerAccept && randomBytes(16).toString('hex');
+  const tokens = [confirmToken, cancelToken, ...(editToken ? [editToken] : []), ...(acceptToken ? [acceptToken] : [])];
+  const now = (deps.intentNow ?? Date.now)();
+  await withStore(home, async (store) => {
+    // A newer card for the same request replaces an older unanswered one, so one request cannot run twice.
+    const same = JSON.stringify(payload.operation);
+    for (const card of Object.values(store.cards)) {
+      const c = card.confirmation;
+      if (card.kind === 'confirmation' && c?.button === 'confirm' && c.ownerId === a.actor.userId && c.expiresAt > now
+        && !card.usedAt && c.payload && JSON.stringify(c.payload.operation) === same) c.expiresAt = now;
+    }
+    for (const token of tokens) {
+      store.cards[token] = cardSchema.parse({
+        kind: 'confirmation', role: 'pm', appId: a.source.appId, channelId, createdAt: Date.now(),
+        confirmation: {
+          teamId: a.actor.teamId, ownerId: a.actor.userId, primary: confirmToken, expiresAt: now + CONFIRM_MS,
+          button: token === confirmToken ? 'confirm' : token === cancelToken ? 'cancel' : token === editToken ? 'edit' : 'accept-as-is',
+          ...(token === confirmToken ? { payload } : {}),
+        },
+      });
+    }
+    return { value: undefined, write: true };
+  });
+
+  const view = renderConfirmReview({
+    description, effects, notes, hideConfirm: needsBudget, dangerous: op.kind === 'abandon', confirmToken, cancelToken,
+    ...(editToken ? { edit: { token: editToken, label: edit?.label } } : {}),
+  });
+  if (acceptToken) {
+    const buttons = view.blocks.at(-1)?.elements;
+    if (Array.isArray(buttons)) buttons.push({
+      type: 'button', action_id: 'anton_accept_as_is', text: { type: 'plain_text', text: 'Review accept as-is' }, value: acceptToken,
+    });
+  }
+  if (fallback) {
+    view.text = `${fallback}\n${view.text}`;
+    view.blocks.unshift({ type: 'section', text: { type: 'plain_text', text: fallback } });
+  }
+  const sent = await postIntentMessage(a, deps, { channelId, threadTs, ...view });
+  if (!sent) return result('ignored');
+  if (!ts.safeParse(sent.ts).success) throw new Error('Slack did not return a valid confirmation timestamp.');
+  await withStore(home, async (store) => {
+    for (const token of tokens) store.cards[token]!.messageTs = sent.ts;
+    return { value: undefined, write: true };
+  });
+  await onPosted?.();
+  return result('ignored');
+}
+
 const USAGE = 'Try: /anton status, /anton new <description> (in #anton), /anton change <description>, /anton spec retry, '
   + '/anton resume [budget <usd>] [accept-as-is], /anton abandon <job id>';
 
-async function commandOperation(a: Extract<SlackAction, { via: 'command' }>, deps: DispatchDeps): Promise<{ op: Operation } | ActionResult> {
+async function commandOperation(a: Extract<SlackAction, { via: 'command' }>, deps: DispatchDeps, context?: { project?: string; dm: boolean }): Promise<{ op: Operation } | ActionResult> {
   const text = sanitizeSlackText(a.text, DESCRIPTION_LIMIT + 50);
   const first = (text.split(/\s+/)[0] ?? '').toLowerCase();
   const words = (first === 'new' || first === 'change' ? text : text.slice(0, COMMAND_LIMIT)).split(/\s+/).filter(Boolean);
@@ -341,13 +677,13 @@ async function commandOperation(a: Extract<SlackAction, { via: 'command' }>, dep
     const { projectForChannel } = await import('./outbox.js');
     return projectForChannel({ config: deps.config, home: deps.home }, channel);
   });
-  const project = inAnton ? undefined : await lookup(a.source.channelId);
+  const project = context ? context.project : inAnton ? undefined : await lookup(a.source.channelId);
   if (verb === 'help') return result('done', USAGE);
   if (verb === 'new' || verb === 'change') {
     const description = sanitizeSlackText(words.join(' '), DESCRIPTION_LIMIT);
     if (!description) return result('refused', `Describe the work: /anton ${verb} <description>`);
     if (verb === 'new') {
-      return inAnton ? { op: { kind: 'start', mode: 'new', description } } : result('refused', 'Start new projects in #anton.');
+      return inAnton || context?.dm ? { op: { kind: 'start', mode: 'new', description } } : result('refused', 'Start new projects in #anton.');
     }
     return project ? { op: { kind: 'start', mode: 'change', project, description } } : result('refused', 'Run /anton change in the project channel.');
   }
@@ -359,7 +695,7 @@ async function commandOperation(a: Extract<SlackAction, { via: 'command' }>, dep
   }
   if (verb === 'status') {
     if (words.length) return result('refused', USAGE);
-    if (inAnton) return { op: { kind: 'status' } };
+    if (inAnton || (context?.dm && !project)) return { op: { kind: 'status' } };
     return project ? { op: { kind: 'status', project } } : result('refused', 'Use /anton in #anton or in a project channel.');
   }
   if (verb === 'approve' || verb === 'reject' || verb === 'accept-risk') {
@@ -395,33 +731,16 @@ function answersThePm(a: Extract<SlackAction, { via: 'message' }>, config: Slack
   return (a.mentions ?? []).every((id) => id === config.roles.pm.botUserId);
 }
 
-/** The owner's thread replies and DM instructions. Everything else is discussion (`ignored`). */
+/** The owner's replies in existing job threads. Everything else is discussion (`ignored`). */
 async function messageOperation(
   a: Extract<SlackAction, { via: 'message' }>, deps: DispatchDeps, home: string,
 ): Promise<{ op: Operation } | ActionResult> {
-  // A mention also arrives as a message event; only the message event can act, so one reply acts once.
   if (a.eventType === 'app_mention' || a.source.role !== 'pm') return result('ignored');
   const text = sanitizeSlackText(a.text, ANSWER_LIMIT);
-  if (/^D[A-Z0-9]+$/.test(a.source.channelId)) {
-    if (a.source.threadTs) return result('ignored');
-    const m = /^(new|change)\s+([\s\S]+)$/i.exec(text);
-    if (!m) return result('ignored');
-    if (m[1]!.toLowerCase() === 'new') {
-      const description = sanitizeSlackText(m[2], DESCRIPTION_LIMIT);
-      return description ? { op: { kind: 'start', mode: 'new', description } } : result('ignored');
-    }
-    const c = /^([a-z0-9]+(?:-[a-z0-9]+)*)\s+([\s\S]+)$/.exec(m[2]!);
-    if (!c) return result('refused', 'Name the project: change <project> <description>');
-    return { op: { kind: 'start', mode: 'change', project: c[1]!, description: sanitizeSlackText(c[2], DESCRIPTION_LIMIT) } };
-  }
   if (!a.source.threadTs) return result('ignored');
   // An answer mentions nobody but the PM. A message that mentions another role or person is addressed to them.
   if (!answersThePm(a, deps.config)) return result('ignored');
-  const lookup = deps.jobForThread ?? (async (channel: string, thread: string) => {
-    const { jobForThread } = await import('./outbox.js');
-    return jobForThread({ config: deps.config, home: deps.home }, channel, thread);
-  });
-  const job = await lookup(a.source.channelId, a.source.threadTs);
+  const job = await lookupJobThread(deps)(a.source.channelId, a.source.threadTs);
   if (!job) return result('ignored');
   const { readSpecContinuation, specStatus } = await import('../core/spec-continuation.js');
   const c = await readSpecContinuation(job.project, job.jobId, home).catch(() => undefined);
@@ -450,12 +769,19 @@ const POINTER = 'Ask in your project\'s channel. Anton answers project questions
  * ID. Read live every time, so a removed member loses access at once. Any doubt means no.
  */
 async function verifiedMember(channelId: string, userId: string, deps: DispatchDeps): Promise<boolean> {
-  if (!deps.access) return false;
+  if (!deps.access || !await privateWorkspaceChannel(channelId, deps)) return false;
   try {
-    const info = await deps.access.channel(channelId);
-    if (!info || !info.isPrivate || info.isShared || info.isArchived) return false;
-    if (info.teamId !== undefined && info.teamId !== deps.config.teamId) return false;
     return (await deps.access.members(channelId)).includes(userId);
+  } catch {
+    return false;
+  }
+}
+
+async function privateWorkspaceChannel(channelId: string, deps: DispatchDeps): Promise<boolean> {
+  try {
+    const info = await deps.access?.channel(channelId);
+    return !!info && info.isPrivate && !info.isShared && !info.isArchived
+      && (info.teamId === undefined || info.teamId === deps.config.teamId);
   } catch {
     return false;
   }
@@ -472,6 +798,214 @@ const lookupProject = (deps: DispatchDeps) => deps.projectForChannel ?? (async (
   const { projectForChannel } = await import('./outbox.js');
   return projectForChannel({ config: deps.config, home: deps.home }, channel);
 });
+
+const lookupJobThread = (deps: DispatchDeps) => deps.jobForThread ?? (async (channel: string, thread: string) => {
+  const { jobForThread } = await import('./outbox.js');
+  return jobForThread({ config: deps.config, home: deps.home }, channel, thread);
+});
+
+const INTENT_HELP = 'Ask me to show progress or explain a project, start a project or change, answer spec questions, '
+  + 'review a spec or delivery, resume, stop or abandon a job, accept a risk, or show pending lessons. I’ll ask you to confirm changes.';
+const PAUSED_REASONS: Record<IntentUnavailableReason, string> = {
+  missing_key: 'no API key', input_too_large: 'the message is too long', budget: 'chat budget unavailable',
+  provider_error: 'model request failed', missing_price: 'model pricing unavailable', router_error: 'router unavailable',
+};
+
+async function ownerIntentRoute(a: MessageAction, deps: DispatchDeps, home: string): Promise<ActionResult | undefined> {
+  const { config } = deps;
+  const { channelId, messageTs, threadTs } = a.source;
+  if (a.source.role !== 'pm' || !messageTs || !deps.postIntentThreadMessage) return undefined;
+  const dm = channelId.startsWith('D');
+  const roleBots = new Set(Object.values(config.roles).map(({ botUserId }) => botUserId));
+  if (roleBots.has(a.actor.userId)) return undefined;
+  const mentionsPm = a.mentions?.find((id) => roleBots.has(id)) === config.roles.pm.botUserId;
+  if (a.eventType === 'app_mention' && !mentionsPm) return undefined;
+  if (!threadTs && !dm && !mentionsPm) return undefined;
+  if (threadTs && !answersThePm(a, config)) return undefined;
+  const channelProject = dm || channelId === config.channelId ? undefined : await lookupProject(deps)(channelId);
+  if (!dm && channelId !== config.channelId && !channelProject) return undefined;
+  if (threadTs && await lookupJobThread(deps)(channelId, threadTs)) return undefined;
+  if (!dm && !await verifiedMember(channelId, a.actor.userId, deps)) return result('ignored');
+
+  const text = sanitizeSlackText(a.text, 6001).replace(/^(?:\s*\[mention\]\s*)+/, '').trim();
+  if (!text) return undefined;
+  // One Slack message can arrive as both a message event and an app mention with different event IDs.
+  const identity = createHash('sha256').update(JSON.stringify([a.actor.teamId, channelId, messageTs])).digest('hex');
+  const requestKey = `event:intent:${identity}`;
+  const claimed = await withStore(home, async (store) => {
+    if (Object.hasOwn(store.records, requestKey)) return { value: false, write: false };
+    store.records[requestKey] = { status: 'finished', pid: process.pid, claim: randomUUID(), at: Date.now() };
+    return { value: true, write: true };
+  });
+  if (!claimed) return result('ignored');
+
+  const binding = { teamId: a.actor.teamId, ownerId: a.actor.userId, channelId, threadTs: threadTs ?? messageTs };
+  const options = { home, now: deps.intentNow };
+  const send = async (message: string) => {
+    await postIntentMessage(a, deps, { channelId, threadTs: binding.threadTs, text: message });
+    return result('ignored');
+  };
+  const context = threadTs ? await claimIntentThreadReply(binding, options) : undefined;
+  if (context?.kind === 'missing') return undefined;
+  if (context?.kind === 'help') return send(INTENT_HELP);
+
+  const contextProject = context?.project ?? channelProject;
+  const secrets = await previewSecrets(deps, contextProject);
+  const names = (await listProjects()).map(({ name }) => name).filter((name) => projectIdSchema.safeParse(name).success);
+  // Order the channel/thread project first so it survives the router's fact limit.
+  const projects = contextProject && names.includes(contextProject)
+    ? [contextProject, ...names.filter((name) => name !== contextProject)] : names;
+  const facts: IntentProjectFact[] = [];
+  for (const project of projects) {
+    const job = await currentJob(project).catch(() => undefined);
+    if (job?.state.bench !== undefined) continue;
+    const stage = job?.state.stage;
+    facts.push({
+      project, jobId: job?.jobId, stage, pauseReason: job?.state.pauseReason,
+      checkpoint: stage === 'awaiting_spec_approval' ? 'spec' : stage === 'awaiting_final_review' ? 'final' : undefined,
+    });
+  }
+  const describe = (question: string) => safePreviewText(question, secrets, 500);
+  const ask = async (question: string) => {
+    if (context?.kind === 'retry') return send(INTENT_HELP);
+    const projectSecrets = await Promise.all(projects.map(async (project) =>
+      Object.fromEntries(Object.entries(await loadSecrets(project)).map(([key, value]) => [`${project}/${key}`, value]))));
+    const allSecrets = Object.assign({}, secrets, ...projectSecrets);
+    const safeQuestion = safePreviewText(question, allSecrets, 500) || 'What would you like the PM to do?';
+    const registered = await registerIntentThread(binding, { kind: 'clarification', project: contextProject, originalText: text, question: safeQuestion },
+      { ...options, secrets: allSecrets, clarifyExisting: context?.kind === 'context' });
+    return registered ? send(safeQuestion) : result('ignored');
+  };
+
+  const classifierInput = context?.kind === 'retry'
+    ? `Original request:\n${context.originalText}${context.question ? `\n\nPM question:\n${context.question}` : ''}\n\nOwner clarification:\n${text}`
+    : text;
+  const classification = await (deps.classify?.({ teamId: a.actor.teamId, requestKey, text: classifierInput, contextProject, projects: facts })
+    .catch(() => ({ kind: 'unavailable', reason: 'router_error' } as const))
+    ?? Promise.resolve({ kind: 'unavailable', reason: 'missing_key' } as const));
+  if (classification.kind === 'duplicate') return result('ignored');
+  if (classification.kind === 'clarification') return ask(classification.text);
+
+  let fallback: string | undefined;
+  let resolution: IntentResolution;
+  const { resolveIntent } = await import('./intents.js');
+  const resolve = (intent: Intent, project = contextProject) =>
+    resolveIntent(intent, { projects, channelProject: project, home, listTags: deps.jobs.listTags });
+  if (classification.kind === 'intent') {
+    resolution = await resolve(classification.intent);
+  } else {
+    const original = context?.kind === 'retry' ? context.originalText : text;
+    const [verb = '', ...args] = original.split(/\s+/);
+    const lower = verb.toLowerCase();
+    const reason = `Plain English is paused (${PAUSED_REASONS[classification.reason]}).`;
+    const chosen = context?.kind === 'retry' ? projects.find((project) => project === text.toLowerCase()) : undefined;
+    if (context?.kind === 'retry' && !chosen) return send(`${reason}\n${INTENT_HELP}`);
+    const exact = ['help', 'status', 'new', 'change', 'spec', 'resume', 'abandon', 'approve', 'reject', 'accept-risk'];
+    if (!exact.includes(lower)) return send(`${reason}\n${USAGE}`);
+    fallback = `${reason.slice(0, -1)}; I understood this as /anton ${lower}${lower === 'spec' ? ' retry' : ''}.`;
+    let project = chosen ?? contextProject;
+    let commandText = original;
+    if (dm && lower === 'change') {
+      const named = args[0];
+      if (named && names.includes(named)) {
+        if (chosen && chosen !== named) return send(`${fallback}\nThe two project names differ. Ask again.`);
+        project = named;
+        args.shift();
+      }
+      if (!project || (!chosen && named !== project) || !args.length) {
+        return send(`${fallback}\nName a registered project: change <project> <description>.`);
+      }
+      commandText = `change ${args.join(' ')}`;
+    }
+    const parsed = await commandOperation({ ...a, via: 'command', text: commandText }, deps, { dm, project });
+    if ('status' in parsed) return send([fallback, ...parsed.lines].join('\n'));
+    const { op } = parsed;
+    switch (op.kind) {
+      case 'status': resolution = { kind: 'read-only', intent: 'status', project: chosen ?? op.project }; break;
+      case 'start': resolution = await resolve(op.mode === 'new' ? { intent: 'start_new', description: op.description }
+        : { intent: 'start_change', project: op.project, description: op.description }); break;
+      case 'resume': resolution = await resolve({ intent: 'resume', project: op.target.project, jobId: op.target.jobId,
+        budgetUsd: op.budget, acceptAsIs: op.acceptAsIs }); break;
+      case 'abandon': resolution = await resolve({ intent: 'abandon', project: op.target.project, jobId: op.target.jobId }); break;
+      case 'spec-retry': resolution = await resolve({ intent: 'spec_retry', project: op.target.project, jobId: op.target.jobId }); break;
+      default: return send(`${fallback}\n${USAGE}`);
+    }
+  }
+
+  if (resolution.kind === 'clarification') return ask(fallback ? `${fallback}\n${resolution.text}` : resolution.text);
+  if (resolution.kind === 'refused') return send([fallback, describe(resolution.text)].filter(Boolean).join('\n'));
+  const withFallback = (message: string) => fallback ? `${fallback}\n${message}` : message;
+  const promote = async (project?: string) => {
+    if (context?.kind === 'retry') await completeIntentThreadClarification(binding, context.retryClaim, project, options);
+  };
+  if (resolution.kind === 'read-only') {
+    await promote(resolution.project ?? contextProject);
+    if (resolution.intent === 'help') return send(INTENT_HELP);
+    if (resolution.intent === 'status') return send(withFallback((await statusLines(resolution.project)).join('\n')));
+    if (resolution.intent === 'lessons') return postIntentLessons(a, binding.threadTs, contextProject, deps, home);
+    const project = resolution.project;
+    if (!project) return ask('Which project is your question about?');
+    const answer = await answerQuestion({ teamId: a.actor.teamId, userId: a.actor.userId, role: 'pm', project,
+      question: context?.kind === 'retry' ? `${context.originalText}\n${text}` : text, requestKey }, { home, ...deps.chat });
+    return answer.status === 'duplicate' ? result('ignored') : send(safePreviewText(answer.text, await previewSecrets(deps, project), 3900));
+  }
+  if (resolution.kind !== 'operation') return result('ignored');
+
+  const { operation, target: startTarget } = resolution;
+  if (operation.kind === 'lesson') return result('refused', 'Open the lesson card to decide.');
+  const project = 'target' in operation ? operation.target.project : operation.project;
+  const opSecrets = await previewSecrets(deps, project);
+  switch (operation.kind) {
+    case 'start': operation.description = safePreviewText(operation.description, opSecrets, DESCRIPTION_LIMIT); break;
+    case 'reject':
+    case 'spec-revise': operation.notes = safePreviewText(operation.notes, opSecrets, NOTES_LIMIT); break;
+    case 'accept-risk': operation.reason = safePreviewText(operation.reason, opSecrets, REASON_LIMIT); break;
+    case 'spec-answer': operation.answers = operation.answers.map((answer) => safePreviewText(answer, opSecrets, ANSWER_LIMIT)); break;
+  }
+  const parsed = operationSchema.safeParse(operation);
+  if (!parsed.success) return send('Some action details could not be verified. Ask again.');
+  const payload: ConfirmationPayload = { operation: parsed.data, startTarget, threadTs: binding.threadTs };
+  if (parsed.data.kind === 'start') payload.startBudget = budgetSettings(await loadAntonConfig(home)).defaultUsd;
+  if (parsed.data.kind === 'spec-answer' || parsed.data.kind === 'spec-retry') {
+    payload.specTurn = resolution.specTurn;
+  }
+  return postConfirmation(a, payload, deps, home, fallback, async () => {
+    if (!threadTs) await registerIntentThread(binding, { kind: 'context', project }, options);
+    if (context?.kind === 'context' && project) await updateIntentThreadProject(binding, project, options);
+    if (context?.kind === 'retry') await promote(project);
+  });
+}
+
+async function postIntentMessage(
+  a: MessageAction | CardAction, deps: DispatchDeps, message: Parameters<NonNullable<DispatchDeps['postIntentThreadMessage']>>[0],
+): Promise<{ ts: string } | undefined> {
+  if (!deps.postIntentThreadMessage) return undefined;
+  if (!message.channelId.startsWith('D') && !await verifiedMember(message.channelId, a.actor.userId, deps)) return undefined;
+  return deps.postIntentThreadMessage(message);
+}
+
+async function postIntentLessons(a: MessageAction, threadTs: string, project: string | undefined, deps: DispatchDeps, home: string): Promise<ActionResult> {
+  const channelId = a.source.channelId;
+  const proposals = (await readProposals(home)).filter((p) => !project || p.project === project).slice(0, 7);
+  const tokens: string[] = [];
+  const sections = [];
+  for (const p of proposals) {
+    const secrets = await previewSecrets(deps, p.project);
+    const proposal = { id: p.id, revision: proposalRevision(p) };
+    const buttons = [];
+    for (const [kind, label] of [['lesson-accept', 'Accept'], ['lesson-edit', 'Edit…'], ['lesson-reject', 'Reject']] as const) {
+      if (kind === 'lesson-edit' && p.kind !== 'lesson') continue;
+      const token = await registerActionCard({ kind, role: 'pm', channelId, proposal }, { config: deps.config, home });
+      tokens.push(token);
+      buttons.push({ token, label });
+    }
+    sections.push({ text: safePreviewText(`${p.project}: ${p.text ?? p.plugin ?? ''}\nWhy: ${p.why}`, secrets, 2500), buttons });
+  }
+  const view = renderReview({ kind: 'lessons' }, { title: sections.length ? 'Pending lessons' : 'No pending lessons.', sections });
+  const sent = await postIntentMessage(a, deps, { channelId, threadTs, ...view });
+  if (sent) for (const token of tokens) await attachCardMessage(token, channelId, sent.ts, { home });
+  return result('ignored');
+}
 
 /** `/anton status` from a verified member, in that project's channel only. */
 async function memberStatus(a: Extract<SlackAction, { via: 'command' }>, deps: DispatchDeps): Promise<ActionResult | undefined> {
@@ -495,8 +1029,6 @@ async function questionRoute(a: Extract<SlackAction, { via: 'message' }>, deps: 
   const dm = /^D[A-Z0-9]+$/.test(a.source.channelId);
   const isOwner = a.actor.userId === config.ownerId;
   if (a.eventType !== 'app_mention' && !(dm && !a.source.threadTs)) return undefined;
-  // The owner's DM orders to the PM stay orders.
-  if (dm && isOwner && a.source.role === 'pm' && /^(?:new|change)\s/i.test(sanitizeSlackText(a.text, 100))) return undefined;
   const bots = new Set(Object.values(config.roles).map((r) => r.botUserId));
   if (!KEY.test(a.key) || a.actor.isBot || bots.has(a.actor.userId) || a.actor.teamId !== config.teamId) return result('ignored');
   if (config.roles[a.source.role]?.appId !== a.source.appId) return result('ignored');
@@ -506,11 +1038,7 @@ async function questionRoute(a: Extract<SlackAction, { via: 'message' }>, deps: 
   // The owner's mention reply to waiting spec questions is an answer, which the message event carries.
   // It is one only when it mentions nobody but the PM; a mention of another role is a question for it.
   if (isOwner && a.source.threadTs && answersThePm(a, config)) {
-    const lookup = deps.jobForThread ?? (async (channel: string, thread: string) => {
-      const { jobForThread } = await import('./outbox.js');
-      return jobForThread({ config, home: deps.home }, channel, thread);
-    });
-    const job = await lookup(a.source.channelId, a.source.threadTs);
+    const job = await lookupJobThread(deps)(a.source.channelId, a.source.threadTs);
     if (job) {
       const { readSpecContinuation, specStatus } = await import('../core/spec-continuation.js');
       const c = await readSpecContinuation(job.project, job.jobId, home).catch(() => undefined);
@@ -571,6 +1099,7 @@ async function stillPending(op: Exclude<Operation, { kind: 'status' }>, deps: Di
 
 async function claimAndRun(
   input: SlackAction, op: Exclude<Operation, { kind: 'status' }>, deps: DispatchDeps, home: string,
+  confirmation?: BoundConfirmation,
 ): Promise<ActionResult> {
   // Only targets the store can hold are claimable, so a record never makes the store unreadable.
   if ('target' in op && !targetSchema.safeParse(op.target).success) return result('refused', 'That project or job name cannot be used from Slack.');
@@ -590,10 +1119,17 @@ async function claimAndRun(
     if (!rec) {
       // A redelivery of the same click still gets its stored answer (below); a new click on a used card does nothing.
       if (input.via === 'card' && store.cards[input.token]?.usedAt !== undefined) return { value: { go: false, result: USED }, write: false };
+      if (confirmation && input.via === 'card') {
+        const bound = readConfirmation(input, store.cards, (deps.intentNow ?? Date.now)());
+        if ('status' in bound) return { value: { go: false, result: bound }, write: false };
+        if (bound.primary !== confirmation.primary || bound.button !== 'confirm') return { value: { go: false, result: DENIED }, write: false };
+        bound.card.usedAt = (deps.intentNow ?? Date.now)();
+      }
       store.records[input.key] = fresh();
       return { value: { go: true, op }, write: true };
     }
     if (rec.status === 'finished') return { value: { go: false, result: { status: 'duplicate', lines: rec.result?.lines ?? [] } }, write: false };
+    if (confirmation) return { value: { go: false, result: USED }, write: false };
     const live = rec.pid === process.pid ? inFlight.has(rec.claim) : pidAlive(rec.pid);
     if (live) return { value: { go: false, result: result('in-progress', 'Already working on that.') }, write: false };
     // The claimer died with an unknown outcome. Reconcile against the target it bound before doing it again.
@@ -610,7 +1146,9 @@ async function claimAndRun(
   inFlight.add(claim);
   let outcome: ActionResult;
   try {
-    outcome = await run(gate.op, deps, home);
+    outcome = confirmation
+      ? await runConfirmed(confirmation, deps, home)
+      : await run(gate.op, deps, home);
   } catch (e) {
     outcome = result('refused', clean(e instanceof Error ? e.message : String(e)));
   } finally {
@@ -662,6 +1200,7 @@ async function run(op: Exclude<Operation, { kind: 'status' }>, deps: DispatchDep
     case 'approve': outcome = await approveJob(op.target, d); break;
     case 'reject': outcome = await rejectJob(op.target, op.notes, d); break;
     case 'resume': outcome = await resumeJob(op.target, { budget: op.budget, acceptAsIs: op.acceptAsIs }, d); break;
+    case 'stop': outcome = await stopJob(op.target, { ...d, kill: deps.jobs.kill, sleep: deps.jobs.sleep }); break;
     case 'abandon': outcome = await abandonJob(op.target, d); break;
     case 'accept-risk': outcome = await acceptJobRisk(op.target, op.findingId, op.reason, d); break;
   }

@@ -229,6 +229,10 @@ Slack receives milestone summaries and a sanitized copy of the generated spec. T
 
 Only the owner set during `anton slack setup` can change a job. Everyone else gets "Only the Anton owner can do that here."
 
+DM Anton PM or mention `@Anton PM` in `#anton` or a project channel. Try “Start a project for a habit tracker,” “Approve the spec,” or “Resume this job with a $15 budget.” Check the project, job and budget on the card, then choose **Confirm** or **Cancel**. Cards expire after 30 minutes, and a job that has moved on requires a fresh card.
+
+Status, questions and help get an immediate reply. If Anton asks what you meant, reply in that thread within 10 minutes. When plain English is unavailable, use `/anton help` to see the exact commands.
+
 - `/anton new <description>` in `#anton` starts a project. `/anton change <description>` in a project channel starts a change job.
 - The PM asks its spec questions in the job thread. Reply in the thread (number your answers when there are several). A reply that mentions another role or person (for example `@Anton QA what does AC-2 mean?`) is a question for them, not your answer. The spec waits as long as you need, with one reminder after 24 hours. If the service stops in the middle of a PM turn, the thread gets one notice; rerun the turn with `/anton spec retry` or `anton spec <project> --retry`. You can also answer in the terminal with `anton spec <project>`.
 - The spec card has **Approve spec** and **Request changes…**. The delivery card has **Approve delivery**, **Reject…** and **Accept risk…** for each open security finding. A paused job gets **Resume…** and **Abandon**, whatever paused it (budget, an error, no progress, the round limit or `anton stop`). Lesson proposals from the Coach in `#anton` get **Accept**, **Edit…** and **Reject**.
@@ -266,7 +270,7 @@ ANTON_SLACK_E2E=1 ANTON_SLACK_TEST_HOME=/path/to/test-home ANTON_SLACK_TEST_TEAM
   npx vitest run tests/e2e/slack-service.e2e.test.ts
 ```
 
-The workflow test covers both front ends with fake agents. With `ANTON_E2E=1` alone it runs against a fake workspace, for free: a Slack-started spec approved in the CLI, a CLI job approved from its Slack card, role questions, permissions, replayed deliveries and a reconnect. With the same Slack variables as above it also runs in the test workspace: the nine bots connect, membership is checked live, a card thread is posted and the service reconnects. Slack cannot send a person's clicks for a test, so those inputs are made up from the workspace's real IDs. Click a card yourself once to check the real button path. A separate opt-in makes one real paid answer (about $0.01):
+The workflow test covers both front ends with fake agents. With `ANTON_E2E=1` alone it runs against a fake workspace, for free: a plain-English clarification, a cancelled confirmation, an exact-command fallback that requires confirmation, a Slack-started spec approved in the CLI, a CLI job approved from its Slack card, role questions, permissions, replayed deliveries and a reconnect. With the same Slack variables as above it also runs in the test workspace: the nine bots connect, membership is checked live, a card thread is posted and the service reconnects. Slack cannot send a person's clicks for a test, so those inputs are made up from the workspace's real IDs. Click a card yourself once to check the real button path. A separate opt-in makes one real paid answer (about $0.01):
 
 ```sh
 ANTON_E2E=1 npx vitest run tests/e2e/slack-workflow.e2e.test.ts

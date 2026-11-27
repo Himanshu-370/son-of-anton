@@ -66,7 +66,7 @@ export interface ChatDeps {
 }
 
 /** Statuses where the API answered and rejected the request before any work: nothing was billed. */
-const UNBILLED_STATUSES = new Set([400, 401, 403, 404, 422]);
+export const UNBILLED_STATUSES = new Set([400, 401, 403, 404, 422]);
 
 type ModelPlan = {
   model: string;
@@ -126,7 +126,7 @@ export function anthropicChatClient(apiKey: string): ChatClient {
 const TOKEN_PATTERNS = [/xox[a-z]-[A-Za-z0-9-]+/g, /xapp-[A-Za-z0-9-]+/g, /sk-ant-[A-Za-z0-9_-]+/g];
 
 /** Secrets and key values, then token shapes (Slack and Anthropic), then control characters. */
-function scrub(text: string, secrets: Record<string, string>): string {
+export function scrub(text: string, secrets: Record<string, string>): string {
   let out = redact(text, secrets);
   for (const p of TOKEN_PATTERNS) out = out.replace(p, '[REDACTED]');
   return out.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, ' ').replace(/\p{Cf}/gu, '');
@@ -173,7 +173,7 @@ const SOURCES: Record<'explain' | 'evidence', Source[]> = {
   ],
 };
 
-const fenceFor = (texts: string[]) => '`'.repeat(Math.max(3, ...texts.flatMap((t) => [...t.matchAll(/`+/g)].map((m) => m[0].length + 1))));
+export const fenceFor = (texts: string[]) => '`'.repeat(Math.max(3, ...texts.flatMap((t) => [...t.matchAll(/`+/g)].map((m) => m[0].length + 1))));
 
 function clipBytes(text: string, max: number): string {
   const buf = Buffer.from(text, 'utf8');
@@ -225,7 +225,7 @@ export function chatUpperBoundUsd(price: ModelPrice, inputBytes: number, maxToke
   return ((inputBytes + FRAME_TOKENS) * price.inPerM + maxTokens * price.outPerM) / 1_000_000;
 }
 
-const validUsage = (u: Message['usage'] | undefined): u is Message['usage'] =>
+export const validUsage = (u: Message['usage'] | undefined): u is Message['usage'] =>
   !!u && [u.input_tokens, u.output_tokens].every((x) => typeof x === 'number' && Number.isFinite(x) && x >= 0)
   && [u.cache_creation_input_tokens, u.cache_read_input_tokens].every((x) => x == null || (typeof x === 'number' && Number.isFinite(x) && x >= 0));
 

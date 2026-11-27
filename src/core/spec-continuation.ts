@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as fsp from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
@@ -102,6 +102,10 @@ export async function readSpecContinuation(project: string, jobId: string, home 
   return raw === undefined ? undefined : continuationSchema.parse(JSON.parse(raw));
 }
 
+export function specContinuationDigest(c: SpecContinuation): string {
+  return createHash('sha256').update(JSON.stringify({ ...c, reminded: undefined, updatedAt: undefined })).digest('hex');
+}
+
 async function save(c: SpecContinuation, home: string): Promise<void> {
   const secrets = await loadSecrets(c.project).catch(() => ({}));
   const out = continuationSchema.parse({ ...c, updatedAt: new Date().toISOString() });
@@ -164,11 +168,12 @@ export class SpecConflict extends Error {
 }
 
 export type SpecJob = { project: string; repoPath: string; jobId: string; jobDir: string; description: string; mode: 'new' | 'change' };
+export type SpecRoundConfirmation = { digest: string; expiresAt: number };
 export type SpecRoundInput =
   | { kind: 'start' }
-  | { kind: 'answers'; round: number; answers: string[] }
+  | { kind: 'answers'; round: number; answers: string[]; confirmation?: SpecRoundConfirmation }
   | { kind: 'revise'; notes: string }
-  | { kind: 'retry' };
+  | { kind: 'retry'; confirmation?: SpecRoundConfirmation };
 export type SpecRoundStatus = 'questions' | 'spec' | 'stale' | 'in-progress' | 'stopped' | 'refused';
 export type SpecRoundResult = { status: SpecRoundStatus; lines: string[]; round?: number; questions?: string[] };
 
@@ -261,10 +266,16 @@ function interrupted(job: SpecJob): SpecRoundResult {
 export async function claimSpecRound(job: SpecJob, input: SpecRoundInput, deps: Pick<SpecRoundDeps, 'surface' | 'home' | 'now'>): Promise<Claimed | SpecRoundResult> {
   const home = deps.home ?? antonHome();
   const wantStage = input.kind === 'revise' ? 'awaiting_spec_approval' : 'spec';
-  const state = await loadState(job.jobDir);
-  if ((await currentJobId(job.repoPath)) !== job.jobId) return stale(`${job.project}: job ${job.jobId} is no longer the current job. Nothing was changed.`);
-  if (state.stage !== wantStage) return stale(`${job.project}: nothing is waiting on the spec (stage: ${state.stage}).`);
   return withContinuation(job.project, job.jobId, home, async (found) => {
+    const state = await loadState(job.jobDir);
+    if ((await currentJobId(job.repoPath)) !== job.jobId) return stale(`${job.project}: job ${job.jobId} is no longer the current job. Nothing was changed.`);
+    if (state.stage !== wantStage) return stale(`${job.project}: nothing is waiting on the spec (stage: ${state.stage}).`);
+    if ('confirmation' in input && input.confirmation) {
+      if ((deps.now ?? Date.now)() >= input.confirmation.expiresAt) return stale('That confirmation expired. Ask again.');
+      if (!found || specContinuationDigest(found) !== input.confirmation.digest) {
+        return stale('The spec conversation changed. Nothing was sent. Ask again.');
+      }
+    }
     let c = found;
     let prompt: string;
     if (input.kind === 'start') {

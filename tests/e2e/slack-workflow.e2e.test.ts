@@ -17,6 +17,7 @@ import { answerQuestion, anthropicChatClient, type ChatClient } from '../../src/
 import { chatSpentUsd } from '../../src/slack/chat-budget.js';
 import { SLACK_ROLES, writeSlackFile, type SlackConfig, type SlackRole } from '../../src/slack/config.js';
 import { publishMilestone } from '../../src/slack/events.js';
+import { classifyIntent } from '../../src/slack/intent-router.js';
 import { createInboundHandler, type Reply } from '../../src/slack/inbound.js';
 import { drainOutbox, inspectOutbox, type OutboxMessageRequest, type OutboxTransport } from '../../src/slack/outbox.js';
 import { startSlackService } from '../../src/slack/service.js';
@@ -100,9 +101,36 @@ describe.skipIf(!fakeE2E)('Slack workflow with fake agents in a fake workspace',
         },
       });
       const spawned: string[] = [];
+      const previews: Array<{ text: string; threadTs: string; blocks?: unknown[] }> = [];
       const memberships: Record<string, string[]> = Object.fromEntries(PROJECT_CHANNELS.map((c) => [c, [config.ownerId, MEMBER]]));
+      memberships[config.channelId] = [config.ownerId];
       const deps: DispatchDeps = {
         config, home,
+        intentNow: () => clock,
+        classify: (input) => classifyIntent(input, {
+          home,
+          env: input.text.startsWith('new ') ? {} : { ANTHROPIC_API_KEY: 'fake-router-key' },
+          client: () => ({
+            async send(params) {
+              const prompt = String(params.messages[0]?.content);
+              const output = input.text === 'start a project'
+                ? { intent: 'unclear', clarify: 'What should the project do?' }
+                : { intent: 'start_new', description: 'a habit tracker' };
+              if (input.text.includes('Owner clarification:')) {
+                expect(prompt).toContain('Original request:\nstart a project');
+                expect(prompt).toContain('Owner clarification:\nbuild a habit tracker');
+              }
+              return {
+                stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(output) }],
+                usage: { input_tokens: 900, output_tokens: 60, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+              } as Message;
+            },
+          }),
+        }),
+        async postIntentThreadMessage(message) {
+          previews.push(message);
+          return { ts: `1800000300.${String(previews.length).padStart(6, '0')}` };
+        },
         jobs: {
           preflight: async () => undefined, spawnRun: (name) => { spawned.push(name); },
           stopContainer: async () => undefined, retro: { env: {}, home },
@@ -145,9 +173,49 @@ describe.skipIf(!fakeE2E)('Slack workflow with fake agents in a fake workspace',
         .flatMap((b) => b.elements ?? []);
       const tsOf = (m: OutboxMessageRequest) => `1800000000.${String(posted.indexOf(m) + 1).padStart(6, '0')}`;
 
-      // 1. A Slack-started spec: /anton new in #anton, questions in the job thread, answered there.
+      await event({ type: 'app_mention', user: config.ownerId, channel: config.channelId, text: `<@${config.roles.pm.botUserId}> start a project` });
+      await handler.idle();
+      expect(requests).toHaveLength(0);
+      expect(previews).toHaveLength(1);
+      expect(previews[0]?.text).toBe('What should the project do?');
+      await event({ type: 'app_mention', user: config.ownerId, channel: config.channelId,
+        thread_ts: previews[0]!.threadTs, text: `<@${config.roles.pm.botUserId}> build a habit tracker` });
+      await handler.idle();
+      expect(previews).toHaveLength(2);
+      const buttonsFor = (preview: (typeof previews)[number]) =>
+        (preview.blocks as { elements?: { value: string; text: { text: string } }[] }[]).flatMap((block) => block.elements ?? []);
+      const buttons = buttonsFor(previews[1]!);
+      const cancel = buttons.find((button) => button.text.text === 'Cancel');
+      const confirm = buttons.find((button) => button.text.text === 'Confirm');
+      expect(cancel).toBeDefined();
+      expect(confirm).toBeDefined();
+      await click('pm', config.channelId, '1800000300.000002', cancel!.value);
+      await handler.idle();
+      await click('pm', config.channelId, '1800000300.000002', confirm!.value);
+      await handler.idle();
+      expect(requests).toHaveLength(0);
+
+      // 1. An expired fallback card is stale. A fresh model-routed card starts the spec.
       outputs.push({ kind: 'questions', questions: ['Who uses it?'] });
-      await command('new a habit tracker');
+      await event({ type: 'app_mention', user: config.ownerId, channel: config.channelId, text: `<@${config.roles.pm.botUserId}> new a habit tracker` });
+      await handler.idle();
+      expect(requests).toHaveLength(0);
+      expect(previews).toHaveLength(3);
+      expect(previews[2]?.text).toContain("Plain English is paused");
+      const start = buttonsFor(previews[2]!).find((button) => button.text.text === 'Confirm');
+      expect(start).toBeDefined();
+      clock += 30 * 60_000;
+      await click('pm', config.channelId, '1800000300.000003', start!.value);
+      await handler.idle();
+      expect(requests).toHaveLength(0);
+      expect(replies.at(-1)).toContain('confirmation expired');
+
+      await event({ type: 'app_mention', user: config.ownerId, channel: config.channelId, text: `<@${config.roles.pm.botUserId}> Please build a habit tracker` });
+      await handler.idle();
+      expect(requests).toHaveLength(0);
+      const modelConfirm = buttonsFor(previews[3]!).find((button) => button.text.text === 'Confirm');
+      expect(modelConfirm).toBeDefined();
+      await click('pm', config.channelId, '1800000300.000004', modelConfirm!.value);
       await handler.idle();
       expect(requests).toHaveLength(1);
       const slug = replies.join('\n').match(/Started project (\S+)/)?.[1];
@@ -352,6 +420,36 @@ describe.skipIf(!liveSlack)('Slack workflow in the dedicated test workspace (fak
       }, deps);
       expect(q.status).toBe('done');
       expect(q.lines.join('\n')).toMatch(/awaiting_final_review/);
+      // Phase 7 posts a real threaded preview in the dedicated workspace. The Owner event and
+      // click are synthetic, and the classifier is fake, so this costs no model calls.
+      const { webApi } = await import('@slack/bolt');
+      const pm = new webApi.WebClient(credentials.pm.botToken, { retryConfig: { retries: 0 } });
+      const parent = await pm.chat.postMessage({ channel: channelId, text: 'Phase 7 test fixture: send the delivery back.' });
+      expect(parent.ts).toBeTruthy();
+      let previewTs: string | undefined;
+      let cancelToken: string | undefined;
+      deps.classify = async () => ({ kind: 'intent', intent: { intent: 'reject', notes: 'Test fixture review notes' } });
+      deps.postIntentThreadMessage = async (message) => {
+        const sent = await runtime.postIntentThreadMessage(message);
+        previewTs = sent.ts;
+        const blocks = (message.blocks ?? []) as { elements?: { value: string; text: { text: string } }[] }[];
+        cancelToken = blocks.flatMap((block) => block.elements ?? []).find((button) => button.text.text === 'Cancel')?.value;
+        return sent;
+      };
+      const owner = { teamId: live.teamId, userId: live.ownerId, isBot: false };
+      const source = { appId: live.roles.pm.appId, role: 'pm' as const, channelId };
+      await dispatchSlackAction({
+        via: 'message', key: `event:${live.teamId}:EvPreview${Date.now()}`, eventType: 'app_mention',
+        actor: owner, mentions: [live.roles.pm.botUserId], source: { ...source, messageTs: parent.ts! },
+        text: 'Send the delivery back.',
+      }, deps);
+      expect(previewTs).toBeTruthy();
+      expect(cancelToken).toBeTruthy();
+      expect(await dispatchSlackAction({
+        via: 'card', key: `card:${live.teamId}:live-cancel`, actor: owner, token: cancelToken!,
+        source: { ...source, messageTs: previewTs! },
+      }, deps)).toMatchObject({ status: 'done', lines: ['Cancelled. Nothing was changed.'] });
+      expect((await loadState(dir)).stage).toBe('awaiting_final_review');
       // A forged team gets nothing.
       const forged = await dispatchSlackAction({
         via: 'message', key: `event:T0FORGED:EvLive${Date.now()}`, eventType: 'app_mention',
