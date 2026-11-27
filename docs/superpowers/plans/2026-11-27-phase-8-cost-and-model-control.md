@@ -32,3 +32,30 @@ Remaining work includes historical import, reservations and monthly-cap enforcem
 
 
 Legacy Slack charges can now be reconciled by request ID. The import is scoped to the workspace and UTC month. Run it during migration with Slack workers stopped. Reported charges and unknown holds remain distinct, and requests already present in the host ledger are skipped. The migration entry point reconciles existing jobs and Slack charges together. It is callable by the upgrade flow and must run with runners and Slack stopped. For jobs last updated this month, it subtracts all recorded lifetime build charges from the state total and imports only the remaining amount. Legacy state has no per-charge timestamp, so for cross-month jobs this may overstate current-month spend. Imported rows remain distinguishable from metered spend. Automatic invocation during upgrade and cap activation remain pending.
+
+## Cap, notices and trials (2026-11-27)
+
+**What now works:**
+- **The overall cap.** `budget.monthlyUsd` is enforced on builds, Retro and Slack answers, once month-to-date spend is reconciled.
+  - **Builds:** a build session's reservation shrinks to what is left of the month. Below $0.25 the job pauses with reason `monthly_cap`; the spec writes this as `monthly-cap`, and the code uses snake_case like the other pause reasons. When the cap sets a session's budget, the SDK's own budget stop also pauses as `monthly_cap`.
+  - **Retro** skips with a reason, and **Slack answers** fall back to status.
+  - **Resume** is refused while the cap is reached, except accept-as-is, which delivers without spending.
+- **Reconciliation.** `anton serve` reconciles month-to-date spend once at start, before workers run, then writes `~/anton/spend-reconciled.json`. The cap is not enforced until that file exists. A live run defers reconciliation to the next start.
+- **Notices.** `anton serve` checks every minute and posts:
+  - one 80% warning per UTC month in #anton;
+  - a weekly summary from Monday 09:00 local time;
+  - one unusual-burn alert per job stage, in the job thread.
+
+  The outbox drops repeats by kind and occurrence. Every figure is computed from the host ledger.
+- **Dashboard:** the PM Home tab shows the active overall cap.
+- **Trials.** Approving or abandoning a job where the trial role ran on the trial model counts it once. At zero the trial is removed, and the role keeps `revertTo` as an override when that differs from its preset.
+
+**Departure from the spec:** the cap check rereads the locked ledger on every reservation instead of keeping an in-memory running total. CLI runners in other processes would not see an in-memory total.
+
+**Remaining:**
+- **Router and calls aren't covered by the cap yet.** They must reserve against it when the Phase 7 and Phase 9 branches merge. The router is also bounded by `chat.monthlyUsd`.
+- **Suggestions need job quality signals.** The dashboard loader does not read verify rounds, review findings or budget pauses yet, so `recommendModel` never fires.
+- **Slack confirmation cards for settings** wait for Phase 7.
+- **Not checked live:** App Home, and the notices posting to real Slack.
+- **CLI-only installs** get the cap only after the first `anton serve` start.
+
