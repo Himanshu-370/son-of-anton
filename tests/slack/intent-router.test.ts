@@ -71,7 +71,7 @@ describe('classifyIntent', () => {
     const text = tick.repeat(1000);
     await classifyIntent({ ...input, text }, deps);
     const lines = String(send.mock.calls[0]?.[0].messages[0]?.content).split('\n');
-    expect(lines.filter((line) => line === fence)).toHaveLength(4);
+    expect(lines.filter((line) => line === fence)).toHaveLength(6);
     expect(lines[2]).toBe('\\u0060'.repeat(1000));
     expect(Buffer.byteLength(lines[2]!)).toBe(6000);
     expect(await classifyIntent({ ...input, requestKey: 'event:larger', text: text + tick }, deps))
@@ -84,7 +84,7 @@ describe('classifyIntent', () => {
     const projects = Array.from({ length: 300 }, (_, i) => ({
       project: `project-${i}`, jobId: '1-init', stage: 'build' as const, privateField: 'excluded',
     }));
-    await classifyIntent({ ...input, projects, text: `Use ${fakeKey} and \`\`\`\` safely` }, deps);
+    await classifyIntent({ ...input, contextProject: 'project-299', projects, text: `Use ${fakeKey} and \`\`\`\` safely` }, deps);
     const [params] = send.mock.calls[0]!;
     expect(params).toMatchObject({
       model: 'claude-haiku-5-5', max_tokens: 600, thinking: { type: 'disabled' },
@@ -94,6 +94,7 @@ describe('classifyIntent', () => {
     expect(content).toContain('Use [REDACTED:ANTHROPIC_API_KEY]');
     expect(content).not.toContain(fakeKey);
     expect(content).not.toContain('excluded');
+    expect(content).toContain('Context project:\n```\nproject-299\n```');
     const match = /Project facts:\n`{3,}\n([^\n]*)/.exec(content);
     expect(match).not.toBeNull();
     expect(Buffer.byteLength(match![1]!)).toBeLessThanOrEqual(4000);

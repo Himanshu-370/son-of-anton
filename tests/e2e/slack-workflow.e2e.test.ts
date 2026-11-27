@@ -17,6 +17,7 @@ import { answerQuestion, anthropicChatClient, type ChatClient } from '../../src/
 import { chatSpentUsd } from '../../src/slack/chat-budget.js';
 import { SLACK_ROLES, writeSlackFile, type SlackConfig, type SlackRole } from '../../src/slack/config.js';
 import { publishMilestone } from '../../src/slack/events.js';
+import { classifyIntent } from '../../src/slack/intent-router.js';
 import { createInboundHandler, type Reply } from '../../src/slack/inbound.js';
 import { drainOutbox, inspectOutbox, type OutboxMessageRequest, type OutboxTransport } from '../../src/slack/outbox.js';
 import { startSlackService } from '../../src/slack/service.js';
@@ -105,13 +106,27 @@ describe.skipIf(!fakeE2E)('Slack workflow with fake agents in a fake workspace',
       memberships[config.channelId] = [config.ownerId];
       const deps: DispatchDeps = {
         config, home,
-        classify: async ({ text }) => {
-          if (text === 'start a project') return { kind: 'clarification', text: 'What should the project do?' };
-          if (text.startsWith('new ')) return { kind: 'unavailable', reason: 'missing_key' };
-          expect(text).toContain('Original request:\nstart a project');
-          expect(text).toContain('Owner clarification:\nbuild a habit tracker');
-          return { kind: 'intent', intent: { intent: 'start_new', description: 'a habit tracker' } };
-        },
+        intentNow: () => clock,
+        classify: (input) => classifyIntent(input, {
+          home,
+          env: input.text.startsWith('new ') ? {} : { ANTHROPIC_API_KEY: 'fake-router-key' },
+          client: () => ({
+            async send(params) {
+              const prompt = String(params.messages[0]?.content);
+              const output = input.text === 'start a project'
+                ? { intent: 'unclear', clarify: 'What should the project do?' }
+                : { intent: 'start_new', description: 'a habit tracker' };
+              if (input.text.includes('Owner clarification:')) {
+                expect(prompt).toContain('Original request:\nstart a project');
+                expect(prompt).toContain('Owner clarification:\nbuild a habit tracker');
+              }
+              return {
+                stop_reason: 'end_turn', content: [{ type: 'text', text: JSON.stringify(output) }],
+                usage: { input_tokens: 900, output_tokens: 60, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+              } as Message;
+            },
+          }),
+        }),
         async postIntentThreadMessage(message) {
           previews.push(message);
           return { ts: `1800000300.${String(previews.length).padStart(6, '0')}` };
@@ -180,7 +195,7 @@ describe.skipIf(!fakeE2E)('Slack workflow with fake agents in a fake workspace',
       await handler.idle();
       expect(requests).toHaveLength(0);
 
-      // 1. A confirmed fallback request starts a spec. The PM questions stay in the job thread.
+      // 1. An expired fallback card is stale. A fresh model-routed card starts the spec.
       outputs.push({ kind: 'questions', questions: ['Who uses it?'] });
       await event({ type: 'app_mention', user: config.ownerId, channel: config.channelId, text: `<@${config.roles.pm.botUserId}> new a habit tracker` });
       await handler.idle();
@@ -189,7 +204,18 @@ describe.skipIf(!fakeE2E)('Slack workflow with fake agents in a fake workspace',
       expect(previews[2]?.text).toContain("Plain English is paused");
       const start = buttonsFor(previews[2]!).find((button) => button.text.text === 'Confirm');
       expect(start).toBeDefined();
+      clock += 30 * 60_000;
       await click('pm', config.channelId, '1800000300.000003', start!.value);
+      await handler.idle();
+      expect(requests).toHaveLength(0);
+      expect(replies.at(-1)).toContain('confirmation expired');
+
+      await event({ type: 'app_mention', user: config.ownerId, channel: config.channelId, text: `<@${config.roles.pm.botUserId}> Please build a habit tracker` });
+      await handler.idle();
+      expect(requests).toHaveLength(0);
+      const modelConfirm = buttonsFor(previews[3]!).find((button) => button.text.text === 'Confirm');
+      expect(modelConfirm).toBeDefined();
+      await click('pm', config.channelId, '1800000300.000004', modelConfirm!.value);
       await handler.idle();
       expect(requests).toHaveLength(1);
       const slug = replies.join('\n').match(/Started project (\S+)/)?.[1];

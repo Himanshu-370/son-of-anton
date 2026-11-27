@@ -131,11 +131,12 @@ describe('plain-English confirmation workflow', () => {
     let now = Date.now();
     const sent: Array<{ channelId: string; threadTs: string; text: string; blocks?: unknown[]; ts: string }> = [];
     const classify = vi.fn<NonNullable<DispatchDeps['classify']>>().mockResolvedValue(intent);
+    const members = vi.fn(async () => [owner.userId]);
     const d = deps({
       classify, intentNow: () => now,
       access: {
         channel: async () => ({ isPrivate: true, isShared: false, isArchived: false, teamId: config.teamId }),
-        members: async () => [owner.userId],
+        members,
       },
       postIntentThreadMessage: async (message) => {
         const ts = `1700000200.${String(sent.length + 1).padStart(6, '0')}`;
@@ -155,7 +156,7 @@ describe('plain-English confirmation workflow', () => {
         source: { role: 'pm', appId: PM_APP, channelId: card.channelId, messageTs: card.ts },
       };
     };
-    return { d, classify, sent, mention, click, advance: (ms: number) => { now += ms; } };
+    return { d, classify, members, sent, mention, click, advance: (ms: number) => { now += ms; } };
   }
 
   it('validates all confirmation identities and cancels the card across button tokens', async () => {
@@ -387,6 +388,36 @@ describe('plain-English confirmation workflow', () => {
     expect(f.classify.mock.calls[2]?.[0].text).toBe('How is it going?');
     expect(f.sent[2]?.text).toMatch(/\bq\b/);
     expect(f.sent[2]?.text).not.toMatch(/\bp\b/);
+  });
+
+  it.each([true, false])('remembers a different project only if the confirmation posts (%s)', async (posted) => {
+    await project('p', { stage: 'paused', pausedFrom: 'build', pauseReason: 'error' });
+    await project('q', { stage: 'paused', pausedFrom: 'build', pauseReason: 'error' });
+    const f = fixture({ kind: 'intent', intent: { intent: 'status' } });
+    f.classify
+      .mockResolvedValueOnce({ kind: 'intent', intent: { intent: 'resume' } })
+      .mockImplementationOnce(async () => {
+        if (!posted) f.members.mockResolvedValueOnce([]);
+        return { kind: 'intent', intent: { intent: 'resume', project: 'q' } };
+      });
+    const parent = f.mention('Resume this project');
+    const follow = (text: string): Extract<SlackAction, { via: 'message' }> => {
+      const event = f.mention(text);
+      return { ...event, source: { ...event.source, threadTs: parent.source.messageTs } };
+    };
+
+    await dispatchSlackAction(parent, f.d);
+    expect(f.sent[0]?.text).toContain('Resume p');
+    await dispatchSlackAction(follow('Resume q instead'), f.d);
+    expect(f.classify.mock.calls[1]?.[0].contextProject).toBe('p');
+    expect(f.sent).toHaveLength(posted ? 2 : 1);
+    if (posted) expect(f.sent[1]?.text).toContain('Resume q');
+
+    await dispatchSlackAction(follow('How is it going?'), f.d);
+    const expectedProject = posted ? 'q' : 'p';
+    expect(f.classify.mock.calls[2]?.[0].contextProject).toBe(expectedProject);
+    expect(f.sent.at(-1)?.text).toMatch(new RegExp('\\b' + expectedProject + '\\b'));
+    expect(spawned).toHaveLength(0);
   });
 
   it('uses one owner clarification in the originating thread and then sends help', async () => {

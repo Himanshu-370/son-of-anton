@@ -21,7 +21,7 @@ import { jobId as jobIdSchema, projectId as projectIdSchema } from './events.js'
 import { sanitizeSlackText } from './inbound.js';
 import type { SpecRoundDeps } from '../core/spec-continuation.js';
 import { cardModal, renderConfirmReview, renderReview, type ModalKind, type ModalView } from './views.js';
-import { claimIntentThreadReply, completeIntentThreadClarification, registerIntentThread } from './intent-threads.js';
+import { claimIntentThreadReply, completeIntentThreadClarification, registerIntentThread, updateIntentThreadProject } from './intent-threads.js';
 import type { classifyIntent, IntentProjectFact, IntentUnavailableReason } from './intent-router.js';
 import type { Intent, IntentResolution } from './intents.js';
 import { answerQuestion, scrub, statusLines, type ChatDeps } from './chat.js';
@@ -541,7 +541,7 @@ const CONFIRM_LABELS = {
 };
 
 async function postConfirmation(
-  a: MessageAction | CardAction, payload: ConfirmationPayload, deps: DispatchDeps, home: string, fallback?: string,
+  a: MessageAction | CardAction, payload: ConfirmationPayload, deps: DispatchDeps, home: string, fallback?: string, onPosted?: () => Promise<void>,
 ): Promise<ActionResult> {
   if (!deps.postIntentThreadMessage) return result('unsupported', 'Confirmation cards are available in anton serve.');
   if (!await confirmationCurrent(payload, deps, home).catch(() => false)) return CONFIRM_STALE;
@@ -637,6 +637,7 @@ async function postConfirmation(
     for (const token of tokens) store.cards[token]!.messageTs = sent.ts;
     return { value: undefined, write: true };
   });
+  await onPosted?.();
   return result('ignored');
 }
 
@@ -856,7 +857,7 @@ async function ownerIntentRoute(a: MessageAction, deps: DispatchDeps, home: stri
   const classifierInput = context?.kind === 'retry'
     ? `Original request:\n${context.originalText}${context.question ? `\n\nPM question:\n${context.question}` : ''}\n\nOwner clarification:\n${text}`
     : text;
-  const classification = await (deps.classify?.({ teamId: a.actor.teamId, requestKey, text: classifierInput, projects: facts })
+  const classification = await (deps.classify?.({ teamId: a.actor.teamId, requestKey, text: classifierInput, contextProject, projects: facts })
     .catch(() => ({ kind: 'unavailable', reason: 'router_error' } as const))
     ?? Promise.resolve({ kind: 'unavailable', reason: 'missing_key' } as const));
   if (classification.kind === 'duplicate') return result('ignored');
@@ -945,13 +946,11 @@ async function ownerIntentRoute(a: MessageAction, deps: DispatchDeps, home: stri
   if (parsed.data.kind === 'spec-answer' || parsed.data.kind === 'spec-retry') {
     payload.specTurn = resolution.specTurn;
   }
-  if (!threadTs) {
-    const registered = await registerIntentThread(binding, { kind: 'context', project }, options);
-    if (!registered) return result('ignored');
-  }
-  const preview = await postConfirmation(a, payload, deps, home, fallback);
-  if (preview.status === 'ignored') await promote(project);
-  return preview;
+  return postConfirmation(a, payload, deps, home, fallback, async () => {
+    if (!threadTs) await registerIntentThread(binding, { kind: 'context', project }, options);
+    if (context?.kind === 'context' && project) await updateIntentThreadProject(binding, project, options);
+    if (context?.kind === 'retry') await promote(project);
+  });
 }
 
 async function postIntentMessage(

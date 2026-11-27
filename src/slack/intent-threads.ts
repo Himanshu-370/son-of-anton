@@ -154,3 +154,18 @@ export async function completeIntentThreadClarification(
     return { value: true, changed: true };
   });
 }
+
+/** Remember the project of a posted confirmation in an active Owner thread. */
+export async function updateIntentThreadProject(
+  binding: IntentThreadBinding, project: string, options: IntentThreadOptions = {},
+): Promise<void> {
+  const identity = bindingSchema.parse(binding);
+  const chosen = projectId.parse(project);
+  await withThreads(identity, options, (_threads, entry) => {
+    if (entry?.ownerId !== identity.ownerId || entry.kind !== 'context' || entry.project === chosen) {
+      return { value: undefined, changed: false };
+    }
+    entry.project = chosen;
+    return { value: undefined, changed: true };
+  });
+}

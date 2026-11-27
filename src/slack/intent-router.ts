@@ -32,6 +32,7 @@ export type IntentRouterInput = {
   teamId: string;
   requestKey: string;
   text: string;
+  contextProject?: string;
   projects: readonly IntentProjectFact[];
 };
 export type IntentRouterDeps = ChatDeps & { loadSecrets?: typeof loadSecrets };
@@ -101,7 +102,10 @@ export async function classifyIntent(input: IntentRouterInput, deps: IntentRoute
     if (Buffer.byteLength(message) > MESSAGE_BYTES) return unavailable('input_too_large');
     const facts = projectFacts(input.projects, secrets);
     const fence = '`'.repeat(3);
-    const user = ['Slack message:', fence, message, fence, 'Project facts:', fence, facts, fence].join('\n');
+    const context = projectId.safeParse(input.contextProject);
+    const contextData = context.success ? escapeFence(scrub(context.data, secrets)) : '(none)';
+    const user = ['Slack message:', fence, message, fence, 'Project facts:', fence, facts, fence,
+      'Context project:', fence, contextData, fence].join('\n');
     const system = `${await loadPrompt('slack-intent.md')}\n\nAvailable intents:\n${intentDescriptions}`;
     const schema = zodOutputFormat(intentSchema).schema;
     const params: MessageCreateParamsNonStreaming = {
